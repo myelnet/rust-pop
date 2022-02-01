@@ -1,5 +1,5 @@
+use crate::graphsync::{Config as GraphsyncConfig, Graphsync};
 use libp2p::futures::StreamExt;
-use libp2p::ping::{Ping, PingConfig};
 use libp2p::swarm::{Swarm, SwarmEvent};
 use libp2p::{
     core, core::muxing::StreamMuxerBox, core::transport::Boxed, identity, mplex, noise, yamux,
@@ -8,7 +8,7 @@ use libp2p::{
 use std::time::Duration;
 
 pub struct Node {
-    swarm: Swarm<Ping>,
+    swarm: Swarm<Graphsync>,
 }
 
 #[derive(Debug)]
@@ -25,7 +25,8 @@ impl Node {
         let transport = build_transport(local_key.clone());
 
         // temp behaviour to be replaced with graphsync
-        let behaviour = Ping::new(PingConfig::new().with_keep_alive(true));
+        // let behaviour = Ping::new(PingConfig::new().with_keep_alive(true));
+        let behaviour = Graphsync::new(GraphsyncConfig::default());
 
         let mut swarm = Swarm::new(transport, behaviour, local_peer_id);
 

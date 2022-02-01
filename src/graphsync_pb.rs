@@ -23,7 +23,7 @@
 /// of protobuf runtime.
 // const _PROTOBUF_VERSION_CHECK: () = ::protobuf::VERSION_2_25_2;
 
-#[derive(PartialEq,Clone,Default)]
+#[derive(PartialEq,Clone,Default,Debug)]
 pub struct Message {
     // message fields
     pub completeRequestList: bool,
@@ -52,38 +52,12 @@ impl Message {
     pub fn get_completeRequestList(&self) -> bool {
         self.completeRequestList
     }
-    pub fn clear_completeRequestList(&mut self) {
-        self.completeRequestList = false;
-    }
-
-    // Param is passed by value, moved
-    pub fn set_completeRequestList(&mut self, v: bool) {
-        self.completeRequestList = v;
-    }
 
     // repeated .graphsync_pb.Message.Request requests = 2;
 
 
     pub fn get_requests(&self) -> &[Message_Request] {
         &self.requests
-    }
-    pub fn clear_requests(&mut self) {
-        self.requests.clear();
-    }
-
-    // Param is passed by value, moved
-    pub fn set_requests(&mut self, v: ::protobuf::RepeatedField<Message_Request>) {
-        self.requests = v;
-    }
-
-    // Mutable pointer to the field.
-    pub fn mut_requests(&mut self) -> &mut ::protobuf::RepeatedField<Message_Request> {
-        &mut self.requests
-    }
-
-    // Take field
-    pub fn take_requests(&mut self) -> ::protobuf::RepeatedField<Message_Request> {
-        ::std::mem::replace(&mut self.requests, ::protobuf::RepeatedField::new())
     }
 
     // repeated .graphsync_pb.Message.Response responses = 3;
@@ -92,48 +66,12 @@ impl Message {
     pub fn get_responses(&self) -> &[Message_Response] {
         &self.responses
     }
-    pub fn clear_responses(&mut self) {
-        self.responses.clear();
-    }
-
-    // Param is passed by value, moved
-    pub fn set_responses(&mut self, v: ::protobuf::RepeatedField<Message_Response>) {
-        self.responses = v;
-    }
-
-    // Mutable pointer to the field.
-    pub fn mut_responses(&mut self) -> &mut ::protobuf::RepeatedField<Message_Response> {
-        &mut self.responses
-    }
-
-    // Take field
-    pub fn take_responses(&mut self) -> ::protobuf::RepeatedField<Message_Response> {
-        ::std::mem::replace(&mut self.responses, ::protobuf::RepeatedField::new())
-    }
 
     // repeated .graphsync_pb.Message.Block data = 4;
 
 
     pub fn get_data(&self) -> &[Message_Block] {
         &self.data
-    }
-    pub fn clear_data(&mut self) {
-        self.data.clear();
-    }
-
-    // Param is passed by value, moved
-    pub fn set_data(&mut self, v: ::protobuf::RepeatedField<Message_Block>) {
-        self.data = v;
-    }
-
-    // Mutable pointer to the field.
-    pub fn mut_data(&mut self) -> &mut ::protobuf::RepeatedField<Message_Block> {
-        &mut self.data
-    }
-
-    // Take field
-    pub fn take_data(&mut self) -> ::protobuf::RepeatedField<Message_Block> {
-        ::std::mem::replace(&mut self.data, ::protobuf::RepeatedField::new())
     }
 }
 
@@ -262,38 +200,6 @@ impl ::protobuf::Message for Message {
         Message::new()
     }
 
-    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
-        static descriptor: ::protobuf::rt::LazyV2<::protobuf::reflect::MessageDescriptor> = ::protobuf::rt::LazyV2::INIT;
-        descriptor.get(|| {
-            let mut fields = ::std::vec::Vec::new();
-            fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeBool>(
-                "completeRequestList",
-                |m: &Message| { &m.completeRequestList },
-                |m: &mut Message| { &mut m.completeRequestList },
-            ));
-            fields.push(::protobuf::reflect::accessor::make_repeated_field_accessor::<_, ::protobuf::types::ProtobufTypeMessage<Message_Request>>(
-                "requests",
-                |m: &Message| { &m.requests },
-                |m: &mut Message| { &mut m.requests },
-            ));
-            fields.push(::protobuf::reflect::accessor::make_repeated_field_accessor::<_, ::protobuf::types::ProtobufTypeMessage<Message_Response>>(
-                "responses",
-                |m: &Message| { &m.responses },
-                |m: &mut Message| { &mut m.responses },
-            ));
-            fields.push(::protobuf::reflect::accessor::make_repeated_field_accessor::<_, ::protobuf::types::ProtobufTypeMessage<Message_Block>>(
-                "data",
-                |m: &Message| { &m.data },
-                |m: &mut Message| { &mut m.data },
-            ));
-            ::protobuf::reflect::MessageDescriptor::new_pb_name::<Message>(
-                "Message",
-                fields,
-                file_descriptor_proto()
-            )
-        })
-    }
-
     fn default_instance() -> &'static Message {
         static instance: ::protobuf::rt::LazyV2<Message> = ::protobuf::rt::LazyV2::INIT;
         instance.get(Message::new)
@@ -310,19 +216,13 @@ impl ::protobuf::Clear for Message {
     }
 }
 
-impl ::std::fmt::Debug for Message {
-    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-        ::protobuf::text_format::fmt(self, f)
-    }
-}
-
 impl ::protobuf::reflect::ProtobufValue for Message {
     fn as_ref(&self) -> ::protobuf::reflect::ReflectValueRef {
         ::protobuf::reflect::ReflectValueRef::Message(self)
     }
 }
 
-#[derive(PartialEq,Clone,Default)]
+#[derive(PartialEq,Clone,Default,Debug)]
 pub struct Message_Request {
     // message fields
     pub id: i32,
@@ -354,39 +254,12 @@ impl Message_Request {
     pub fn get_id(&self) -> i32 {
         self.id
     }
-    pub fn clear_id(&mut self) {
-        self.id = 0;
-    }
-
-    // Param is passed by value, moved
-    pub fn set_id(&mut self, v: i32) {
-        self.id = v;
-    }
 
     // bytes root = 2;
 
 
     pub fn get_root(&self) -> &[u8] {
         &self.root
-    }
-    pub fn clear_root(&mut self) {
-        self.root.clear();
-    }
-
-    // Param is passed by value, moved
-    pub fn set_root(&mut self, v: ::std::vec::Vec<u8>) {
-        self.root = v;
-    }
-
-    // Mutable pointer to the field.
-    // If field is not initialized, it is initialized with default value first.
-    pub fn mut_root(&mut self) -> &mut ::std::vec::Vec<u8> {
-        &mut self.root
-    }
-
-    // Take field
-    pub fn take_root(&mut self) -> ::std::vec::Vec<u8> {
-        ::std::mem::replace(&mut self.root, ::std::vec::Vec::new())
     }
 
     // bytes selector = 3;
@@ -395,49 +268,12 @@ impl Message_Request {
     pub fn get_selector(&self) -> &[u8] {
         &self.selector
     }
-    pub fn clear_selector(&mut self) {
-        self.selector.clear();
-    }
-
-    // Param is passed by value, moved
-    pub fn set_selector(&mut self, v: ::std::vec::Vec<u8>) {
-        self.selector = v;
-    }
-
-    // Mutable pointer to the field.
-    // If field is not initialized, it is initialized with default value first.
-    pub fn mut_selector(&mut self) -> &mut ::std::vec::Vec<u8> {
-        &mut self.selector
-    }
-
-    // Take field
-    pub fn take_selector(&mut self) -> ::std::vec::Vec<u8> {
-        ::std::mem::replace(&mut self.selector, ::std::vec::Vec::new())
-    }
 
     // repeated .graphsync_pb.Message.Request.ExtensionsEntry extensions = 4;
 
 
     pub fn get_extensions(&self) -> &::std::collections::HashMap<::std::string::String, ::std::vec::Vec<u8>> {
         &self.extensions
-    }
-    pub fn clear_extensions(&mut self) {
-        self.extensions.clear();
-    }
-
-    // Param is passed by value, moved
-    pub fn set_extensions(&mut self, v: ::std::collections::HashMap<::std::string::String, ::std::vec::Vec<u8>>) {
-        self.extensions = v;
-    }
-
-    // Mutable pointer to the field.
-    pub fn mut_extensions(&mut self) -> &mut ::std::collections::HashMap<::std::string::String, ::std::vec::Vec<u8>> {
-        &mut self.extensions
-    }
-
-    // Take field
-    pub fn take_extensions(&mut self) -> ::std::collections::HashMap<::std::string::String, ::std::vec::Vec<u8>> {
-        ::std::mem::replace(&mut self.extensions, ::std::collections::HashMap::new())
     }
 
     // int32 priority = 5;
@@ -446,14 +282,6 @@ impl Message_Request {
     pub fn get_priority(&self) -> i32 {
         self.priority
     }
-    pub fn clear_priority(&mut self) {
-        self.priority = 0;
-    }
-
-    // Param is passed by value, moved
-    pub fn set_priority(&mut self, v: i32) {
-        self.priority = v;
-    }
 
     // bool cancel = 6;
 
@@ -461,28 +289,12 @@ impl Message_Request {
     pub fn get_cancel(&self) -> bool {
         self.cancel
     }
-    pub fn clear_cancel(&mut self) {
-        self.cancel = false;
-    }
-
-    // Param is passed by value, moved
-    pub fn set_cancel(&mut self, v: bool) {
-        self.cancel = v;
-    }
 
     // bool update = 7;
 
 
     pub fn get_update(&self) -> bool {
         self.update
-    }
-    pub fn clear_update(&mut self) {
-        self.update = false;
-    }
-
-    // Param is passed by value, moved
-    pub fn set_update(&mut self, v: bool) {
-        self.update = v;
     }
 }
 
@@ -622,53 +434,6 @@ impl ::protobuf::Message for Message_Request {
         Message_Request::new()
     }
 
-    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
-        static descriptor: ::protobuf::rt::LazyV2<::protobuf::reflect::MessageDescriptor> = ::protobuf::rt::LazyV2::INIT;
-        descriptor.get(|| {
-            let mut fields = ::std::vec::Vec::new();
-            fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeInt32>(
-                "id",
-                |m: &Message_Request| { &m.id },
-                |m: &mut Message_Request| { &mut m.id },
-            ));
-            fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeBytes>(
-                "root",
-                |m: &Message_Request| { &m.root },
-                |m: &mut Message_Request| { &mut m.root },
-            ));
-            fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeBytes>(
-                "selector",
-                |m: &Message_Request| { &m.selector },
-                |m: &mut Message_Request| { &mut m.selector },
-            ));
-            fields.push(::protobuf::reflect::accessor::make_map_accessor::<_, ::protobuf::types::ProtobufTypeString, ::protobuf::types::ProtobufTypeBytes>(
-                "extensions",
-                |m: &Message_Request| { &m.extensions },
-                |m: &mut Message_Request| { &mut m.extensions },
-            ));
-            fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeInt32>(
-                "priority",
-                |m: &Message_Request| { &m.priority },
-                |m: &mut Message_Request| { &mut m.priority },
-            ));
-            fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeBool>(
-                "cancel",
-                |m: &Message_Request| { &m.cancel },
-                |m: &mut Message_Request| { &mut m.cancel },
-            ));
-            fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeBool>(
-                "update",
-                |m: &Message_Request| { &m.update },
-                |m: &mut Message_Request| { &mut m.update },
-            ));
-            ::protobuf::reflect::MessageDescriptor::new_pb_name::<Message_Request>(
-                "Message.Request",
-                fields,
-                file_descriptor_proto()
-            )
-        })
-    }
-
     fn default_instance() -> &'static Message_Request {
         static instance: ::protobuf::rt::LazyV2<Message_Request> = ::protobuf::rt::LazyV2::INIT;
         instance.get(Message_Request::new)
@@ -688,19 +453,13 @@ impl ::protobuf::Clear for Message_Request {
     }
 }
 
-impl ::std::fmt::Debug for Message_Request {
-    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-        ::protobuf::text_format::fmt(self, f)
-    }
-}
-
 impl ::protobuf::reflect::ProtobufValue for Message_Request {
     fn as_ref(&self) -> ::protobuf::reflect::ReflectValueRef {
         ::protobuf::reflect::ReflectValueRef::Message(self)
     }
 }
 
-#[derive(PartialEq,Clone,Default)]
+#[derive(PartialEq,Clone,Default,Debug)]
 pub struct Message_Response {
     // message fields
     pub id: i32,
@@ -728,14 +487,6 @@ impl Message_Response {
     pub fn get_id(&self) -> i32 {
         self.id
     }
-    pub fn clear_id(&mut self) {
-        self.id = 0;
-    }
-
-    // Param is passed by value, moved
-    pub fn set_id(&mut self, v: i32) {
-        self.id = v;
-    }
 
     // int32 status = 2;
 
@@ -743,38 +494,12 @@ impl Message_Response {
     pub fn get_status(&self) -> i32 {
         self.status
     }
-    pub fn clear_status(&mut self) {
-        self.status = 0;
-    }
-
-    // Param is passed by value, moved
-    pub fn set_status(&mut self, v: i32) {
-        self.status = v;
-    }
 
     // repeated .graphsync_pb.Message.Response.ExtensionsEntry extensions = 3;
 
 
     pub fn get_extensions(&self) -> &::std::collections::HashMap<::std::string::String, ::std::vec::Vec<u8>> {
         &self.extensions
-    }
-    pub fn clear_extensions(&mut self) {
-        self.extensions.clear();
-    }
-
-    // Param is passed by value, moved
-    pub fn set_extensions(&mut self, v: ::std::collections::HashMap<::std::string::String, ::std::vec::Vec<u8>>) {
-        self.extensions = v;
-    }
-
-    // Mutable pointer to the field.
-    pub fn mut_extensions(&mut self) -> &mut ::std::collections::HashMap<::std::string::String, ::std::vec::Vec<u8>> {
-        &mut self.extensions
-    }
-
-    // Take field
-    pub fn take_extensions(&mut self) -> ::std::collections::HashMap<::std::string::String, ::std::vec::Vec<u8>> {
-        ::std::mem::replace(&mut self.extensions, ::std::collections::HashMap::new())
     }
 }
 
@@ -870,33 +595,6 @@ impl ::protobuf::Message for Message_Response {
         Message_Response::new()
     }
 
-    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
-        static descriptor: ::protobuf::rt::LazyV2<::protobuf::reflect::MessageDescriptor> = ::protobuf::rt::LazyV2::INIT;
-        descriptor.get(|| {
-            let mut fields = ::std::vec::Vec::new();
-            fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeInt32>(
-                "id",
-                |m: &Message_Response| { &m.id },
-                |m: &mut Message_Response| { &mut m.id },
-            ));
-            fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeInt32>(
-                "status",
-                |m: &Message_Response| { &m.status },
-                |m: &mut Message_Response| { &mut m.status },
-            ));
-            fields.push(::protobuf::reflect::accessor::make_map_accessor::<_, ::protobuf::types::ProtobufTypeString, ::protobuf::types::ProtobufTypeBytes>(
-                "extensions",
-                |m: &Message_Response| { &m.extensions },
-                |m: &mut Message_Response| { &mut m.extensions },
-            ));
-            ::protobuf::reflect::MessageDescriptor::new_pb_name::<Message_Response>(
-                "Message.Response",
-                fields,
-                file_descriptor_proto()
-            )
-        })
-    }
-
     fn default_instance() -> &'static Message_Response {
         static instance: ::protobuf::rt::LazyV2<Message_Response> = ::protobuf::rt::LazyV2::INIT;
         instance.get(Message_Response::new)
@@ -912,19 +610,13 @@ impl ::protobuf::Clear for Message_Response {
     }
 }
 
-impl ::std::fmt::Debug for Message_Response {
-    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-        ::protobuf::text_format::fmt(self, f)
-    }
-}
-
 impl ::protobuf::reflect::ProtobufValue for Message_Response {
     fn as_ref(&self) -> ::protobuf::reflect::ReflectValueRef {
         ::protobuf::reflect::ReflectValueRef::Message(self)
     }
 }
 
-#[derive(PartialEq,Clone,Default)]
+#[derive(PartialEq,Clone,Default,Debug)]
 pub struct Message_Block {
     // message fields
     pub prefix: ::std::vec::Vec<u8>,
@@ -951,50 +643,12 @@ impl Message_Block {
     pub fn get_prefix(&self) -> &[u8] {
         &self.prefix
     }
-    pub fn clear_prefix(&mut self) {
-        self.prefix.clear();
-    }
-
-    // Param is passed by value, moved
-    pub fn set_prefix(&mut self, v: ::std::vec::Vec<u8>) {
-        self.prefix = v;
-    }
-
-    // Mutable pointer to the field.
-    // If field is not initialized, it is initialized with default value first.
-    pub fn mut_prefix(&mut self) -> &mut ::std::vec::Vec<u8> {
-        &mut self.prefix
-    }
-
-    // Take field
-    pub fn take_prefix(&mut self) -> ::std::vec::Vec<u8> {
-        ::std::mem::replace(&mut self.prefix, ::std::vec::Vec::new())
-    }
 
     // bytes data = 2;
 
 
     pub fn get_data(&self) -> &[u8] {
         &self.data
-    }
-    pub fn clear_data(&mut self) {
-        self.data.clear();
-    }
-
-    // Param is passed by value, moved
-    pub fn set_data(&mut self, v: ::std::vec::Vec<u8>) {
-        self.data = v;
-    }
-
-    // Mutable pointer to the field.
-    // If field is not initialized, it is initialized with default value first.
-    pub fn mut_data(&mut self) -> &mut ::std::vec::Vec<u8> {
-        &mut self.data
-    }
-
-    // Take field
-    pub fn take_data(&mut self) -> ::std::vec::Vec<u8> {
-        ::std::mem::replace(&mut self.data, ::std::vec::Vec::new())
     }
 }
 
@@ -1077,28 +731,6 @@ impl ::protobuf::Message for Message_Block {
         Message_Block::new()
     }
 
-    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
-        static descriptor: ::protobuf::rt::LazyV2<::protobuf::reflect::MessageDescriptor> = ::protobuf::rt::LazyV2::INIT;
-        descriptor.get(|| {
-            let mut fields = ::std::vec::Vec::new();
-            fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeBytes>(
-                "prefix",
-                |m: &Message_Block| { &m.prefix },
-                |m: &mut Message_Block| { &mut m.prefix },
-            ));
-            fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeBytes>(
-                "data",
-                |m: &Message_Block| { &m.data },
-                |m: &mut Message_Block| { &mut m.data },
-            ));
-            ::protobuf::reflect::MessageDescriptor::new_pb_name::<Message_Block>(
-                "Message.Block",
-                fields,
-                file_descriptor_proto()
-            )
-        })
-    }
-
     fn default_instance() -> &'static Message_Block {
         static instance: ::protobuf::rt::LazyV2<Message_Block> = ::protobuf::rt::LazyV2::INIT;
         instance.get(Message_Block::new)
@@ -1113,50 +745,8 @@ impl ::protobuf::Clear for Message_Block {
     }
 }
 
-impl ::std::fmt::Debug for Message_Block {
-    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-        ::protobuf::text_format::fmt(self, f)
-    }
-}
-
 impl ::protobuf::reflect::ProtobufValue for Message_Block {
     fn as_ref(&self) -> ::protobuf::reflect::ReflectValueRef {
         ::protobuf::reflect::ReflectValueRef::Message(self)
     }
-}
-
-static file_descriptor_proto_data: &'static [u8] = b"\
-    \n\x12graphsync_pb.proto\x12\x0cgraphsync_pb\"\x84\x06\n\x07Message\x120\
-    \n\x13completeRequestList\x18\x01\x20\x01(\x08R\x13completeRequestList\
-    \x129\n\x08requests\x18\x02\x20\x03(\x0b2\x1d.graphsync_pb.Message.Reque\
-    stR\x08requests\x12<\n\tresponses\x18\x03\x20\x03(\x0b2\x1e.graphsync_pb\
-    .Message.ResponseR\tresponses\x12/\n\x04data\x18\x04\x20\x03(\x0b2\x1b.g\
-    raphsync_pb.Message.BlockR\x04data\x1a\xa3\x02\n\x07Request\x12\x0e\n\
-    \x02id\x18\x01\x20\x01(\x05R\x02id\x12\x12\n\x04root\x18\x02\x20\x01(\
-    \x0cR\x04root\x12\x1a\n\x08selector\x18\x03\x20\x01(\x0cR\x08selector\
-    \x12M\n\nextensions\x18\x04\x20\x03(\x0b2-.graphsync_pb.Message.Request.\
-    ExtensionsEntryR\nextensions\x12\x1a\n\x08priority\x18\x05\x20\x01(\x05R\
-    \x08priority\x12\x16\n\x06cancel\x18\x06\x20\x01(\x08R\x06cancel\x12\x16\
-    \n\x06update\x18\x07\x20\x01(\x08R\x06update\x1a=\n\x0fExtensionsEntry\
-    \x12\x10\n\x03key\x18\x01\x20\x01(\tR\x03key\x12\x14\n\x05value\x18\x02\
-    \x20\x01(\x0cR\x05value:\x028\x01\x1a\xc1\x01\n\x08Response\x12\x0e\n\
-    \x02id\x18\x01\x20\x01(\x05R\x02id\x12\x16\n\x06status\x18\x02\x20\x01(\
-    \x05R\x06status\x12N\n\nextensions\x18\x03\x20\x03(\x0b2..graphsync_pb.M\
-    essage.Response.ExtensionsEntryR\nextensions\x1a=\n\x0fExtensionsEntry\
-    \x12\x10\n\x03key\x18\x01\x20\x01(\tR\x03key\x12\x14\n\x05value\x18\x02\
-    \x20\x01(\x0cR\x05value:\x028\x01\x1a3\n\x05Block\x12\x16\n\x06prefix\
-    \x18\x01\x20\x01(\x0cR\x06prefix\x12\x12\n\x04data\x18\x02\x20\x01(\x0cR\
-    \x04datab\x06proto3\
-";
-
-static file_descriptor_proto_lazy: ::protobuf::rt::LazyV2<::protobuf::descriptor::FileDescriptorProto> = ::protobuf::rt::LazyV2::INIT;
-
-fn parse_descriptor_proto() -> ::protobuf::descriptor::FileDescriptorProto {
-    ::protobuf::Message::parse_from_bytes(file_descriptor_proto_data).unwrap()
-}
-
-pub fn file_descriptor_proto() -> &'static ::protobuf::descriptor::FileDescriptorProto {
-    file_descriptor_proto_lazy.get(|| {
-        parse_descriptor_proto()
-    })
 }

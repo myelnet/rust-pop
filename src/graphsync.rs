@@ -1,69 +1,177 @@
 use crate::graphsync_pb as pb;
 use crate::traversal::{Cbor, Error as EncodingError, Selector};
-use async_trait::async_trait;
-use bytes::Bytes;
 use fnv::FnvHashMap;
-use futures::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use futures::future::BoxFuture;
+use futures::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
+use futures::task::{Context, Poll};
 use integer_encoding::{VarIntReader, VarIntWriter};
 use libipld::cid::Version;
 use libipld::multihash::{Code, Multihash, MultihashDigest};
-use libipld::store::StoreParams;
 use libipld::Cid;
-use libp2p::core::PeerId;
-use libp2p::request_response::{ProtocolName, RequestResponseCodec};
+use libp2p::core::connection::ConnectionId;
+use libp2p::core::{upgrade, InboundUpgrade, OutboundUpgrade, PeerId, UpgradeInfo};
+use libp2p::swarm::{
+    NetworkBehaviour, NetworkBehaviourAction, NotifyHandler, OneShotHandler, PollParameters,
+};
 use protobuf::Message as PBMessage;
-use std::collections::HashMap;
-use std::io::{self, Cursor, Write};
-use std::marker::PhantomData;
-use unsigned_varint::{aio, codec, io::ReadError};
+use std::borrow::Cow;
+use std::collections::{HashMap, VecDeque};
+use std::io::{self, Cursor};
+use std::iter;
 
-// version codec hash size (u64 varint is max 10 bytes) + digest
-const MAX_CID_SIZE: usize = 4 * 10 + 64;
+const MAX_BUF_SIZE: usize = 524_288;
 
 #[derive(Debug, Clone)]
-pub struct GraphsyncProtocol;
-
-impl ProtocolName for GraphsyncProtocol {
-    fn protocol_name(&self) -> &[u8] {
-        b"/ipfs/graphsync/1.0.0"
-    }
+pub struct GraphsyncProtocol {
+    protocol_id: Cow<'static, [u8]>,
+    max_transmit_size: usize,
 }
 
-#[derive(Clone)]
-pub struct GraphsyncCodec<P> {
-    _marker: PhantomData<P>,
-    buffer: Vec<u8>,
-}
-
-impl<P: StoreParams> Default for GraphsyncCodec<P> {
+impl Default for GraphsyncProtocol {
     fn default() -> Self {
-        let capacity = usize::max(P::MAX_BLOCK_SIZE, MAX_CID_SIZE) + 1;
-        debug_assert!(capacity <= u32::MAX as usize);
         Self {
-            _marker: PhantomData,
-            buffer: Vec::with_capacity(capacity),
+            protocol_id: Cow::Borrowed(b"/ipfs/graphsync/1.0.0"),
+            max_transmit_size: MAX_BUF_SIZE,
         }
     }
 }
 
-#[async_trait]
-impl<P: StoreParams> RequestResponseCodec for GraphsyncCodec<P> {
-    type Protocol = GraphsyncProtocol;
-    type Request = GraphsyncMessage;
-    type Response = GraphsyncMessage;
+impl GraphsyncProtocol {
+    pub fn new(id: impl Into<Cow<'static, [u8]>>, max_transmit_size: usize) -> Self {
+        Self {
+            protocol_id: id.into(),
+            max_transmit_size,
+        }
+    }
+}
 
-    async fn read_request<T>(&mut self, _: &Self::Protocol, io: &mut T) -> io::Result<Self::Request>
-    where
-        T: AsyncRead + Send + Unpin,
-    {
-        let msg_len = u32_to_usize(aio::read_u32(&mut *io).await.map_err(|e| match e {
-            ReadError::Io(e) => e,
-            err => other(err),
-        })?);
-        self.buffer.resize(msg_len, 0);
-        io.read_exact(&mut self.buffer).await?;
-        let request = GraphsyncMessage::from_bytes(&self.buffer).map_err(invalid_data)?;
-        Ok(request)
+impl UpgradeInfo for GraphsyncProtocol {
+    type Info = Cow<'static, [u8]>;
+    type InfoIter = iter::Once<Self::Info>;
+
+    fn protocol_info(&self) -> Self::InfoIter {
+        iter::once(self.protocol_id.clone())
+    }
+}
+
+impl<TSocket> InboundUpgrade<TSocket> for GraphsyncProtocol
+where
+    TSocket: AsyncRead + AsyncWrite + Send + Unpin + 'static,
+{
+    type Output = InboundMessage;
+    type Error = EncodingError;
+    type Future = BoxFuture<'static, Result<Self::Output, Self::Error>>;
+
+    fn upgrade_inbound(self, mut socket: TSocket, _info: Self::Info) -> Self::Future {
+        Box::pin(async move {
+            let packet = upgrade::read_length_prefixed(&mut socket, self.max_transmit_size)
+                .await
+                .map_err(other)?;
+            socket.close().await?;
+            let message = GraphsyncMessage::from_bytes(&packet)?;
+            Ok(InboundMessage(message))
+        })
+    }
+}
+
+#[derive(Debug)]
+pub struct InboundMessage(GraphsyncMessage);
+
+impl From<()> for InboundMessage {
+    fn from(_: ()) -> Self {
+        Self(Default::default())
+    }
+}
+
+#[derive(Debug)]
+pub enum GraphsyncEvent {
+    Progress(RequestId),
+    Complete(RequestId, Result<(), EncodingError>),
+}
+
+#[derive(Clone)]
+pub struct Config {
+    pub protocol_id: Cow<'static, [u8]>,
+}
+
+impl Config {
+    pub fn new(id: impl Into<Cow<'static, [u8]>>) -> Self {
+        Self {
+            protocol_id: id.into(),
+        }
+    }
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            protocol_id: Cow::Borrowed(b"/ipfs/graphsync/1.0.0"),
+        }
+    }
+}
+
+pub struct Graphsync {
+    config: Config,
+    request_manager: RequestManager,
+}
+
+impl Graphsync {
+    pub fn new(config: Config) -> Self {
+        Self {
+            config,
+            request_manager: Default::default(),
+        }
+    }
+    pub fn request(&mut self, peer_id: PeerId, root: Cid, selector: Selector) -> RequestId {
+        self.request_manager.start_request(peer_id, root, selector)
+    }
+}
+
+impl Default for Graphsync {
+    fn default() -> Self {
+        Self::new(Config::default())
+    }
+}
+
+impl NetworkBehaviour for Graphsync {
+    type ProtocolsHandler = OneShotHandler<GraphsyncProtocol, GraphsyncMessage, InboundMessage>;
+    type OutEvent = GraphsyncEvent;
+
+    fn new_handler(&mut self) -> Self::ProtocolsHandler {
+        OneShotHandler::default()
+    }
+
+    fn inject_event(&mut self, peer_id: PeerId, conn: ConnectionId, event: InboundMessage) {}
+    fn poll(
+        &mut self,
+        _: &mut Context,
+        _: &mut impl PollParameters,
+    ) -> Poll<NetworkBehaviourAction<Self::OutEvent, Self::ProtocolsHandler>> {
+        let mut exit = false;
+        while !exit {
+            exit = true;
+            while let Some(event) = self.request_manager.next() {
+                exit = false;
+                match event {
+                    RequestEvent::NewRequest(req) => {
+                        return Poll::Ready(NetworkBehaviourAction::NotifyHandler {
+                            peer_id: req.responder,
+                            handler: NotifyHandler::Any,
+                            event: GraphsyncMessage::from(req),
+                        });
+                    }
+                    RequestEvent::BlockReceived(req_id) => {
+                        let event = GraphsyncEvent::Progress(req_id);
+                        return Poll::Ready(NetworkBehaviourAction::GenerateEvent(event));
+                    }
+                    RequestEvent::Complete(req_id, res) => {
+                        let event = GraphsyncEvent::Complete(req_id, res);
+                        return Poll::Ready(NetworkBehaviourAction::GenerateEvent(event));
+                    }
+                }
+            }
+        }
+        Poll::Pending
     }
 }
 
@@ -78,18 +186,30 @@ pub struct GraphsyncRequest {
     pub extensions: Extensions,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct GraphsyncResponse {
     pub id: RequestId,
     pub status: ResponseStatusCode,
     pub extensions: Extensions,
 }
 
+#[derive(Debug, PartialEq, Clone)]
 pub struct GraphsyncMessage {
+    protocol_id: Cow<'static, [u8]>,
     requests: FnvHashMap<RequestId, GraphsyncRequest>,
     responses: FnvHashMap<RequestId, GraphsyncResponse>,
-    blocks: HashMap<Cid, Vec<u8>>,
-    pub(crate) length_codec: codec::UviBytes,
+    blocks: HashMap<Vec<u8>, Vec<u8>>,
+}
+
+impl Default for GraphsyncMessage {
+    fn default() -> Self {
+        Self {
+            protocol_id: Cow::Borrowed(b"/ipfs/graphsync/1.0.0"),
+            requests: Default::default(),
+            responses: Default::default(),
+            blocks: Default::default(),
+        }
+    }
 }
 
 impl GraphsyncMessage {
@@ -101,6 +221,33 @@ impl GraphsyncMessage {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, EncodingError> {
         let pbmsg = pb::Message::parse_from_bytes(bytes)?;
         Ok(GraphsyncMessage::try_from(pbmsg)?)
+    }
+}
+
+impl UpgradeInfo for GraphsyncMessage {
+    type Info = Cow<'static, [u8]>;
+    type InfoIter = iter::Once<Self::Info>;
+
+    fn protocol_info(&self) -> Self::InfoIter {
+        iter::once(self.protocol_id.clone())
+    }
+}
+
+impl<TSocket> OutboundUpgrade<TSocket> for GraphsyncMessage
+where
+    TSocket: AsyncRead + AsyncWrite + Send + Unpin + 'static,
+{
+    type Output = ();
+    type Error = EncodingError;
+    type Future = BoxFuture<'static, Result<Self::Output, Self::Error>>;
+
+    fn upgrade_outbound(self, mut socket: TSocket, _info: Self::Info) -> Self::Future {
+        Box::pin(async move {
+            let bytes = self.to_bytes()?;
+            upgrade::write_length_prefixed(&mut socket, bytes).await?;
+            socket.close().await?;
+            Ok(())
+        })
     }
 }
 
@@ -136,9 +283,9 @@ impl TryFrom<GraphsyncMessage> for pb::Message {
         let data: protobuf::RepeatedField<_> = msg
             .blocks
             .into_iter()
-            .map(|(cid, data)| pb::Message_Block {
+            .map(|(prefix, data)| pb::Message_Block {
                 data,
-                prefix: Prefix::from(cid).to_bytes(),
+                prefix,
                 ..Default::default()
             })
             .collect();
@@ -189,41 +336,76 @@ impl TryFrom<pb::Message> for GraphsyncMessage {
         let blocks: HashMap<_, _> = msg
             .data
             .into_iter()
-            .map(|block| {
-                let prefix = Prefix::new_from_bytes(&block.prefix)?;
-                let cid = prefix.to_cid(&block.data)?;
-                Ok((cid, block.data))
-            })
-            .collect::<Result<_, Self::Error>>()?;
-
-        let mut length_codec = codec::UviBytes::default();
-        length_codec.set_max_len(2048);
+            .map(|block| (block.prefix, block.data))
+            .collect();
 
         Ok(GraphsyncMessage {
+            protocol_id: Cow::Borrowed(b"/ipfs/graphsync/1.0.0"),
             requests,
             responses,
             blocks,
-            length_codec,
         })
+    }
+}
+
+impl From<Request> for GraphsyncMessage {
+    fn from(req: Request) -> Self {
+        let mut msg = Self::default();
+        msg.requests.insert(
+            req.id,
+            GraphsyncRequest {
+                id: req.id,
+                root: req.root,
+                selector: req.selector,
+                extensions: Default::default(),
+            },
+        );
+        return msg;
     }
 }
 
 pub type RequestId = i32;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Request {
-    pub id: RequestId,
-    pub root: Cid,
-    pub selector: Selector,
+    id: RequestId,
+    root: Cid,
+    selector: Selector,
+    responder: PeerId,
+}
+
+#[derive(Debug)]
+pub enum RequestEvent {
+    NewRequest(Request),
+    BlockReceived(RequestId),
+    Complete(RequestId, Result<(), EncodingError>),
 }
 
 #[derive(Default)]
 pub struct RequestManager {
-    id_counter: u64,
+    id_counter: i32,
     requests: FnvHashMap<RequestId, Request>,
+    events: VecDeque<RequestEvent>,
 }
 
-impl RequestManager {}
+impl RequestManager {
+    fn start_request(&mut self, responder: PeerId, root: Cid, selector: Selector) -> RequestId {
+        let id = self.id_counter;
+        self.id_counter += 1;
+        let req = Request {
+            id,
+            root,
+            selector,
+            responder,
+        };
+        self.requests.insert(id, req.clone());
+        self.events.push_back(RequestEvent::NewRequest(req.clone()));
+        id
+    }
+    pub fn next(&mut self) -> Option<RequestEvent> {
+        self.events.pop_front()
+    }
+}
 
 #[derive(PartialEq, Clone, Copy, Eq, Debug)]
 pub enum ResponseStatusCode {
@@ -238,6 +420,7 @@ pub enum ResponseStatusCode {
     RequestFailedLegal,
     RequestFailedContentNotFound,
     RequestCancelled,
+    Other(i32),
 }
 
 impl ResponseStatusCode {
@@ -254,6 +437,7 @@ impl ResponseStatusCode {
             Self::RequestFailedLegal => 33,
             Self::RequestFailedContentNotFound => 34,
             Self::RequestCancelled => 35,
+            Self::Other(code) => code,
         }
     }
     pub fn from_i32(code: i32) -> Self {
@@ -269,21 +453,13 @@ impl ResponseStatusCode {
             33 => Self::RequestFailedLegal,
             34 => Self::RequestFailedContentNotFound,
             35 => Self::RequestCancelled,
+            _ => Self::Other(code),
         }
     }
 }
 
-#[cfg(any(target_pointer_width = "64", target_pointer_width = "32"))]
-fn u32_to_usize(n: u32) -> usize {
-    n as usize
-}
-
 fn other<E: std::error::Error + Send + Sync + 'static>(e: E) -> io::Error {
     io::Error::new(io::ErrorKind::Other, e)
-}
-
-fn invalid_data<E: std::error::Error + Send + Sync + 'static>(e: E) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, e)
 }
 
 #[derive(PartialEq, Eq, Clone, Debug)]
@@ -339,5 +515,75 @@ impl From<Cid> for Prefix {
             mh_type: cid.hash().code(),
             mh_len: cid.hash().size().into(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::traversal::{RecursionLimit, Selector};
+    use hex;
+    use std::str::FromStr;
+
+    #[test]
+    fn proto_msg_roundtrip() {
+        let selector = Selector::ExploreRecursive {
+            limit: RecursionLimit::None,
+            sequence: Box::new(Selector::ExploreAll {
+                next: Box::new(Selector::ExploreRecursiveEdge),
+            }),
+            current: None,
+        };
+        let req = Request {
+            id: 1,
+            root: Cid::try_from("bafybeibubcd33ndrrmldf2tb4n77vkydszybg53zopwwxrfwwxrd5dl7c4")
+                .unwrap(),
+            selector,
+            responder: PeerId::from_str("12D3KooWHFrmLWTTDD4NodngtRMEVYgxrsDMp4F9iSwYntZ9WjHa")
+                .unwrap(),
+        };
+
+        let msg = GraphsyncMessage::try_from(req).unwrap();
+
+        let msgc = msg.clone();
+        let msgEncoded = msg.to_bytes().unwrap();
+
+        let desMsg = GraphsyncMessage::from_bytes(&msgEncoded).unwrap();
+
+        assert_eq!(msgc, desMsg)
+    }
+
+    #[test]
+    fn proto_msg_compat() {
+        // request encoded from JS implementation
+        let jsHex = hex::decode("124a0801122401701220340887bdb4718b1632ea61e37ffaab03967013777973ed6bc4b6b5e23e8d7f171a1aa16152a2616ca1646e6f6e65a0623a3ea16161a1613ea16140a0280030003800").unwrap();
+        // request encoded from go implementation
+        let goHex = hex::decode("12440801122401701220340887bdb4718b1632ea61e37ffaab03967013777973ed6bc4b6b5e23e8d7f171a1aa16152a2616ca1646e6f6e65a0623a3ea16161a1613ea16140a0").unwrap();
+
+        let selector = Selector::ExploreRecursive {
+            limit: RecursionLimit::None,
+            sequence: Box::new(Selector::ExploreAll {
+                next: Box::new(Selector::ExploreRecursiveEdge),
+            }),
+            current: None,
+        };
+        let req = Request {
+            id: 1,
+            root: Cid::try_from("bafybeibubcd33ndrrmldf2tb4n77vkydszybg53zopwwxrfwwxrd5dl7c4")
+                .unwrap(),
+            selector,
+            responder: PeerId::from_str("12D3KooWHFrmLWTTDD4NodngtRMEVYgxrsDMp4F9iSwYntZ9WjHa")
+                .unwrap(),
+        };
+
+        let msg = GraphsyncMessage::try_from(req).unwrap();
+
+        let jsDesMsg = GraphsyncMessage::from_bytes(&jsHex).unwrap();
+
+        assert_eq!(msg, jsDesMsg);
+
+        let goDesMsg = GraphsyncMessage::from_bytes(&goHex).unwrap();
+
+        assert_eq!(msg, jsDesMsg)
     }
 }

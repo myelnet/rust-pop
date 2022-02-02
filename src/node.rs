@@ -1,4 +1,6 @@
 use crate::graphsync::{Config as GraphsyncConfig, Graphsync};
+use libipld::mem::MemStore;
+use libipld::DefaultParams;
 use libp2p::futures::StreamExt;
 use libp2p::swarm::{Swarm, SwarmEvent};
 use libp2p::{
@@ -8,7 +10,7 @@ use libp2p::{
 use std::time::Duration;
 
 pub struct Node {
-    swarm: Swarm<Graphsync>,
+    swarm: Swarm<Graphsync<MemStore<DefaultParams>>>,
 }
 
 #[derive(Debug)]
@@ -24,9 +26,10 @@ impl Node {
 
         let transport = build_transport(local_key.clone());
 
+        let store = MemStore::<DefaultParams>::default();
         // temp behaviour to be replaced with graphsync
         // let behaviour = Ping::new(PingConfig::new().with_keep_alive(true));
-        let behaviour = Graphsync::new(GraphsyncConfig::default());
+        let behaviour = Graphsync::new(GraphsyncConfig::default(), store);
 
         let mut swarm = Swarm::new(transport, behaviour, local_peer_id);
 

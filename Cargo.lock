@@ -2376,6 +2376,7 @@ dependencies = [
  "fnv",
  "futures",
  "hex",
+ "instant",
  "integer-encoding",
  "libipld",
  "libp2p",
@@ -2383,6 +2384,7 @@ dependencies = [
  "protoc-rust",
  "serde",
  "serde_json",
+ "smallvec",
  "thiserror",
 ]
 

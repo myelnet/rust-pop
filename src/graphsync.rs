@@ -1,20 +1,24 @@
 use crate::graphsync_pb as pb;
-use crate::traversal::{Cbor, Error as EncodingError, Selector};
-use async_trait::async_trait;
-use fnv::FnvHashMap;
-use futures::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
-use futures::task::{Context, Poll};
-use integer_encoding::{VarIntReader, VarIntWriter};
-use libipld::cid::Version;
-use libipld::multihash::{Code, Multihash, MultihashDigest};
-use libipld::Cid;
-use libp2p::core::connection::{ConnectionId, ListenerId};
-use libp2p::core::{upgrade, ConnectedPoint, Multiaddr, PeerId};
-use libp2p::request_response::{
+use crate::network::{
     InboundFailure, OutboundFailure, ProtocolName, ProtocolSupport, RequestId as ReqResId,
     RequestResponse, RequestResponseCodec, RequestResponseConfig, RequestResponseEvent,
     RequestResponseMessage, ResponseChannel,
 };
+use crate::traversal::{BlockCallbackLoader, Cbor, Error as EncodingError, Progress, Selector};
+use async_std::task;
+use async_trait::async_trait;
+use fnv::FnvHashMap;
+use futures::channel::mpsc;
+use futures::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
+use futures::task::{Context, Poll};
+use integer_encoding::{VarIntReader, VarIntWriter};
+use libipld::cid::Version;
+use libipld::codec::Decode;
+use libipld::multihash::{Code, Multihash, MultihashDigest};
+use libipld::store::{Store, StoreParams};
+use libipld::{Block, Cid, DefaultParams, Ipld, Result as StoreResult};
+use libp2p::core::connection::{ConnectionId, ListenerId};
+use libp2p::core::{upgrade, ConnectedPoint, Multiaddr, PeerId};
 use libp2p::swarm::{
     DialError, IntoProtocolsHandler, NetworkBehaviour, NetworkBehaviourAction, PollParameters,
     ProtocolsHandler,
@@ -24,9 +28,11 @@ use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
 use std::error::Error;
 use std::io::{self, Cursor};
+use std::marker::PhantomData;
+use std::sync::Arc;
 use std::time::Duration;
 
-const MAX_BUF_SIZE: usize = 524_288;
+const MAX_CID_SIZE: usize = 4 * 10 + 64;
 
 #[derive(Debug, Clone)]
 pub struct GraphsyncProtocol;
@@ -37,10 +43,22 @@ impl ProtocolName for GraphsyncProtocol {
     }
 }
 
-#[derive(Clone, Default)]
-pub struct GraphsyncCodec;
+#[derive(Clone)]
+pub struct GraphsyncCodec<P> {
+    _marker: PhantomData<P>,
+    max_msg_size: usize,
+}
 
-impl GraphsyncCodec {
+impl<P: StoreParams> Default for GraphsyncCodec<P> {
+    fn default() -> Self {
+        Self {
+            _marker: PhantomData,
+            max_msg_size: usize::max(P::MAX_BLOCK_SIZE, MAX_CID_SIZE) + 40,
+        }
+    }
+}
+
+impl<P: StoreParams> GraphsyncCodec<P> {
     async fn write_msg<T>(&mut self, io: &mut T, msg: GraphsyncMessage) -> io::Result<()>
     where
         T: AsyncWrite + Send + Unpin,
@@ -56,7 +74,7 @@ impl GraphsyncCodec {
     where
         T: AsyncRead + Send + Unpin,
     {
-        let packet = upgrade::read_length_prefixed(io, MAX_BUF_SIZE)
+        let packet = upgrade::read_length_prefixed(io, self.max_msg_size)
             .await
             .map_err(other)?;
         let message = GraphsyncMessage::from_bytes(&packet)
@@ -66,7 +84,7 @@ impl GraphsyncCodec {
 }
 
 #[async_trait]
-impl RequestResponseCodec for GraphsyncCodec {
+impl<P: StoreParams> RequestResponseCodec for GraphsyncCodec<P> {
     type Protocol = GraphsyncProtocol;
     type Request = GraphsyncMessage;
     type Response = GraphsyncMessage;
@@ -143,15 +161,18 @@ impl Default for Config {
     }
 }
 
-pub struct Graphsync {
+pub struct Graphsync<S: Store> {
     config: Config,
-    inner: RequestResponse<GraphsyncCodec>,
+    inner: RequestResponse<GraphsyncCodec<S::Params>>,
     request_manager: RequestManager,
-    response_manager: ResponseManager,
+    response_manager: ResponseManager<S>,
 }
 
-impl Graphsync {
-    pub fn new(config: Config) -> Self {
+impl<S: 'static + Store> Graphsync<S>
+where
+    Ipld: Decode<<S::Params as StoreParams>::Codecs>,
+{
+    pub fn new(config: Config, store: S) -> Self {
         let protocols = std::iter::once((GraphsyncProtocol, ProtocolSupport::Full));
         let mut rr_config = RequestResponseConfig::default();
         rr_config.set_connection_keep_alive(config.connection_keep_alive);
@@ -161,7 +182,7 @@ impl Graphsync {
             config,
             inner,
             request_manager: Default::default(),
-            response_manager: Default::default(),
+            response_manager: ResponseManager::new(store),
         }
     }
     pub fn add_address(&mut self, peer_id: &PeerId, addr: Multiaddr) {
@@ -191,14 +212,12 @@ impl Graphsync {
     }
 }
 
-impl Default for Graphsync {
-    fn default() -> Self {
-        Self::new(Config::default())
-    }
-}
-
-impl NetworkBehaviour for Graphsync {
-    type ProtocolsHandler = <RequestResponse<GraphsyncCodec> as NetworkBehaviour>::ProtocolsHandler;
+impl<S: 'static + Store> NetworkBehaviour for Graphsync<S>
+where
+    Ipld: Decode<<S::Params as StoreParams>::Codecs>,
+{
+    type ProtocolsHandler =
+        <RequestResponse<GraphsyncCodec<S::Params>> as NetworkBehaviour>::ProtocolsHandler;
     type OutEvent = GraphsyncEvent;
 
     fn new_handler(&mut self) -> Self::ProtocolsHandler {
@@ -694,21 +713,100 @@ pub enum ResponseEvent {
 }
 
 #[derive(Default)]
-pub struct ResponseManager {
+pub struct ResponseManager<S> {
+    store: S,
     events: VecDeque<ResponseEvent>,
 }
 
 /// ResponseManager executes requests on the responder side and queues up responses to send back to
 /// the requester
-impl ResponseManager {
+impl<S> ResponseManager<S>
+where
+    S: 'static + Store,
+    Ipld: Decode<<S::Params as StoreParams>::Codecs>,
+{
+    pub fn new(store: S) -> Self {
+        Self {
+            store,
+            events: Default::default(),
+        }
+    }
     pub fn inject_request(&mut self, channel: Channel, request: Request) {
-        let res = Response {
+        let cres = Response {
             req_id: request.id,
             status: ResponseStatusCode::RequestCompletedFull,
             extensions: Extensions::default(),
         };
         self.events
-            .push_back(ResponseEvent::NewResponse(channel, res));
+            .push_back(ResponseEvent::NewResponse(channel, cres));
+
+        // let node = match self.store.get(&request.root) {
+        //     Ok(block) => match block.ipld() {
+        //         Ok(node) => node,
+        //         Err(e) => {
+        //             let res = Response {
+        //                 req_id: request.id,
+        //                 status: ResponseStatusCode::RequestFailedUnknown,
+        //                 extensions: Extensions::default(),
+        //             };
+        //             return self
+        //                 .events
+        //                 .push_back(ResponseEvent::NewResponse(channel, res));
+        //         }
+        //     },
+        //     Err(e) => {
+        //         let res = Response {
+        //             req_id: request.id,
+        //             status: ResponseStatusCode::RequestFailedContentNotFound,
+        //             extensions: Extensions::default(),
+        //         };
+        //         return self
+        //             .events
+        //             .push_back(ResponseEvent::NewResponse(channel, res));
+        //     }
+        // };
+        // task::spawn(async move {
+        //     let loader = BlockCallbackLoader::new(self.store, |block| {
+        //         let res = Response {
+        //             req_id: request.id,
+        //             status: ResponseStatusCode::PartialResponse,
+        //             extensions: Extensions::default(),
+        //         };
+        //         self.events
+        //             .push_back(ResponseEvent::NewResponse(channel, res));
+        //         Ok(())
+        //     });
+        //     let mut progress = Progress {
+        //         loader: Some(loader),
+        //         path: Default::default(),
+        //         last_block: None,
+        //     };
+        //     match progress
+        //         .walk_adv(&node, request.selector, &|_, _| Ok(()))
+        //         .await
+        //     {
+        //         Ok(()) => {
+        //             let res = Response {
+        //                 req_id: request.id,
+        //                 status: ResponseStatusCode::RequestCompletedFull,
+        //                 extensions: Extensions::default(),
+        //             };
+
+        //             self.events
+        //                 .push_back(ResponseEvent::NewResponse(channel, res));
+        //         }
+        //         Err(e) => {
+        //             let res = Response {
+        //                 req_id: request.id,
+        //                 status: ResponseStatusCode::RequestFailedUnknown,
+        //                 extensions: Extensions::default(),
+        //             };
+        //             return self
+        //                 .events
+        //                 .push_back(ResponseEvent::NewResponse(channel, res));
+        //         }
+        //     };
+        // });
     }
     pub fn next(&mut self) -> Option<ResponseEvent> {
         self.events.pop_front()
@@ -779,9 +877,10 @@ impl From<Cid> for Prefix {
 mod tests {
     use super::*;
     use crate::traversal::{RecursionLimit, Selector};
-    use async_std::task;
     use futures::prelude::*;
     use hex;
+    use libipld::mem::MemStore;
+    use libipld::DefaultParams;
     use libp2p::core::muxing::StreamMuxerBox;
     use libp2p::core::transport::Boxed;
     use libp2p::identity;
@@ -870,13 +969,14 @@ mod tests {
     struct Peer {
         peer_id: PeerId,
         addr: Multiaddr,
-        swarm: Swarm<Graphsync>,
+        swarm: Swarm<Graphsync<MemStore<DefaultParams>>>,
     }
 
     impl Peer {
         fn new() -> Self {
             let (peer_id, trans) = mk_transport();
-            let mut swarm = Swarm::new(trans, Graphsync::new(Config::default()), peer_id);
+            let store = MemStore::<DefaultParams>::default();
+            let mut swarm = Swarm::new(trans, Graphsync::new(Config::default(), store), peer_id);
             Swarm::listen_on(&mut swarm, "/ip4/127.0.0.1/tcp/0".parse().unwrap()).unwrap();
             while swarm.next().now_or_never().is_some() {}
             let addr = Swarm::listeners(&swarm).next().unwrap().clone();
@@ -893,7 +993,7 @@ mod tests {
                 .add_address(&peer.peer_id, peer.addr.clone());
         }
 
-        fn swarm(&mut self) -> &mut Swarm<Graphsync> {
+        fn swarm(&mut self) -> &mut Swarm<Graphsync<MemStore<DefaultParams>>> {
             &mut self.swarm
         }
 

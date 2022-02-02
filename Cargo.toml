@@ -22,6 +22,8 @@ hex = "0.4.3"
 fnv = "1.0.6"
 protobuf = "2.25.2"
 integer-encoding = { version = "3.0", default-features = false }
+smallvec = "1.6.1"
+instant = "0.1.11"
 
 [build-dependencies]
 protoc-rust = "2.25.2"

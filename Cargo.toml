@@ -7,7 +7,7 @@ edition = "2021"
 
 [dependencies]
 libp2p = "0.42"
-futures = "0.3.1"
+futures = "0.3.19"
 async-std = { version = "1.6.2", features = ["attributes"] }
 serde = { version = "1.0", features = ["derive"] }
 cid = { version = "0.6", default-features = false, features = ["std"] }
@@ -21,9 +21,7 @@ serde_cbor = { package = "cs_serde_cbor", version = "0.12", features = [
 hex = "0.4.3"
 fnv = "1.0.6"
 protobuf = "2.25.2"
-unsigned-varint = { version = "0.7.1", features = ["futures"] }
 integer-encoding = { version = "3.0", default-features = false }
-bytes = "1.0"
 
 [build-dependencies]
 protoc-rust = "2.25.2"

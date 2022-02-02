@@ -2371,7 +2371,6 @@ dependencies = [
  "async-recursion",
  "async-std",
  "async-trait",
- "bytes",
  "cid 0.6.1",
  "cs_serde_cbor",
  "fnv",
@@ -2385,7 +2384,6 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
- "unsigned-varint 0.7.1",
 ]
 
 [[package]]

@@ -1,6 +1,7 @@
 mod empty_map;
 mod graphsync;
 mod graphsync_pb;
+mod network;
 mod node;
 mod traversal;
 

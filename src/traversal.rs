@@ -6,7 +6,7 @@ use libipld::codec::Decode;
 use libipld::ipld::{Ipld, IpldIndex};
 use libipld::multihash::Error as MultihashError;
 use libipld::store::{Store, StoreParams};
-use libipld::Cid;
+use libipld::{Block, Cid};
 use protobuf::ProtobufError;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_cbor::{error::Error as CborError, from_slice, to_vec};
@@ -262,7 +262,7 @@ where
     L: LinkLoader + Sync + Send,
 {
     #[async_recursion]
-    async fn walk_adv<F>(
+    pub async fn walk_adv<F>(
         &mut self,
         node: &Ipld,
         selector: Selector,
@@ -413,6 +413,42 @@ where
             return Ok(Some(node));
         }
         Err("MissingStore".to_string())
+    }
+}
+
+pub struct BlockCallbackLoader<S, F> {
+    store: S,
+    cb: F,
+}
+
+impl<S, F> BlockCallbackLoader<S, F>
+where
+    S: Store,
+    F: FnMut(Option<&Block<S::Params>>) -> Result<(), String> + Send + Sync,
+{
+    pub fn new(store: S, cb: F) -> Self {
+        Self { store, cb }
+    }
+}
+
+#[async_trait]
+impl<S, F> LinkLoader for BlockCallbackLoader<S, F>
+where
+    S: Store,
+    F: FnMut(Option<&Block<S::Params>>) -> Result<(), String> + Send + Sync,
+    Ipld: Decode<<S::Params as StoreParams>::Codecs>,
+{
+    async fn load_link(&mut self, link: &Cid) -> Result<Option<Ipld>, String> {
+        let block = match self.store.get(link) {
+            Ok(block) => block,
+            Err(e) => return Err(e.to_string()),
+        };
+        let node = match block.ipld() {
+            Ok(node) => node,
+            Err(e) => return Err(e.to_string()),
+        };
+        (self.cb)(Some(&block))?;
+        Ok(Some(node))
     }
 }
 

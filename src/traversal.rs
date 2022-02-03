@@ -12,6 +12,7 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_cbor::{error::Error as CborError, from_slice, to_vec};
 use std::fmt;
 use std::io::Error as StdError;
+use std::sync::Arc;
 use thiserror::Error;
 use Selector::*;
 
@@ -417,16 +418,16 @@ where
 }
 
 pub struct BlockCallbackLoader<S, F> {
-    store: S,
+    store: Arc<S>,
     cb: F,
 }
 
 impl<S, F> BlockCallbackLoader<S, F>
 where
     S: Store,
-    F: FnMut(Option<&Block<S::Params>>) -> Result<(), String> + Send + Sync,
+    F: FnMut(Option<Block<S::Params>>) -> Result<(), String> + Send + Sync,
 {
-    pub fn new(store: S, cb: F) -> Self {
+    pub fn new(store: Arc<S>, cb: F) -> Self {
         Self { store, cb }
     }
 }
@@ -435,7 +436,7 @@ where
 impl<S, F> LinkLoader for BlockCallbackLoader<S, F>
 where
     S: Store,
-    F: FnMut(Option<&Block<S::Params>>) -> Result<(), String> + Send + Sync,
+    F: FnMut(Option<Block<S::Params>>) -> Result<(), String> + Send + Sync,
     Ipld: Decode<<S::Params as StoreParams>::Codecs>,
 {
     async fn load_link(&mut self, link: &Cid) -> Result<Option<Ipld>, String> {
@@ -447,7 +448,7 @@ where
             Ok(node) => node,
             Err(e) => return Err(e.to_string()),
         };
-        (self.cb)(Some(&block))?;
+        (self.cb)(Some(block))?;
         Ok(Some(node))
     }
 }

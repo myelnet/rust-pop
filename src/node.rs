@@ -7,6 +7,7 @@ use libp2p::{
     core, core::muxing::StreamMuxerBox, core::transport::Boxed, identity, mplex, noise, yamux,
     Multiaddr, PeerId, Transport,
 };
+use std::sync::Arc;
 use std::time::Duration;
 
 pub struct Node {
@@ -26,7 +27,7 @@ impl Node {
 
         let transport = build_transport(local_key.clone());
 
-        let store = MemStore::<DefaultParams>::default();
+        let store = Arc::new(MemStore::<DefaultParams>::default());
         // temp behaviour to be replaced with graphsync
         // let behaviour = Ping::new(PingConfig::new().with_keep_alive(true));
         let behaviour = Graphsync::new(GraphsyncConfig::default(), store);

@@ -1,6 +1,6 @@
-use crate::network::codec::RequestResponseCodec;
+use crate::network::codec::MessageCodec;
 use crate::network::{RequestId, EMPTY_QUEUE_SHRINK_THRESHOLD};
-use futures::{channel::oneshot, future::BoxFuture, prelude::*, stream::FuturesUnordered};
+use futures::{future::BoxFuture, prelude::*, stream::FuturesUnordered};
 use instant::Instant;
 use libp2p::core::upgrade::{
     InboundUpgrade, NegotiationError, OutboundUpgrade, UpgradeError, UpgradeInfo,
@@ -23,53 +23,22 @@ use std::{
     time::Duration,
 };
 
-/// The level of support for a particular protocol.
-#[derive(Debug, Clone)]
-pub enum ProtocolSupport {
-    /// The protocol is only supported for inbound requests.
-    Inbound,
-    /// The protocol is only supported for outbound requests.
-    Outbound,
-    /// The protocol is supported for inbound and outbound requests.
-    Full,
-}
-
-impl ProtocolSupport {
-    /// Whether inbound requests are supported.
-    pub fn inbound(&self) -> bool {
-        match self {
-            ProtocolSupport::Inbound | ProtocolSupport::Full => true,
-            ProtocolSupport::Outbound => false,
-        }
-    }
-
-    /// Whether outbound requests are supported.
-    pub fn outbound(&self) -> bool {
-        match self {
-            ProtocolSupport::Outbound | ProtocolSupport::Full => true,
-            ProtocolSupport::Inbound => false,
-        }
-    }
-}
-
-/// Response substream upgrade protocol.
+/// Inbound message substream upgrade protocol.
 ///
-/// Receives a request and sends a response.
+/// Receives message.
 #[derive(Debug)]
-pub struct ResponseProtocol<TCodec>
+pub struct InboundProtocol<TCodec>
 where
-    TCodec: RequestResponseCodec,
+    TCodec: MessageCodec,
 {
     pub(crate) codec: TCodec,
     pub(crate) protocols: SmallVec<[TCodec::Protocol; 2]>,
-    pub(crate) request_sender: oneshot::Sender<(RequestId, TCodec::Request)>,
-    pub(crate) response_receiver: oneshot::Receiver<TCodec::Response>,
     pub(crate) request_id: RequestId,
 }
 
-impl<TCodec> UpgradeInfo for ResponseProtocol<TCodec>
+impl<TCodec> UpgradeInfo for InboundProtocol<TCodec>
 where
-    TCodec: RequestResponseCodec,
+    TCodec: MessageCodec,
 {
     type Info = TCodec::Protocol;
     type InfoIter = smallvec::IntoIter<[Self::Info; 2]>;
@@ -79,11 +48,11 @@ where
     }
 }
 
-impl<TCodec> InboundUpgrade<NegotiatedSubstream> for ResponseProtocol<TCodec>
+impl<TCodec> InboundUpgrade<NegotiatedSubstream> for InboundProtocol<TCodec>
 where
-    TCodec: RequestResponseCodec + Send + 'static,
+    TCodec: MessageCodec + Send + 'static,
 {
-    type Output = bool;
+    type Output = TCodec::Message;
     type Error = io::Error;
     type Future = BoxFuture<'static, Result<Self::Output, Self::Error>>;
 
@@ -93,47 +62,30 @@ where
         protocol: Self::Info,
     ) -> Self::Future {
         async move {
-            let read = self.codec.read_request(&protocol, &mut io);
-            let request = read.await?;
-            match self.request_sender.send((self.request_id, request)) {
-                Ok(()) => {},
-                Err(_) => panic!(
-                    "Expect request receiver to be alive i.e. protocol handler to be alive.",
-                ),
-            }
-
-            if let Ok(response) = self.response_receiver.await {
-                let write = self.codec.write_response(&protocol, &mut io, response);
-                write.await?;
-
-                io.close().await?;
-                // Response was sent. Indicate to handler to emit a `ResponseSent` event.
-                Ok(true)
-            } else {
-                io.close().await?;
-                // No response was sent. Indicate to handler to emit a `ResponseOmission` event.
-                Ok(false)
-            }
-        }.boxed()
+            let read = self.codec.read_message(&protocol, &mut io);
+            let msg = read.await?;
+            Ok(msg)
+        }
+        .boxed()
     }
 }
 
-/// Request substream upgrade protocol.
+/// Outbound substream upgrade protocol.
 ///
-/// Sends a request and receives a response.
-pub struct RequestProtocol<TCodec>
+/// Sends a message.
+pub struct OutboundProtocol<TCodec>
 where
-    TCodec: RequestResponseCodec,
+    TCodec: MessageCodec,
 {
     pub(crate) codec: TCodec,
     pub(crate) protocols: SmallVec<[TCodec::Protocol; 2]>,
     pub(crate) request_id: RequestId,
-    pub(crate) request: TCodec::Request,
+    pub(crate) message: TCodec::Message,
 }
 
-impl<TCodec> fmt::Debug for RequestProtocol<TCodec>
+impl<TCodec> fmt::Debug for OutboundProtocol<TCodec>
 where
-    TCodec: RequestResponseCodec,
+    TCodec: MessageCodec,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("RequestProtocol")
@@ -142,9 +94,9 @@ where
     }
 }
 
-impl<TCodec> UpgradeInfo for RequestProtocol<TCodec>
+impl<TCodec> UpgradeInfo for OutboundProtocol<TCodec>
 where
-    TCodec: RequestResponseCodec,
+    TCodec: MessageCodec,
 {
     type Info = TCodec::Protocol;
     type InfoIter = smallvec::IntoIter<[Self::Info; 2]>;
@@ -154,11 +106,11 @@ where
     }
 }
 
-impl<TCodec> OutboundUpgrade<NegotiatedSubstream> for RequestProtocol<TCodec>
+impl<TCodec> OutboundUpgrade<NegotiatedSubstream> for OutboundProtocol<TCodec>
 where
-    TCodec: RequestResponseCodec + Send + 'static,
+    TCodec: MessageCodec + Send + 'static,
 {
-    type Output = TCodec::Response;
+    type Output = ();
     type Error = io::Error;
     type Future = BoxFuture<'static, Result<Self::Output, Self::Error>>;
 
@@ -168,12 +120,10 @@ where
         protocol: Self::Info,
     ) -> Self::Future {
         async move {
-            let write = self.codec.write_request(&protocol, &mut io, self.request);
+            let write = self.codec.write_message(&protocol, &mut io, self.message);
             write.await?;
             io.close().await?;
-            let read = self.codec.read_response(&protocol, &mut io);
-            let response = read.await?;
-            Ok(response)
+            Ok(())
         }
         .boxed()
     }
@@ -183,7 +133,7 @@ where
 #[doc(hidden)]
 pub struct RequestResponseHandler<TCodec>
 where
-    TCodec: RequestResponseCodec,
+    TCodec: MessageCodec,
 {
     /// The supported inbound protocols.
     inbound_protocols: SmallVec<[TCodec::Protocol; 2]>,
@@ -202,26 +152,15 @@ where
     /// Queue of events to emit in `poll()`.
     pending_events: VecDeque<RequestResponseHandlerEvent<TCodec>>,
     /// Outbound upgrades waiting to be emitted as an `OutboundSubstreamRequest`.
-    outbound: VecDeque<RequestProtocol<TCodec>>,
+    outbound: VecDeque<OutboundProtocol<TCodec>>,
     /// Inbound upgrades waiting for the incoming request.
-    inbound: FuturesUnordered<
-        BoxFuture<
-            'static,
-            Result<
-                (
-                    (RequestId, TCodec::Request),
-                    oneshot::Sender<TCodec::Response>,
-                ),
-                oneshot::Canceled,
-            >,
-        >,
-    >,
+    inbound: VecDeque<(RequestId, TCodec::Message)>,
     inbound_request_id: Arc<AtomicU64>,
 }
 
 impl<TCodec> RequestResponseHandler<TCodec>
 where
-    TCodec: RequestResponseCodec,
+    TCodec: MessageCodec,
 {
     pub(super) fn new(
         inbound_protocols: SmallVec<[TCodec::Protocol; 2]>,
@@ -237,7 +176,7 @@ where
             keep_alive_timeout,
             substream_timeout,
             outbound: VecDeque::new(),
-            inbound: FuturesUnordered::new(),
+            inbound: VecDeque::new(),
             pending_events: VecDeque::new(),
             pending_error: None,
             inbound_request_id,
@@ -249,24 +188,13 @@ where
 #[doc(hidden)]
 pub enum RequestResponseHandlerEvent<TCodec>
 where
-    TCodec: RequestResponseCodec,
+    TCodec: MessageCodec,
 {
-    /// A request has been received.
-    Request {
+    /// A message has been received.
+    Message {
         request_id: RequestId,
-        request: TCodec::Request,
-        sender: oneshot::Sender<TCodec::Response>,
+        message: TCodec::Message,
     },
-    /// A response has been received.
-    Response {
-        request_id: RequestId,
-        response: TCodec::Response,
-    },
-    /// A response to an inbound request has been sent.
-    ResponseSent(RequestId),
-    /// A response to an inbound request was omitted as a result
-    /// of dropping the response `sender` of an inbound `Request`.
-    ResponseOmission(RequestId),
     /// An outbound request timed out while sending the request
     /// or waiting for the response.
     OutboundTimeout(RequestId),
@@ -279,31 +207,15 @@ where
     InboundUnsupportedProtocols(RequestId),
 }
 
-impl<TCodec: RequestResponseCodec> fmt::Debug for RequestResponseHandlerEvent<TCodec> {
+impl<TCodec: MessageCodec> fmt::Debug for RequestResponseHandlerEvent<TCodec> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            RequestResponseHandlerEvent::Request {
+            RequestResponseHandlerEvent::Message {
                 request_id,
-                request: _,
-                sender: _,
+                message: _,
             } => f
-                .debug_struct("RequestResponseHandlerEvent::Request")
+                .debug_struct("RequestResponseHandlerEvent::Message")
                 .field("request_id", request_id)
-                .finish(),
-            RequestResponseHandlerEvent::Response {
-                request_id,
-                response: _,
-            } => f
-                .debug_struct("RequestResponseHandlerEvent::Response")
-                .field("request_id", request_id)
-                .finish(),
-            RequestResponseHandlerEvent::ResponseSent(request_id) => f
-                .debug_tuple("RequestResponseHandlerEvent::ResponseSent")
-                .field(request_id)
-                .finish(),
-            RequestResponseHandlerEvent::ResponseOmission(request_id) => f
-                .debug_tuple("RequestResponseHandlerEvent::ResponseOmission")
-                .field(request_id)
                 .finish(),
             RequestResponseHandlerEvent::OutboundTimeout(request_id) => f
                 .debug_tuple("RequestResponseHandlerEvent::OutboundTimeout")
@@ -327,25 +239,17 @@ impl<TCodec: RequestResponseCodec> fmt::Debug for RequestResponseHandlerEvent<TC
 
 impl<TCodec> ProtocolsHandler for RequestResponseHandler<TCodec>
 where
-    TCodec: RequestResponseCodec + Send + Clone + 'static,
+    TCodec: MessageCodec + Send + Clone + 'static,
 {
-    type InEvent = RequestProtocol<TCodec>;
+    type InEvent = OutboundProtocol<TCodec>;
     type OutEvent = RequestResponseHandlerEvent<TCodec>;
     type Error = ProtocolsHandlerUpgrErr<io::Error>;
-    type InboundProtocol = ResponseProtocol<TCodec>;
-    type OutboundProtocol = RequestProtocol<TCodec>;
+    type InboundProtocol = InboundProtocol<TCodec>;
+    type OutboundProtocol = OutboundProtocol<TCodec>;
     type OutboundOpenInfo = RequestId;
     type InboundOpenInfo = RequestId;
 
     fn listen_protocol(&self) -> SubstreamProtocol<Self::InboundProtocol, Self::InboundOpenInfo> {
-        // A channel for notifying the handler when the inbound
-        // upgrade received the request.
-        let (rq_send, rq_recv) = oneshot::channel();
-
-        // A channel for notifying the inbound upgrade when the
-        // response is sent.
-        let (rs_send, rs_recv) = oneshot::channel();
-
         let request_id = RequestId(self.inbound_request_id.fetch_add(1, Ordering::Relaxed));
 
         // By keeping all I/O inside the `ResponseProtocol` and thus the
@@ -354,44 +258,21 @@ where
         // for inbound substreams as well as their timeouts and also make the
         // implementation of inbound and outbound upgrades symmetric in
         // this sense.
-        let proto = ResponseProtocol {
+        let proto = InboundProtocol {
             protocols: self.inbound_protocols.clone(),
             codec: self.codec.clone(),
-            request_sender: rq_send,
-            response_receiver: rs_recv,
             request_id,
         };
-
-        // The handler waits for the request to come in. It then emits
-        // `RequestResponseHandlerEvent::Request` together with a
-        // `ResponseChannel`.
-        self.inbound
-            .push(rq_recv.map_ok(move |rq| (rq, rs_send)).boxed());
 
         SubstreamProtocol::new(proto, request_id).with_timeout(self.substream_timeout)
     }
 
-    fn inject_fully_negotiated_inbound(&mut self, sent: bool, request_id: RequestId) {
-        if sent {
-            self.pending_events
-                .push_back(RequestResponseHandlerEvent::ResponseSent(request_id))
-        } else {
-            self.pending_events
-                .push_back(RequestResponseHandlerEvent::ResponseOmission(request_id))
-        }
+    fn inject_fully_negotiated_inbound(&mut self, sent: TCodec::Message, request_id: RequestId) {
+        self.keep_alive = KeepAlive::Yes;
+        self.inbound.push_back((request_id, sent));
     }
 
-    fn inject_fully_negotiated_outbound(
-        &mut self,
-        response: TCodec::Response,
-        request_id: RequestId,
-    ) {
-        self.pending_events
-            .push_back(RequestResponseHandlerEvent::Response {
-                request_id,
-                response,
-            });
-    }
+    fn inject_fully_negotiated_outbound(&mut self, result: (), request_id: RequestId) {}
 
     fn inject_event(&mut self, request: Self::InEvent) {
         self.keep_alive = KeepAlive::Yes;
@@ -460,7 +341,7 @@ where
     fn poll(
         &mut self,
         cx: &mut Context<'_>,
-    ) -> Poll<ProtocolsHandlerEvent<RequestProtocol<TCodec>, RequestId, Self::OutEvent, Self::Error>>
+    ) -> Poll<ProtocolsHandlerEvent<OutboundProtocol<TCodec>, RequestId, Self::OutEvent, Self::Error>>
     {
         // Check for a pending (fatal) error.
         if let Some(err) = self.pending_error.take() {
@@ -476,25 +357,13 @@ where
         }
 
         // Check for inbound requests.
-        while let Poll::Ready(Some(result)) = self.inbound.poll_next_unpin(cx) {
-            match result {
-                Ok(((id, rq), rs_sender)) => {
-                    // We received an inbound request.
-                    self.keep_alive = KeepAlive::Yes;
-                    return Poll::Ready(ProtocolsHandlerEvent::Custom(
-                        RequestResponseHandlerEvent::Request {
-                            request_id: id,
-                            request: rq,
-                            sender: rs_sender,
-                        },
-                    ));
-                }
-                Err(oneshot::Canceled) => {
-                    // The inbound upgrade has errored or timed out reading
-                    // or waiting for the request. The handler is informed
-                    // via `inject_listen_upgrade_error`.
-                }
-            }
+        if let Some((id, msg)) = self.inbound.pop_front() {
+            return Poll::Ready(ProtocolsHandlerEvent::Custom(
+                RequestResponseHandlerEvent::Message {
+                    request_id: id,
+                    message: msg,
+                },
+            ));
         }
 
         // Emit outbound requests.

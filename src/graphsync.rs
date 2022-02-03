@@ -1,8 +1,8 @@
 use crate::graphsync_pb as pb;
 use crate::network::{
-    InboundFailure, OutboundFailure, ProtocolName, ProtocolSupport, RequestId as ReqResId,
-    RequestResponse, RequestResponseCodec, RequestResponseConfig, RequestResponseEvent,
-    RequestResponseMessage, ResponseChannel,
+    InboundFailure, MessageCodec, OutboundFailure, ProtocolName, RequestId as ReqResId,
+    RequestResponse, RequestResponseConfig, RequestResponseEvent, RequestResponseMessage,
+    ResponseChannel,
 };
 use crate::traversal::{BlockCallbackLoader, Cbor, Error as EncodingError, Progress, Selector};
 use async_std::task;
@@ -10,7 +10,9 @@ use async_trait::async_trait;
 use fnv::FnvHashMap;
 use futures::channel::mpsc;
 use futures::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
+use futures::stream::{Stream, StreamExt};
 use futures::task::{Context, Poll};
+use futures::{future::BoxFuture, prelude::*, stream::FuturesUnordered};
 use integer_encoding::{VarIntReader, VarIntWriter};
 use libipld::cid::Version;
 use libipld::codec::Decode;
@@ -58,19 +60,12 @@ impl<P: StoreParams> Default for GraphsyncCodec<P> {
     }
 }
 
-impl<P: StoreParams> GraphsyncCodec<P> {
-    async fn write_msg<T>(&mut self, io: &mut T, msg: GraphsyncMessage) -> io::Result<()>
-    where
-        T: AsyncWrite + Send + Unpin,
-    {
-        let bytes = msg
-            .to_bytes()
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-        upgrade::write_length_prefixed(io, bytes).await?;
-        io.close().await?;
-        Ok(())
-    }
-    async fn read_msg<T>(&mut self, io: &mut T) -> io::Result<GraphsyncMessage>
+#[async_trait]
+impl<P: StoreParams> MessageCodec for GraphsyncCodec<P> {
+    type Protocol = GraphsyncProtocol;
+    type Message = GraphsyncMessage;
+
+    async fn read_message<T>(&mut self, _: &Self::Protocol, io: &mut T) -> io::Result<Self::Message>
     where
         T: AsyncRead + Send + Unpin,
     {
@@ -81,52 +76,21 @@ impl<P: StoreParams> GraphsyncCodec<P> {
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
         Ok(message)
     }
-}
-
-#[async_trait]
-impl<P: StoreParams> RequestResponseCodec for GraphsyncCodec<P> {
-    type Protocol = GraphsyncProtocol;
-    type Request = GraphsyncMessage;
-    type Response = GraphsyncMessage;
-
-    async fn read_request<T>(&mut self, _: &Self::Protocol, io: &mut T) -> io::Result<Self::Request>
-    where
-        T: AsyncRead + Send + Unpin,
-    {
-        self.read_msg::<T>(io).await
-    }
-
-    async fn read_response<T>(
+    async fn write_message<T>(
         &mut self,
         _: &Self::Protocol,
         io: &mut T,
-    ) -> io::Result<Self::Response>
-    where
-        T: AsyncRead + Send + Unpin,
-    {
-        self.read_msg::<T>(io).await
-    }
-    async fn write_request<T>(
-        &mut self,
-        _: &Self::Protocol,
-        io: &mut T,
-        req: Self::Request,
+        msg: Self::Message,
     ) -> io::Result<()>
     where
         T: AsyncWrite + Send + Unpin,
     {
-        self.write_msg::<T>(io, req).await
-    }
-    async fn write_response<T>(
-        &mut self,
-        _: &Self::Protocol,
-        io: &mut T,
-        res: Self::Response,
-    ) -> io::Result<()>
-    where
-        T: AsyncWrite + Send + Unpin,
-    {
-        self.write_msg::<T>(io, res).await
+        let bytes = msg
+            .to_bytes()
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        upgrade::write_length_prefixed(io, bytes).await?;
+        io.close().await?;
+        Ok(())
     }
 }
 
@@ -165,15 +129,15 @@ pub struct Graphsync<S: Store> {
     config: Config,
     inner: RequestResponse<GraphsyncCodec<S::Params>>,
     request_manager: RequestManager,
-    response_manager: ResponseManager<S>,
+    response_manager: Arc<ResponseManager<S>>,
 }
 
 impl<S: 'static + Store> Graphsync<S>
 where
     Ipld: Decode<<S::Params as StoreParams>::Codecs>,
 {
-    pub fn new(config: Config, store: S) -> Self {
-        let protocols = std::iter::once((GraphsyncProtocol, ProtocolSupport::Full));
+    pub fn new(config: Config, store: Arc<S>) -> Self {
+        let protocols = std::iter::once(GraphsyncProtocol);
         let mut rr_config = RequestResponseConfig::default();
         rr_config.set_connection_keep_alive(config.connection_keep_alive);
         rr_config.set_request_timeout(config.request_timeout);
@@ -182,7 +146,7 @@ where
             config,
             inner,
             request_manager: Default::default(),
-            response_manager: ResponseManager::new(store),
+            response_manager: Arc::new(ResponseManager::new(store)),
         }
     }
     pub fn add_address(&mut self, peer_id: &PeerId, addr: Multiaddr) {
@@ -312,10 +276,8 @@ where
             while let Some(event) = self.response_manager.next() {
                 exit = false;
                 match event {
-                    ResponseEvent::NewResponse(channel, res) => {
-                        self.inner
-                            .send_response(channel, GraphsyncMessage::from(res))
-                            .ok();
+                    ResponseEvent::NewResponse(peer, res) => {
+                        self.inner.send_request(&peer, GraphsyncMessage::from(res));
                     }
                 }
             }
@@ -371,32 +333,19 @@ where
                     }
                 };
                 match event {
-                    RequestResponseEvent::Message { peer, message } => match message {
-                        RequestResponseMessage::Request {
-                            request_id: _,
-                            request,
-                            channel,
-                        } => {
-                            println!("received request {:?}", request);
-                            for (_, req) in request.requests {
-                                println!("received graphsync request");
-                                self.response_manager
-                                    .inject_request(channel, Request::from(req));
-                                break;
-                            }
+                    RequestResponseEvent::Message { peer, message } => {
+                        let msg = message.message;
+                        println!("received message {:?}", msg);
+                        for (_, req) in msg.requests {
+                            self.response_manager
+                                .inject_request(peer, Request::from(req));
+                            break;
                         }
-                        RequestResponseMessage::Response {
-                            request_id,
-                            response,
-                        } => {
-                            println!("received response {:?}", response);
-                            for (_, res) in response.responses {
-                                println!("received graphsync response");
-                                self.request_manager
-                                    .inject_response(peer, Response::from(res));
-                            }
+                        for (_, res) in msg.responses {
+                            self.request_manager
+                                .inject_response(peer, Response::from(res));
                         }
-                    },
+                    }
                     RequestResponseEvent::ResponseSent { .. } => {}
                     RequestResponseEvent::OutboundFailure {
                         peer,
@@ -709,104 +658,55 @@ impl From<GraphsyncResponse> for Response {
 
 #[derive(Debug)]
 pub enum ResponseEvent {
-    NewResponse(Channel, Response),
+    NewResponse(PeerId, Response),
 }
 
 #[derive(Default)]
 pub struct ResponseManager<S> {
-    store: S,
+    store: Arc<S>,
     events: VecDeque<ResponseEvent>,
+    outbound: FuturesUnordered<BoxFuture<'static, Result<(), EncodingError>>>,
 }
 
 /// ResponseManager executes requests on the responder side and queues up responses to send back to
 /// the requester
 impl<S> ResponseManager<S>
 where
-    S: 'static + Store,
+    S: Store + 'static,
     Ipld: Decode<<S::Params as StoreParams>::Codecs>,
 {
-    pub fn new(store: S) -> Self {
+    pub fn new(store: Arc<S>) -> Self {
         Self {
             store,
             events: Default::default(),
+            outbound: FuturesUnordered::new(),
         }
     }
-    pub fn inject_request(&mut self, channel: Channel, request: Request) {
-        let cres = Response {
-            req_id: request.id,
-            status: ResponseStatusCode::RequestCompletedFull,
-            extensions: Extensions::default(),
-        };
-        self.events
-            .push_back(ResponseEvent::NewResponse(channel, cres));
+    pub fn inject_request(self: Arc<Self>, peer: PeerId, request: Request) {
+        self.outbound.push(self.exec_request(peer, request).boxed())
+    }
+    async fn exec_request(&mut self, peer: PeerId, request: Request) -> Result<(), EncodingError> {
+        if let Ok(block) = self.store.get(&request.root) {
+            if let Ok(node) = block.ipld() {
+                let loader = BlockCallbackLoader::new(Arc::clone(&self.store), |block| {
+                    match block {
+                        Some(block) => {}
+                        None => {}
+                    };
+                    Ok(())
+                });
 
-        // let node = match self.store.get(&request.root) {
-        //     Ok(block) => match block.ipld() {
-        //         Ok(node) => node,
-        //         Err(e) => {
-        //             let res = Response {
-        //                 req_id: request.id,
-        //                 status: ResponseStatusCode::RequestFailedUnknown,
-        //                 extensions: Extensions::default(),
-        //             };
-        //             return self
-        //                 .events
-        //                 .push_back(ResponseEvent::NewResponse(channel, res));
-        //         }
-        //     },
-        //     Err(e) => {
-        //         let res = Response {
-        //             req_id: request.id,
-        //             status: ResponseStatusCode::RequestFailedContentNotFound,
-        //             extensions: Extensions::default(),
-        //         };
-        //         return self
-        //             .events
-        //             .push_back(ResponseEvent::NewResponse(channel, res));
-        //     }
-        // };
-        // task::spawn(async move {
-        //     let loader = BlockCallbackLoader::new(self.store, |block| {
-        //         let res = Response {
-        //             req_id: request.id,
-        //             status: ResponseStatusCode::PartialResponse,
-        //             extensions: Extensions::default(),
-        //         };
-        //         self.events
-        //             .push_back(ResponseEvent::NewResponse(channel, res));
-        //         Ok(())
-        //     });
-        //     let mut progress = Progress {
-        //         loader: Some(loader),
-        //         path: Default::default(),
-        //         last_block: None,
-        //     };
-        //     match progress
-        //         .walk_adv(&node, request.selector, &|_, _| Ok(()))
-        //         .await
-        //     {
-        //         Ok(()) => {
-        //             let res = Response {
-        //                 req_id: request.id,
-        //                 status: ResponseStatusCode::RequestCompletedFull,
-        //                 extensions: Extensions::default(),
-        //             };
-
-        //             self.events
-        //                 .push_back(ResponseEvent::NewResponse(channel, res));
-        //         }
-        //         Err(e) => {
-        //             let res = Response {
-        //                 req_id: request.id,
-        //                 status: ResponseStatusCode::RequestFailedUnknown,
-        //                 extensions: Extensions::default(),
-        //             };
-        //             return self
-        //                 .events
-        //                 .push_back(ResponseEvent::NewResponse(channel, res));
-        //         }
-        //     };
-        // });
+                let mut progress = Progress {
+                    loader: Some(loader),
+                    path: Default::default(),
+                    last_block: None,
+                };
+                progress
+                    .walk_adv(&node, request.selector, &|_, _| Ok(()))
+                    .await?
+            }
+        }
+        Ok(())
     }
     pub fn next(&mut self) -> Option<ResponseEvent> {
         self.events.pop_front()
@@ -975,7 +875,7 @@ mod tests {
     impl Peer {
         fn new() -> Self {
             let (peer_id, trans) = mk_transport();
-            let store = MemStore::<DefaultParams>::default();
+            let store = Arc::new(MemStore::<DefaultParams>::default());
             let mut swarm = Swarm::new(trans, Graphsync::new(Config::default(), store), peer_id);
             Swarm::listen_on(&mut swarm, "/ip4/127.0.0.1/tcp/0".parse().unwrap()).unwrap();
             while swarm.next().now_or_never().is_some() {}

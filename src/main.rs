@@ -3,6 +3,7 @@ mod graphsync;
 mod graphsync_pb;
 mod network;
 mod node;
+mod request_manager;
 mod response_manager;
 mod traversal;
 

@@ -3,7 +3,6 @@ pub mod handler;
 
 pub use codec::{MessageCodec, ProtocolName};
 
-use futures::channel::oneshot;
 use handler::{OutboundProtocol, RequestResponseHandler, RequestResponseHandlerEvent};
 use libp2p::core::{connection::ConnectionId, ConnectedPoint, Multiaddr, PeerId};
 use libp2p::swarm::{
@@ -54,16 +53,6 @@ pub enum RequestResponseEvent<TMessage> {
         request_id: RequestId,
         /// The error that occurred.
         error: InboundFailure,
-    },
-    /// A response to an inbound request has been sent.
-    ///
-    /// When this event is received, the response has been flushed on
-    /// the underlying transport connection.
-    ResponseSent {
-        /// The peer to whom the response was sent.
-        peer: PeerId,
-        /// The ID of the inbound request whose response was sent.
-        request_id: RequestId,
     },
 }
 
@@ -118,10 +107,6 @@ pub enum InboundFailure {
     /// The local peer supports none of the protocols requested
     /// by the remote.
     UnsupportedProtocols,
-    /// The local peer failed to respond to an inbound request
-    /// due to the [`ResponseChannel`] being dropped instead of
-    /// being passed to [`RequestResponse::send_response`].
-    ResponseOmission,
 }
 
 impl fmt::Display for InboundFailure {
@@ -137,36 +122,11 @@ impl fmt::Display for InboundFailure {
                 f,
                 "The local peer supports none of the protocols requested by the remote"
             ),
-            InboundFailure::ResponseOmission => write!(
-                f,
-                "The response channel was dropped without sending a response to the remote"
-            ),
         }
     }
 }
 
 impl std::error::Error for InboundFailure {}
-
-/// A channel for sending a response to an inbound request.
-///
-/// See [`RequestResponse::send_response`].
-#[derive(Debug)]
-pub struct ResponseChannel<TResponse> {
-    sender: oneshot::Sender<TResponse>,
-}
-
-impl<TResponse> ResponseChannel<TResponse> {
-    /// Checks whether the response channel is still open, i.e.
-    /// the `RequestResponse` behaviour is still waiting for a
-    /// a response to be sent via [`RequestResponse::send_response`]
-    /// and this response channel.
-    ///
-    /// If the response channel is no longer open then the inbound
-    /// request timed out waiting for the response.
-    pub fn is_open(&self) -> bool {
-        !self.sender.is_canceled()
-    }
-}
 
 /// The ID of an inbound or outbound request.
 ///

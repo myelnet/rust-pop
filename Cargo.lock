@@ -2375,6 +2375,7 @@ dependencies = [
  "cs_serde_cbor",
  "fnv",
  "futures",
+ "futures-lite",
  "hex",
  "instant",
  "integer-encoding",

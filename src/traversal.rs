@@ -1,8 +1,11 @@
 use crate::empty_map;
 use async_recursion::async_recursion;
+use async_std::channel::{bounded, Receiver, Sender};
 use async_trait::async_trait;
+use fnv::FnvHashMap;
 use libipld::cid::Error as CidError;
 use libipld::codec::Decode;
+use libipld::error::Error as StoreError;
 use libipld::ipld::{Ipld, IpldIndex};
 use libipld::multihash::Error as MultihashError;
 use libipld::store::{Store, StoreParams};
@@ -460,6 +463,112 @@ where
     }
 }
 
+pub struct AsyncLoader<S: Store> {
+    store: Arc<S>,
+    sender: Arc<Sender<Block<S::Params>>>,
+    receiver: Arc<Receiver<Block<S::Params>>>,
+    /// pending blocks
+    next_id: u64,
+    cid: FnvHashMap<u64, Cid>,
+    data: FnvHashMap<u64, Vec<u8>>,
+    lookup: FnvHashMap<Cid, u64>,
+}
+
+impl<S: Store> AsyncLoader<S>
+where
+    Ipld: Decode<<S::Params as StoreParams>::Codecs>,
+{
+    pub fn new(store: Arc<S>) -> Self {
+        let (s, r) = bounded(1000);
+        Self {
+            store,
+            sender: Arc::new(s),
+            receiver: Arc::new(r),
+            next_id: 0,
+            cid: Default::default(),
+            data: Default::default(),
+            lookup: Default::default(),
+        }
+    }
+
+    fn lookup(&mut self, cid: &Cid) -> u64 {
+        if let Some(id) = self.lookup.get(cid) {
+            *id
+        } else {
+            let id = self.next_id;
+            self.next_id += 1;
+            self.lookup.insert(*cid, id);
+            self.cid.insert(id, *cid);
+            id
+        }
+    }
+
+    fn get_pending(&mut self, cid: &Cid) -> Option<Block<S::Params>> {
+        let id = self.lookup(cid);
+        let cid = *self.cid.get(&id)?;
+        let data = self.data.get(&id)?.clone();
+        Some(Block::new_unchecked(cid, data))
+    }
+
+    fn insert_pending(&mut self, block: Block<S::Params>) {
+        let id = self.lookup(block.cid());
+        let (_cid, data) = block.into_inner();
+        self.data.insert(id, data);
+    }
+
+    fn flush_pending(&mut self, block: &Block<S::Params>) -> Result<(), StoreError> {
+        let id = self.lookup(block.cid());
+        self.cid.remove(&id);
+        self.data.remove(&id);
+        self.lookup.remove(block.cid());
+        self.store.insert(block)?;
+        Ok(())
+    }
+
+    pub fn sender(&self) -> Arc<Sender<Block<S::Params>>> {
+        self.sender.clone()
+    }
+}
+
+#[async_trait]
+impl<S: Store> LinkLoader for AsyncLoader<S>
+where
+    Ipld: Decode<<S::Params as StoreParams>::Codecs>,
+{
+    async fn load_link(&mut self, link: &Cid) -> Result<Option<Ipld>, String> {
+        loop {
+            // check if the block is already pending
+            if let Some(block) = self.get_pending(link) {
+                self.flush_pending(&block).map_err(|e| e.to_string())?;
+                match block.ipld() {
+                    Ok(node) => return Ok(Some(node)),
+                    Err(e) => return Err(e.to_string()),
+                }
+            }
+            // check if it is already in the blockstore
+            if let Ok(block) = self.store.get(link) {
+                match block.ipld() {
+                    Ok(node) => return Ok(Some(node)),
+                    Err(e) => return Err(e.to_string()),
+                };
+            }
+            match self.receiver.recv().await {
+                Ok(block) => {
+                    if block.cid() == link {
+                        self.store.insert(&block).map_err(|e| e.to_string())?;
+                        match block.ipld() {
+                            Ok(node) => return Ok(Some(node)),
+                            Err(e) => return Err(e.to_string()),
+                        }
+                    }
+                    self.insert_pending(block);
+                }
+                Err(e) => return Err(e.to_string()),
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -723,5 +832,74 @@ mod tests {
 
         let current_idx = *index.lock().unwrap();
         assert_eq!(current_idx, 4)
+    }
+
+    #[async_std::test]
+    async fn async_loader() {
+        use futures::join;
+
+        let store = Arc::new(MemStore::<DefaultParams>::default());
+
+        let unrelated1 = ipld!({ "name": "not in this tree" });
+        let unrelated1_block = Block::encode(DagCborCodec, Code::Sha2_256, &unrelated1).unwrap();
+        let unrelated2 = ipld!({ "name": "garbage" });
+        let unrelated2_block = Block::encode(DagCborCodec, Code::Sha2_256, &unrelated2).unwrap();
+
+        let leaf1 = ipld!({ "name": "leaf1", "size": 12 });
+        let leaf1_block = Block::encode(DagCborCodec, Code::Sha2_256, &leaf1).unwrap();
+
+        let leaf2 = ipld!({ "name": "leaf2", "size": 6 });
+        let leaf2_block = Block::encode(DagCborCodec, Code::Sha2_256, &leaf2).unwrap();
+
+        let parent = ipld!({
+            "children": [leaf1_block.cid(), leaf2_block.cid()],
+            "favouriteChild": leaf2_block.cid(),
+            "name": "parent",
+        });
+        let parent_block = Block::encode(DagCborCodec, Code::Sha2_256, &parent).unwrap();
+
+        let loader = AsyncLoader::new(store.clone());
+
+        let selector = Selector::ExploreRecursive {
+            limit: RecursionLimit::None,
+            sequence: Box::new(Selector::ExploreAll {
+                next: Box::new(Selector::ExploreRecursiveEdge),
+            }),
+            current: None,
+        };
+
+        let index = Arc::new(Mutex::new(0));
+
+        let idxmut = index.clone();
+
+        let sender = loader.sender();
+        join!(
+            async move {
+                let mut progress = Progress {
+                    loader: Some(loader),
+                    path: Path::default(),
+                    last_block: None,
+                };
+
+                progress
+                    .walk_adv(&parent, selector, &|prog, ipld| -> Result<(), String> {
+                        let mut idx = idxmut.lock().unwrap();
+                        *idx += 1;
+                        Ok(())
+                    })
+                    .await
+                    .unwrap();
+            },
+            async move {
+                sender.send(unrelated1_block).await.unwrap();
+                sender.send(leaf1_block).await.unwrap();
+                sender.send(leaf2_block).await.unwrap();
+                sender.send(unrelated2_block).await.unwrap();
+                sender.send(parent_block).await.unwrap();
+            },
+        );
+
+        let current_idx = *index.lock().unwrap();
+        assert_eq!(current_idx, 12)
     }
 }

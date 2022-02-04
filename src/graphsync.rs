@@ -3,6 +3,7 @@ use crate::network::{
     InboundFailure, MessageCodec, OutboundFailure, ProtocolName, RequestId as ReqResId,
     RequestResponse, RequestResponseConfig, RequestResponseEvent,
 };
+use crate::request_manager::{RequestEvent, RequestManager};
 use crate::response_manager::ResponseManager;
 use crate::traversal::{Cbor, Error as EncodingError, Selector};
 use async_trait::async_trait;
@@ -123,7 +124,7 @@ impl Default for Config {
 pub struct Graphsync<S: Store> {
     config: Config,
     inner: RequestResponse<GraphsyncCodec<S::Params>>,
-    request_manager: RequestManager,
+    request_manager: RequestManager<S>,
     response_manager: ResponseManager<S>,
 }
 
@@ -140,7 +141,7 @@ where
         Self {
             config,
             inner,
-            request_manager: Default::default(),
+            request_manager: RequestManager::new(store.clone()),
             response_manager: ResponseManager::new(store.clone()),
         }
     }
@@ -272,18 +273,17 @@ where
                 exit = false;
                 self.inner.send_request(&peer, msg);
             }
-            while let Some(event) = self.request_manager.next() {
+            while let Poll::Ready(Some(event)) = self.request_manager.next(ctx) {
                 exit = false;
                 match event {
                     RequestEvent::NewRequest(responder, req) => {
-                        self.inner
-                            .send_request(&responder, GraphsyncMessage::from(req));
+                        self.inner.send_request(&responder, req);
                     }
-                    RequestEvent::BlockReceived(req_id) => {
+                    RequestEvent::Progress(req_id) => {
                         let event = GraphsyncEvent::Progress(req_id);
                         return Poll::Ready(NetworkBehaviourAction::GenerateEvent(event));
                     }
-                    RequestEvent::Complete(req_id, res) => {
+                    RequestEvent::Completed(req_id, res) => {
                         let event = GraphsyncEvent::Complete(req_id, res);
                         return Poll::Ready(NetworkBehaviourAction::GenerateEvent(event));
                     }
@@ -326,18 +326,18 @@ where
                 match event {
                     RequestResponseEvent::Message { peer, message } => {
                         let msg = message.message;
-                        for (_, req) in msg.requests {
-                            self.response_manager.inject_request(
-                                req.id,
-                                peer,
-                                req.root,
-                                req.selector.clone(),
-                            );
-                            break;
-                        }
-                        for (_, res) in msg.responses {
-                            self.request_manager
-                                .inject_response(peer, Response::from(res));
+                        if !msg.requests.is_empty() {
+                            for (_, req) in msg.requests {
+                                self.response_manager.inject_request(
+                                    req.id,
+                                    peer,
+                                    req.root,
+                                    req.selector.clone(),
+                                );
+                                break;
+                            }
+                        } else {
+                            self.request_manager.inject_response(msg);
                         }
                     }
                     RequestResponseEvent::OutboundFailure {
@@ -536,45 +536,6 @@ impl From<GraphsyncRequest> for Request {
             root: req.root,
             selector: req.selector,
         }
-    }
-}
-
-#[derive(Debug)]
-pub enum RequestEvent {
-    NewRequest(PeerId, Request),
-    BlockReceived(RequestId),
-    Complete(RequestId, Result<(), EncodingError>),
-}
-
-#[derive(Default)]
-pub struct RequestManager {
-    id_counter: i32,
-    requests: FnvHashMap<RequestId, Request>,
-    events: VecDeque<RequestEvent>,
-}
-
-/// RequestManager processes outgoing requests and handles incoming responses
-impl RequestManager {
-    fn start_request(&mut self, responder: PeerId, root: Cid, selector: Selector) -> RequestId {
-        let id = self.id_counter;
-        self.id_counter += 1;
-        let req = Request { id, root, selector };
-        self.requests.insert(id, req.clone());
-        self.events
-            .push_back(RequestEvent::NewRequest(responder, req.clone()));
-        id
-    }
-    fn inject_response(&mut self, responder: PeerId, response: Response) {
-        match response.status {
-            ResponseStatusCode::RequestCompletedFull => {
-                self.events
-                    .push_back(RequestEvent::Complete(response.req_id, Ok(())));
-            }
-            _ => {}
-        }
-    }
-    pub fn next(&mut self) -> Option<RequestEvent> {
-        self.events.pop_front()
     }
 }
 

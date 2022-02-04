@@ -262,6 +262,13 @@ impl<L> Progress<L>
 where
     L: LinkLoader + Sync + Send,
 {
+    pub fn new(loader: L) -> Self {
+        Self {
+            loader: Some(loader),
+            path: Default::default(),
+            last_block: None,
+        }
+    }
     #[async_recursion]
     pub async fn walk_adv<F>(
         &mut self,

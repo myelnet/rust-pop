@@ -1,14 +1,12 @@
 use crate::graphsync_pb as pb;
 use crate::network::{
     InboundFailure, MessageCodec, OutboundFailure, ProtocolName, RequestId as ReqResId,
-    RequestResponse, RequestResponseConfig, RequestResponseEvent, RequestResponseMessage,
-    ResponseChannel,
+    RequestResponse, RequestResponseConfig, RequestResponseEvent,
 };
-use crate::traversal::{BlockCallbackLoader, Cbor, Error as EncodingError, Progress, Selector};
-use async_std::task;
+use crate::response_manager::ResponseManager;
+use crate::traversal::{Cbor, Error as EncodingError, Selector};
 use async_trait::async_trait;
 use fnv::FnvHashMap;
-use futures::channel::mpsc;
 use futures::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use futures::stream::{Stream, StreamExt};
 use futures::task::{Context, Poll};
@@ -26,7 +24,6 @@ use libp2p::swarm::{
     ProtocolsHandler,
 };
 use protobuf::Message as PBMessage;
-use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
 use std::error::Error;
 use std::io::{self, Cursor};
@@ -94,8 +91,6 @@ impl<P: StoreParams> MessageCodec for GraphsyncCodec<P> {
     }
 }
 
-pub type Channel = ResponseChannel<GraphsyncMessage>;
-
 #[derive(Debug)]
 pub enum GraphsyncEvent {
     Progress(RequestId),
@@ -129,7 +124,7 @@ pub struct Graphsync<S: Store> {
     config: Config,
     inner: RequestResponse<GraphsyncCodec<S::Params>>,
     request_manager: RequestManager,
-    response_manager: Arc<ResponseManager<S>>,
+    response_manager: ResponseManager<S>,
 }
 
 impl<S: 'static + Store> Graphsync<S>
@@ -146,7 +141,7 @@ where
             config,
             inner,
             request_manager: Default::default(),
-            response_manager: Arc::new(ResponseManager::new(store)),
+            response_manager: ResponseManager::new(store.clone()),
         }
     }
     pub fn add_address(&mut self, peer_id: &PeerId, addr: Multiaddr) {
@@ -273,13 +268,9 @@ where
         let mut exit = false;
         while !exit {
             exit = true;
-            while let Some(event) = self.response_manager.next() {
+            while let Poll::Ready(Some((peer, msg))) = self.response_manager.next(ctx) {
                 exit = false;
-                match event {
-                    ResponseEvent::NewResponse(peer, res) => {
-                        self.inner.send_request(&peer, GraphsyncMessage::from(res));
-                    }
-                }
+                self.inner.send_request(&peer, msg);
             }
             while let Some(event) = self.request_manager.next() {
                 exit = false;
@@ -335,10 +326,13 @@ where
                 match event {
                     RequestResponseEvent::Message { peer, message } => {
                         let msg = message.message;
-                        println!("received message {:?}", msg);
                         for (_, req) in msg.requests {
-                            self.response_manager
-                                .inject_request(peer, Request::from(req));
+                            self.response_manager.inject_request(
+                                req.id,
+                                peer,
+                                req.root,
+                                req.selector.clone(),
+                            );
                             break;
                         }
                         for (_, res) in msg.responses {
@@ -346,7 +340,6 @@ where
                                 .inject_response(peer, Response::from(res));
                         }
                     }
-                    RequestResponseEvent::ResponseSent { .. } => {}
                     RequestResponseEvent::OutboundFailure {
                         peer,
                         request_id,
@@ -388,16 +381,14 @@ pub struct GraphsyncResponse {
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct GraphsyncMessage {
-    protocol_id: Cow<'static, [u8]>,
-    requests: FnvHashMap<RequestId, GraphsyncRequest>,
-    responses: FnvHashMap<RequestId, GraphsyncResponse>,
-    blocks: HashMap<Vec<u8>, Vec<u8>>,
+    pub requests: FnvHashMap<RequestId, GraphsyncRequest>,
+    pub responses: FnvHashMap<RequestId, GraphsyncResponse>,
+    pub blocks: Vec<(Vec<u8>, Vec<u8>)>,
 }
 
 impl Default for GraphsyncMessage {
     fn default() -> Self {
         Self {
-            protocol_id: Cow::Borrowed(b"/ipfs/graphsync/1.0.0"),
             requests: Default::default(),
             responses: Default::default(),
             blocks: Default::default(),
@@ -484,14 +475,13 @@ impl TryFrom<pb::Message> for GraphsyncMessage {
             })
             .collect();
 
-        let blocks: HashMap<_, _> = msg
+        let blocks: Vec<(_, _)> = msg
             .data
             .into_iter()
             .map(|block| (block.prefix, block.data))
             .collect();
 
         Ok(GraphsyncMessage {
-            protocol_id: Cow::Borrowed(b"/ipfs/graphsync/1.0.0"),
             requests,
             responses,
             blocks,
@@ -656,63 +646,6 @@ impl From<GraphsyncResponse> for Response {
     }
 }
 
-#[derive(Debug)]
-pub enum ResponseEvent {
-    NewResponse(PeerId, Response),
-}
-
-#[derive(Default)]
-pub struct ResponseManager<S> {
-    store: Arc<S>,
-    events: VecDeque<ResponseEvent>,
-    outbound: FuturesUnordered<BoxFuture<'static, Result<(), EncodingError>>>,
-}
-
-/// ResponseManager executes requests on the responder side and queues up responses to send back to
-/// the requester
-impl<S> ResponseManager<S>
-where
-    S: Store + 'static,
-    Ipld: Decode<<S::Params as StoreParams>::Codecs>,
-{
-    pub fn new(store: Arc<S>) -> Self {
-        Self {
-            store,
-            events: Default::default(),
-            outbound: FuturesUnordered::new(),
-        }
-    }
-    pub fn inject_request(self: Arc<Self>, peer: PeerId, request: Request) {
-        self.outbound.push(self.exec_request(peer, request).boxed())
-    }
-    async fn exec_request(&mut self, peer: PeerId, request: Request) -> Result<(), EncodingError> {
-        if let Ok(block) = self.store.get(&request.root) {
-            if let Ok(node) = block.ipld() {
-                let loader = BlockCallbackLoader::new(Arc::clone(&self.store), |block| {
-                    match block {
-                        Some(block) => {}
-                        None => {}
-                    };
-                    Ok(())
-                });
-
-                let mut progress = Progress {
-                    loader: Some(loader),
-                    path: Default::default(),
-                    last_block: None,
-                };
-                progress
-                    .walk_adv(&node, request.selector, &|_, _| Ok(()))
-                    .await?
-            }
-        }
-        Ok(())
-    }
-    pub fn next(&mut self) -> Option<ResponseEvent> {
-        self.events.pop_front()
-    }
-}
-
 fn other<E: std::error::Error + Send + Sync + 'static>(e: E) -> io::Error {
     io::Error::new(io::ErrorKind::Other, e)
 }
@@ -777,9 +710,13 @@ impl From<Cid> for Prefix {
 mod tests {
     use super::*;
     use crate::traversal::{RecursionLimit, Selector};
+    use async_std::task;
     use futures::prelude::*;
     use hex;
+    use libipld::cbor::DagCborCodec;
+    use libipld::ipld;
     use libipld::mem::MemStore;
+    use libipld::multihash::Code;
     use libipld::DefaultParams;
     use libp2p::core::muxing::StreamMuxerBox;
     use libp2p::core::transport::Boxed;
@@ -869,6 +806,7 @@ mod tests {
     struct Peer {
         peer_id: PeerId,
         addr: Multiaddr,
+        store: Arc<MemStore<DefaultParams>>,
         swarm: Swarm<Graphsync<MemStore<DefaultParams>>>,
     }
 
@@ -876,7 +814,11 @@ mod tests {
         fn new() -> Self {
             let (peer_id, trans) = mk_transport();
             let store = Arc::new(MemStore::<DefaultParams>::default());
-            let mut swarm = Swarm::new(trans, Graphsync::new(Config::default(), store), peer_id);
+            let mut swarm = Swarm::new(
+                trans,
+                Graphsync::new(Config::default(), store.clone()),
+                peer_id,
+            );
             Swarm::listen_on(&mut swarm, "/ip4/127.0.0.1/tcp/0".parse().unwrap()).unwrap();
             while swarm.next().now_or_never().is_some() {}
             let addr = Swarm::listeners(&swarm).next().unwrap().clone();
@@ -884,6 +826,7 @@ mod tests {
                 peer_id,
                 addr,
                 swarm,
+                store,
             }
         }
 
@@ -932,7 +875,24 @@ mod tests {
         let mut peer2 = Peer::new();
         peer2.add_address(&peer1);
 
+        let store = peer1.store.clone();
         let peer1 = peer1.spawn("peer1");
+
+        let leaf1 = ipld!({ "name": "leaf1", "size": 12 });
+        let leaf1_block = Block::encode(DagCborCodec, Code::Sha2_256, &leaf1).unwrap();
+        store.insert(&leaf1_block);
+
+        let leaf2 = ipld!({ "name": "leaf2", "size": 6 });
+        let leaf2_block = Block::encode(DagCborCodec, Code::Sha2_256, &leaf2).unwrap();
+        store.insert(&leaf2_block);
+
+        let parent = ipld!({
+            "children": [leaf1_block.cid(), leaf2_block.cid()],
+            "favouriteChild": leaf2_block.cid(),
+            "name": "parent",
+        });
+        let parent_block = Block::encode(DagCborCodec, Code::Sha2_256, &parent).unwrap();
+        store.insert(&parent_block);
 
         let selector = Selector::ExploreRecursive {
             limit: RecursionLimit::None,
@@ -941,10 +901,11 @@ mod tests {
             }),
             current: None,
         };
-        let root =
-            Cid::try_from("bafybeibubcd33ndrrmldf2tb4n77vkydszybg53zopwwxrfwwxrd5dl7c4").unwrap();
 
-        let id = peer2.swarm().behaviour_mut().request(peer1, root, selector);
+        let id = peer2
+            .swarm()
+            .behaviour_mut()
+            .request(peer1, parent_block.cid().clone(), selector);
 
         assert_complete_ok(peer2.next().await, id);
     }

@@ -9,7 +9,6 @@ use crate::traversal::{Cbor, Error as EncodingError, Selector};
 use async_trait::async_trait;
 use fnv::FnvHashMap;
 use futures::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
-use futures::stream::{Stream, StreamExt};
 use futures::task::{Context, Poll};
 use futures::{future::BoxFuture, prelude::*, stream::FuturesUnordered};
 use integer_encoding::{VarIntReader, VarIntWriter};
@@ -901,5 +900,62 @@ mod tests {
             18,
         );
         assert_complete_ok(peer2.next().await, id);
+    }
+
+    #[async_std::test]
+    async fn test_unixfs() {
+        use crate::dag_service::{add, cat};
+        use rand::prelude::*;
+
+        let mut peer1 = Peer::new();
+        let mut peer2 = Peer::new();
+        peer2.add_address(&peer1);
+
+        let store = peer1.store.clone();
+
+        // generate 4MiB of random bytes
+        const file_size: usize = 4 * 1024 * 1024;
+        let mut data = vec![0u8; file_size];
+        rand::thread_rng().fill_bytes(&mut data);
+
+        let root = add(store.clone(), &data).unwrap();
+
+        let peer1 = peer1.spawn("peer1");
+
+        let selector = Selector::ExploreRecursive {
+            limit: RecursionLimit::None,
+            sequence: Box::new(Selector::ExploreAll {
+                next: Box::new(Selector::ExploreRecursiveEdge),
+            }),
+            current: None,
+        };
+
+        let cid = root.unwrap();
+
+        let id = peer2.swarm().behaviour_mut().request(peer1, cid, selector);
+
+        for n in 1..=17 {
+            if let Some(event) = peer2.next().await {
+                match event {
+                    GraphsyncEvent::Progress { req_id, size, .. } => {
+                        let mut exp_size = 262158;
+                        if n == 1 {
+                            exp_size = 809;
+                        }
+                        assert_eq!(req_id, id);
+                        assert_eq!(size, exp_size);
+                    }
+                    _ => {
+                        panic!("{:?} is not a complete event", event);
+                    }
+                }
+            }
+        }
+        assert_complete_ok(peer2.next().await, id);
+
+        let store = peer2.store.clone();
+
+        let buf = cat(store, cid).unwrap();
+        assert_eq!(&buf, &data);
     }
 }

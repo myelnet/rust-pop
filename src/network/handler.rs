@@ -1,6 +1,6 @@
 use crate::network::codec::MessageCodec;
 use crate::network::{RequestId, EMPTY_QUEUE_SHRINK_THRESHOLD};
-use futures::{future::BoxFuture, prelude::*, stream::FuturesUnordered};
+use futures::{future::BoxFuture, prelude::*};
 use instant::Instant;
 use libp2p::core::upgrade::{
     InboundUpgrade, NegotiationError, OutboundUpgrade, UpgradeError, UpgradeInfo,
@@ -64,6 +64,7 @@ where
         async move {
             let read = self.codec.read_message(&protocol, &mut io);
             let msg = read.await?;
+            io.close().await?;
             Ok(msg)
         }
         .boxed()

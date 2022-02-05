@@ -760,6 +760,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "filetime"
+version = "0.2.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "975ccf83d8d9d0d84682850a38c8169027be83368805971cc4f238c2b245bc98"
+dependencies = [
+ "cfg-if 1.0.0",
+ "libc",
+ "redox_syscall",
+ "winapi",
+]
+
+[[package]]
 name = "fixedbitset"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2383,10 +2395,12 @@ dependencies = [
  "libp2p",
  "protobuf",
  "protoc-rust",
+ "rand 0.8.4",
  "serde",
  "serde_json",
  "smallvec",
  "thiserror",
+ "unixfs-v1",
 ]
 
 [[package]]
@@ -2584,6 +2598,15 @@ name = "quick-error"
 version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a1d01941d82fa2ab50be1e79e6714289dd7cde78eba4c074bc5a4374f650dfe0"
+
+[[package]]
+name = "quick-protobuf"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6ca6639207ac869e31cca06b8adbc7676278f22b321e51115766009b4f192dbb"
+dependencies = [
+ "byteorder",
+]
 
 [[package]]
 name = "quicksink"
@@ -3234,6 +3257,19 @@ checksum = "9f214e8f697e925001e66ec2c6e37a4ef93f0f78c2eed7814394e10c62025b05"
 dependencies = [
  "generic-array",
  "subtle",
+]
+
+[[package]]
+name = "unixfs-v1"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "382a01bd419bd6c4122bd6e89ed4b9b0865dc843049e9d12cd4490b3d39614b6"
+dependencies = [
+ "either",
+ "filetime",
+ "libipld",
+ "multihash 0.14.0",
+ "quick-protobuf",
 ]
 
 [[package]]

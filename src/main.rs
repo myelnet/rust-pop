@@ -1,3 +1,4 @@
+mod dag_service;
 mod empty_map;
 mod graphsync;
 mod graphsync_pb;

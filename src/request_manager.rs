@@ -16,7 +16,11 @@ use std::sync::{
 #[derive(Debug)]
 pub enum RequestEvent {
     NewRequest(PeerId, GraphsyncMessage),
-    Progress(RequestId),
+    Progress {
+        req_id: RequestId,
+        link: Cid,
+        size: usize,
+    },
     Completed(RequestId, Result<(), Error>),
 }
 
@@ -48,7 +52,17 @@ where
         let store = self.store.clone();
         let sender = self.sender.clone();
         let sel = selector.clone();
-        let loader = AsyncLoader::new(store);
+        let loader = AsyncLoader::new(store, move |blk| {
+            sender
+                .try_send(RequestEvent::Progress {
+                    req_id: id,
+                    link: blk.cid().clone(),
+                    size: blk.data().len(),
+                })
+                .map_err(|e| e.to_string())?;
+            Ok(())
+        });
+        let sender = self.sender.clone();
         self.ongoing.lock().unwrap().insert(id, loader.sender());
         task::spawn(async move {
             let mut progress = Progress::new(loader);
@@ -98,11 +112,32 @@ mod tests {
     use super::*;
     use crate::graphsync::{GraphsyncResponse, ResponseStatusCode};
     use crate::traversal::RecursionLimit;
+    use async_std::channel::RecvError;
     use libipld::cbor::DagCborCodec;
     use libipld::ipld;
     use libipld::mem::MemStore;
     use libipld::multihash::Code;
     use libipld::DefaultParams;
+
+    fn assert_progress_ok(
+        result: Result<RequestEvent, RecvError>,
+        id: RequestId,
+        size2: usize,
+        cid: Cid,
+    ) {
+        if let Ok(evt) = result {
+            match evt {
+                RequestEvent::Progress { req_id, size, link } => {
+                    assert_eq!(req_id, id);
+                    assert_eq!(size, size2);
+                    assert_eq!(link, cid,);
+                }
+                _ => panic!("Received wrong event"),
+            }
+        } else {
+            panic!("Receiver is broken");
+        }
+    }
 
     #[async_std::test]
     async fn test_start_request() {
@@ -170,6 +205,27 @@ mod tests {
                 .push((Prefix::from(*cid).to_bytes(), data.to_vec()));
         }
         manager.inject_response(response);
+        // We receive the first block
+        assert_progress_ok(
+            manager.receiver.lock().unwrap().recv().await,
+            1,
+            161,
+            Cid::try_from("bafyreib6ba6oakwqzsg4vv6sogb7yysu5yqqe7dqth6z3nulqkyj7lom4a").unwrap(),
+        );
+        // We receive the second block
+        assert_progress_ok(
+            manager.receiver.lock().unwrap().recv().await,
+            1,
+            18,
+            Cid::try_from("bafyreiho2e2clchrto55m3va2ygfnbc6d4bl73xldmsqvy2hjino3gxmvy").unwrap(),
+        );
+        // We receive the last block
+        assert_progress_ok(
+            manager.receiver.lock().unwrap().recv().await,
+            1,
+            18,
+            Cid::try_from("bafyreibwnmylvsglbfzglba6jvdz7b5w34p4ypecrbjrincneuskezhcq4").unwrap(),
+        );
         // the traversal should complete and we should receive the result
         if let Ok(evt) = manager.receiver.lock().unwrap().recv().await {
             match evt {

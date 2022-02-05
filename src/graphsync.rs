@@ -94,7 +94,11 @@ impl<P: StoreParams> MessageCodec for GraphsyncCodec<P> {
 
 #[derive(Debug)]
 pub enum GraphsyncEvent {
-    Progress(RequestId),
+    Progress {
+        req_id: RequestId,
+        link: Cid,
+        size: usize,
+    },
     Complete(RequestId, Result<(), EncodingError>),
 }
 
@@ -279,8 +283,8 @@ where
                     RequestEvent::NewRequest(responder, req) => {
                         self.inner.send_request(&responder, req);
                     }
-                    RequestEvent::Progress(req_id) => {
-                        let event = GraphsyncEvent::Progress(req_id);
+                    RequestEvent::Progress { req_id, link, size } => {
+                        let event = GraphsyncEvent::Progress { req_id, link, size };
                         return Poll::Ready(NetworkBehaviourAction::GenerateEvent(event));
                     }
                     RequestEvent::Completed(req_id, res) => {
@@ -822,6 +826,16 @@ mod tests {
         }
     }
 
+    fn assert_progress_ok(event: Option<GraphsyncEvent>, id: RequestId, cid: Cid, size2: usize) {
+        if let Some(GraphsyncEvent::Progress { req_id, link, size }) = event {
+            assert_eq!(req_id, id);
+            assert_eq!(link, cid);
+            assert_eq!(size, size2);
+        } else {
+            panic!("{:?} is not a complete event", event);
+        }
+    }
+
     fn assert_complete_ok(event: Option<GraphsyncEvent>, id: RequestId) {
         if let Some(GraphsyncEvent::Complete(id2, Ok(()))) = event {
             assert_eq!(id2, id);
@@ -868,6 +882,24 @@ mod tests {
             .behaviour_mut()
             .request(peer1, parent_block.cid().clone(), selector);
 
+        assert_progress_ok(
+            peer2.next().await,
+            id,
+            Cid::try_from("bafyreib6ba6oakwqzsg4vv6sogb7yysu5yqqe7dqth6z3nulqkyj7lom4a").unwrap(),
+            161,
+        );
+        assert_progress_ok(
+            peer2.next().await,
+            id,
+            Cid::try_from("bafyreiho2e2clchrto55m3va2ygfnbc6d4bl73xldmsqvy2hjino3gxmvy").unwrap(),
+            18,
+        );
+        assert_progress_ok(
+            peer2.next().await,
+            id,
+            Cid::try_from("bafyreibwnmylvsglbfzglba6jvdz7b5w34p4ypecrbjrincneuskezhcq4").unwrap(),
+            18,
+        );
         assert_complete_ok(peer2.next().await, id);
     }
 }

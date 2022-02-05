@@ -5,7 +5,6 @@ use async_trait::async_trait;
 use fnv::FnvHashMap;
 use libipld::cid::Error as CidError;
 use libipld::codec::Decode;
-use libipld::error::Error as StoreError;
 use libipld::ipld::{Ipld, IpldIndex};
 use libipld::multihash::Error as MultihashError;
 use libipld::store::{Store, StoreParams};
@@ -463,10 +462,13 @@ where
     }
 }
 
-pub struct AsyncLoader<S: Store> {
+// TODO: add a max cache size so we start evicting pending blocks to
+// prevent an attack where a peer would flood us with unrelated blocks
+pub struct AsyncLoader<S: Store, F> {
     store: Arc<S>,
     sender: Arc<Sender<Block<S::Params>>>,
     receiver: Arc<Receiver<Block<S::Params>>>,
+    cb: F,
     /// pending blocks
     next_id: u64,
     cid: FnvHashMap<u64, Cid>,
@@ -474,13 +476,15 @@ pub struct AsyncLoader<S: Store> {
     lookup: FnvHashMap<Cid, u64>,
 }
 
-impl<S: Store> AsyncLoader<S>
+impl<S: Store, F> AsyncLoader<S, F>
 where
+    F: Fn(&Block<S::Params>) -> Result<(), String> + Send + Sync,
     Ipld: Decode<<S::Params as StoreParams>::Codecs>,
 {
-    pub fn new(store: Arc<S>) -> Self {
+    pub fn new(store: Arc<S>, cb: F) -> Self {
         let (s, r) = bounded(1000);
         Self {
+            cb,
             store,
             sender: Arc::new(s),
             receiver: Arc::new(r),
@@ -516,12 +520,13 @@ where
         self.data.insert(id, data);
     }
 
-    fn flush_pending(&mut self, block: &Block<S::Params>) -> Result<(), StoreError> {
+    fn flush_pending(&mut self, block: &Block<S::Params>) -> Result<(), String> {
         let id = self.lookup(block.cid());
         self.cid.remove(&id);
         self.data.remove(&id);
         self.lookup.remove(block.cid());
-        self.store.insert(block)?;
+        self.store.insert(block).map_err(|e| e.to_string())?;
+        (self.cb)(block)?;
         Ok(())
     }
 
@@ -531,15 +536,16 @@ where
 }
 
 #[async_trait]
-impl<S: Store> LinkLoader for AsyncLoader<S>
+impl<S: Store, F> LinkLoader for AsyncLoader<S, F>
 where
+    F: Fn(&Block<S::Params>) -> Result<(), String> + Send + Sync,
     Ipld: Decode<<S::Params as StoreParams>::Codecs>,
 {
     async fn load_link(&mut self, link: &Cid) -> Result<Option<Ipld>, String> {
         loop {
             // check if the block is already pending
             if let Some(block) = self.get_pending(link) {
-                self.flush_pending(&block).map_err(|e| e.to_string())?;
+                self.flush_pending(&block)?;
                 match block.ipld() {
                     Ok(node) => return Ok(Some(node)),
                     Err(e) => return Err(e.to_string()),
@@ -556,6 +562,7 @@ where
                 Ok(block) => {
                     if block.cid() == link {
                         self.store.insert(&block).map_err(|e| e.to_string())?;
+                        (self.cb)(&block)?;
                         match block.ipld() {
                             Ok(node) => return Ok(Some(node)),
                             Err(e) => return Err(e.to_string()),
@@ -858,7 +865,7 @@ mod tests {
         });
         let parent_block = Block::encode(DagCborCodec, Code::Sha2_256, &parent).unwrap();
 
-        let loader = AsyncLoader::new(store.clone());
+        let loader = AsyncLoader::new(store.clone(), |_| Ok(()));
 
         let selector = Selector::ExploreRecursive {
             limit: RecursionLimit::None,

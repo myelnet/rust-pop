@@ -1,3 +1,6 @@
+[workspace]
+members = ["wallet", "filecoin", "payments"]
+
 [package]
 name = "pop"
 version = "0.1.0"
@@ -12,12 +15,12 @@ futures-lite = "1.12.0"
 async-std = { version = "1.6.2", features = ["attributes"] }
 serde = { version = "1.0", features = ["derive"] }
 cid = { version = "0.6", default-features = false, features = ["std"] }
-libipld  = "0.12"
+libipld = "0.12"
 async-recursion = "0.3.1"
 async-trait = "0.1"
 thiserror = "1.0"
 serde_cbor = { package = "cs_serde_cbor", version = "0.12", features = [
-    "tags"
+  "tags",
 ] }
 hex = "0.4.3"
 fnv = "1.0.6"

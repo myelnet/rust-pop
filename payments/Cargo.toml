@@ -1,0 +1,38 @@
+[package]
+name = "payments"
+version = "0.1.0"
+authors = ["Myel <alex@myel.dev>"]
+edition = "2021"
+
+[dependencies]
+# Public
+async-std = { version = "1.9", features = ["attributes"] }
+cid = { package = "forest_cid", version = "0.3", features = ["cbor", "json"] }
+log = "0.4.8"
+num-bigint = { package = "forest_bigint", version = "0.1.1" }
+once_cell = "1.7.2"
+serde = "1.0"
+serde_json = "1.0"
+serde_tuple = "0.5"
+serde_bytes = { package = "cs_serde_bytes", version = "0.12" }
+serde_cbor = { package = "cs_serde_cbor", version = "0.12", features = [
+  "tags",
+] }
+derive_builder = "0.9"
+surf = "2.2.0"
+# Internal
+address = { package = "forest_address", version = "0.3", features = ["json"] }
+lazy_static = "1.4.0"
+filecoin = { path = "../filecoin" }
+wallet = { path = "../wallet" }
+base64 = { version = "0.13" }
+crypto = { package = "forest_crypto", version = "0.5", features = [
+  "json",
+  "blst",
+] }
+
+
+[dependencies.jsonrpc-v2]
+default-features = false
+features = ["easy-errors", "macros", "bytes-v05"]
+version = "0.10.1"

@@ -63,13 +63,10 @@ impl Client {
         P: Serialize + std::fmt::Debug,
         R: DeserializeOwned,
     {
-        println!("{:?}", params);
         let rpc_req = RequestObject::request()
             .with_method(method_name)
             .with_params(serde_json::to_value(&params)?)
             .finish();
-
-        println!("{:?}", rpc_req);
 
         let mut http_res = surf::post(&self.endpoint)
             .content_type("application/json-rpc")
@@ -80,8 +77,6 @@ impl Client {
 
         let code = http_res.status() as i64;
 
-        println!("{:?}", code);
-        println!("{:?}", res);
 
         if code != 200 {
             return Err(Error::Full {

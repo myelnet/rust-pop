@@ -1,7 +1,5 @@
-use crate::graphsync::{
-    GraphsyncMessage, GraphsyncResponse, Prefix, RequestId, ResponseStatusCode,
-};
-use crate::traversal::{BlockCallbackLoader, Progress, Selector};
+use super::traversal::{BlockCallbackLoader, Progress, Selector};
+use super::{GraphsyncMessage, GraphsyncResponse, Prefix, RequestId, ResponseStatusCode};
 use async_std::channel::{bounded, Receiver, Sender};
 use async_std::task::{Context, Poll};
 use futures_lite::stream::StreamExt;

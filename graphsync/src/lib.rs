@@ -1,15 +1,23 @@
-use crate::graphsync_pb as pb;
-use crate::network::{
-    InboundFailure, MessageCodec, OutboundFailure, ProtocolName, RequestId as ReqResId,
-    RequestResponse, RequestResponseConfig, RequestResponseEvent,
-};
-use crate::request_manager::{RequestEvent, RequestManager};
-use crate::response_manager::{ResponseEvent, ResponseManager};
-use crate::traversal::{Cbor, Error as EncodingError, Selector};
+mod empty_map;
+mod graphsync_pb;
+mod network;
+mod request_manager;
+mod response_manager;
+
+pub mod traversal;
+
 use async_trait::async_trait;
 use fnv::FnvHashMap;
 use futures::io::{AsyncRead, AsyncWrite};
 use futures::task::{Context, Poll};
+use graphsync_pb as pb;
+use network::{
+    InboundFailure, MessageCodec, OutboundFailure, ProtocolName, RequestId as ReqResId,
+    RequestResponse, RequestResponseConfig, RequestResponseEvent,
+};
+use request_manager::{RequestEvent, RequestManager};
+use response_manager::{ResponseEvent, ResponseManager};
+use traversal::{Cbor, Error as EncodingError, Selector};
 // use futures::{future::BoxFuture, prelude::*, stream::FuturesUnordered};
 use integer_encoding::{VarIntReader, VarIntWriter};
 use libipld::cid::Version;
@@ -682,8 +690,8 @@ impl From<Cid> for Prefix {
 
 #[cfg(test)]
 mod tests {
+    use super::traversal::{RecursionLimit, Selector};
     use super::*;
-    use crate::traversal::{RecursionLimit, Selector};
     use async_std::task;
     use futures::prelude::*;
     use hex;
@@ -915,7 +923,7 @@ mod tests {
 
     #[async_std::test]
     async fn test_unixfs_transfer() {
-        use crate::dag_service::{add, cat};
+        use dag_service::{add, cat};
         use rand::prelude::*;
 
         let peer1 = Peer::new();

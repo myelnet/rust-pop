@@ -1,5 +1,5 @@
-use crate::graphsync::{GraphsyncMessage, GraphsyncRequest, Prefix, RequestId};
-use crate::traversal::{AsyncLoader, Error, Progress, Selector};
+use super::traversal::{AsyncLoader, Error, Progress, Selector};
+use super::{GraphsyncMessage, GraphsyncRequest, Prefix, RequestId};
 use async_std::channel::{bounded, Receiver, Sender};
 use async_std::task::{Context, Poll};
 use fnv::FnvHashMap;
@@ -115,9 +115,9 @@ where
 
 #[cfg(test)]
 mod tests {
+    use super::super::traversal::RecursionLimit;
+    use super::super::{GraphsyncResponse, ResponseStatusCode};
     use super::*;
-    use crate::graphsync::{GraphsyncResponse, ResponseStatusCode};
-    use crate::traversal::RecursionLimit;
     use async_std::channel::RecvError;
     use libipld::cbor::DagCborCodec;
     use libipld::ipld;

@@ -24,7 +24,7 @@ use libp2p::{
     Transport,
 };
 use rand::prelude::*;
-use std::sync::{Arc};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 #[cfg(not(target_os = "unknown"))]
@@ -71,7 +71,7 @@ impl Node {
         }
     }
 
-    pub async fn run(&mut self) {
+    pub async fn run(mut self) {
         loop {
             match self.swarm.select_next_some().await {
                 SwarmEvent::NewListenAddr { address, .. } => println!("Listening on {:?}", address),

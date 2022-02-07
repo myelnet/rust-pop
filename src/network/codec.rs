@@ -8,7 +8,7 @@ use std::io;
 #[async_trait]
 pub trait MessageCodec {
     /// The type of protocol(s) or protocol versions being negotiated.
-    type Protocol: ProtocolName + Send + Clone;
+    type Protocol: ProtocolName + Send + Sync + Clone;
     /// The type of inbound and outbound message.
     type Message: Send;
 

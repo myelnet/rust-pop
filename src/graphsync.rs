@@ -4,7 +4,7 @@ use crate::network::{
     RequestResponse, RequestResponseConfig, RequestResponseEvent,
 };
 use crate::request_manager::{RequestEvent, RequestManager};
-use crate::response_manager::ResponseManager;
+use crate::response_manager::{ResponseEvent, ResponseManager};
 use crate::traversal::{Cbor, Error as EncodingError, Selector};
 use async_trait::async_trait;
 use fnv::FnvHashMap;
@@ -52,7 +52,7 @@ impl<P: StoreParams> Default for GraphsyncCodec<P> {
     fn default() -> Self {
         Self {
             _marker: PhantomData,
-            max_msg_size: usize::max(P::MAX_BLOCK_SIZE, MAX_CID_SIZE) + 40,
+            max_msg_size: usize::max(P::MAX_BLOCK_SIZE, MAX_CID_SIZE) + 1000000,
         }
     }
 }
@@ -69,6 +69,9 @@ impl<P: StoreParams> MessageCodec for GraphsyncCodec<P> {
         let packet = upgrade::read_length_prefixed(io, self.max_msg_size)
             .await
             .map_err(other)?;
+        if packet.len() == 0 {
+            return Err(io::Error::new(io::ErrorKind::Other, "End of output"));
+        }
         let message = GraphsyncMessage::from_bytes(&packet)
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
         Ok(message)
@@ -86,7 +89,6 @@ impl<P: StoreParams> MessageCodec for GraphsyncCodec<P> {
             .to_bytes()
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
         upgrade::write_length_prefixed(io, bytes).await?;
-        io.close().await?;
         Ok(())
     }
 }
@@ -112,8 +114,8 @@ pub struct Config {
 impl Config {
     pub fn new() -> Self {
         Self {
-            request_timeout: Duration::from_secs(10),
-            connection_keep_alive: Duration::from_secs(10),
+            request_timeout: Duration::from_secs(10 * 60),
+            connection_keep_alive: Duration::from_secs(10 * 60),
         }
     }
 }
@@ -272,9 +274,17 @@ where
         let mut exit = false;
         while !exit {
             exit = true;
-            while let Poll::Ready(Some((peer, msg))) = self.response_manager.next(ctx) {
+            while let Poll::Ready(Some(event)) = self.response_manager.next(ctx) {
                 exit = false;
-                self.inner.send_request(&peer, msg);
+                match event {
+                    ResponseEvent::Partial(peer, msg) => {
+                        self.inner.send_response(&peer, msg);
+                    }
+                    ResponseEvent::Completed(peer, msg) => {
+                        self.inner.send_response(&peer, msg);
+                        self.inner.finish_outbound(&peer);
+                    }
+                }
             }
             while let Poll::Ready(Some(event)) = self.request_manager.next(ctx) {
                 exit = false;
@@ -903,7 +913,7 @@ mod tests {
     }
 
     #[async_std::test]
-    async fn test_unixfs() {
+    async fn test_unixfs_transfer() {
         use crate::dag_service::{add, cat};
         use rand::prelude::*;
 

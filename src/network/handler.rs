@@ -1,6 +1,8 @@
 use crate::network::codec::MessageCodec;
 use crate::network::{RequestId, EMPTY_QUEUE_SHRINK_THRESHOLD};
+use crossbeam_channel::{bounded, Receiver, Sender};
 use futures::{future::BoxFuture, prelude::*};
+use futures_lite::stream::StreamExt;
 use instant::Instant;
 use libp2p::core::upgrade::{
     InboundUpgrade, NegotiationError, OutboundUpgrade, UpgradeError, UpgradeInfo,
@@ -33,6 +35,7 @@ where
 {
     pub(crate) codec: TCodec,
     pub(crate) protocols: SmallVec<[TCodec::Protocol; 2]>,
+    pub(crate) sender: Sender<(RequestId, TCodec::Message)>,
     pub(crate) request_id: RequestId,
 }
 
@@ -52,7 +55,7 @@ impl<TCodec> InboundUpgrade<NegotiatedSubstream> for InboundProtocol<TCodec>
 where
     TCodec: MessageCodec + Send + 'static,
 {
-    type Output = TCodec::Message;
+    type Output = ();
     type Error = io::Error;
     type Future = BoxFuture<'static, Result<Self::Output, Self::Error>>;
 
@@ -62,16 +65,22 @@ where
         protocol: Self::Info,
     ) -> Self::Future {
         async move {
-            let read = self.codec.read_message(&protocol, &mut io);
-            let msg = read.await?;
+            while let Ok(msg) = self.codec.read_message(&protocol, &mut io).await {
+                match self.sender.send((self.request_id, msg)) {
+                    Ok(()) => {}
+                    Err(_) => panic!(
+                        "Expect request receiver to be alive i.e. protocol handler to be alive.",
+                    ),
+                }
+            }
             io.close().await?;
-            Ok(msg)
+            Ok(())
         }
         .boxed()
     }
 }
 
-/// Outbound substream upgrade protocol.
+/// Outbound substream upgrade protocol for responses.
 ///
 /// Sends a message.
 pub struct OutboundProtocol<TCodec>
@@ -81,6 +90,7 @@ where
     pub(crate) codec: TCodec,
     pub(crate) protocols: SmallVec<[TCodec::Protocol; 2]>,
     pub(crate) request_id: RequestId,
+    pub(crate) receiver: Option<Receiver<TCodec::Message>>,
     pub(crate) message: TCodec::Message,
 }
 
@@ -89,7 +99,7 @@ where
     TCodec: MessageCodec,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("RequestProtocol")
+        f.debug_struct("OutboundProtocol")
             .field("request_id", &self.request_id)
             .finish()
     }
@@ -123,6 +133,13 @@ where
         async move {
             let write = self.codec.write_message(&protocol, &mut io, self.message);
             write.await?;
+
+            if let Some(r) = self.receiver {
+                while let Ok(msg) = r.recv() {
+                    let write = self.codec.write_message(&protocol, &mut io, msg);
+                    write.await?;
+                }
+            }
             io.close().await?;
             Ok(())
         }
@@ -155,7 +172,8 @@ where
     /// Outbound upgrades waiting to be emitted as an `OutboundSubstreamRequest`.
     outbound: VecDeque<OutboundProtocol<TCodec>>,
     /// Inbound upgrades waiting for the incoming request.
-    inbound: VecDeque<(RequestId, TCodec::Message)>,
+    inbound: Receiver<(RequestId, TCodec::Message)>,
+    inbound_send: Sender<(RequestId, TCodec::Message)>,
     inbound_request_id: Arc<AtomicU64>,
 }
 
@@ -170,6 +188,7 @@ where
         substream_timeout: Duration,
         inbound_request_id: Arc<AtomicU64>,
     ) -> Self {
+        let (s, r) = bounded(1000);
         Self {
             inbound_protocols,
             codec,
@@ -177,7 +196,8 @@ where
             keep_alive_timeout,
             substream_timeout,
             outbound: VecDeque::new(),
-            inbound: VecDeque::new(),
+            inbound: r,
+            inbound_send: s,
             pending_events: VecDeque::new(),
             pending_error: None,
             inbound_request_id,
@@ -262,15 +282,16 @@ where
         let proto = InboundProtocol {
             protocols: self.inbound_protocols.clone(),
             codec: self.codec.clone(),
+            sender: self.inbound_send.clone(),
             request_id,
         };
 
         SubstreamProtocol::new(proto, request_id).with_timeout(self.substream_timeout)
     }
 
-    fn inject_fully_negotiated_inbound(&mut self, sent: TCodec::Message, request_id: RequestId) {
+    fn inject_fully_negotiated_inbound(&mut self, sent: (), request_id: RequestId) {
         self.keep_alive = KeepAlive::Yes;
-        self.inbound.push_back((request_id, sent));
+        // self.inbound.push_back((request_id, sent));
     }
 
     fn inject_fully_negotiated_outbound(&mut self, result: (), request_id: RequestId) {}
@@ -358,11 +379,11 @@ where
         }
 
         // Check for inbound requests.
-        if let Some((id, msg)) = self.inbound.pop_front() {
+        if let Ok((id, message)) = self.inbound.try_recv() {
             return Poll::Ready(ProtocolsHandlerEvent::Custom(
                 RequestResponseHandlerEvent::Message {
                     request_id: id,
-                    message: msg,
+                    message,
                 },
             ));
         }

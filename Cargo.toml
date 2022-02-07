@@ -23,38 +23,44 @@ features = ["wasm-ext"]
 
 [dependencies]
 libipld = "0.12"
-rand = { version = "0.7", features = ["wasm-bindgen"]}
-async-std = { version = "1.6.2", features = ["attributes", "unstable"]}
+rand = { version = "0.7", features = ["wasm-bindgen"] }
+async-std = { version = "1.6.2", features = ["attributes", "unstable"] }
 graphsync = { path = "./graphsync" }
 dag_service = { path = "./dag_service" }
 
 getrandom = { version = "0.2", features = ["js"] }
 
-log = { version = "0.4.14", optional = true}
-wasm-bindgen = { version = "0.2", optional = true}
+log = { version = "0.4.14", optional = true }
+wasm-bindgen = { version = "0.2", optional = true }
 wasm-bindgen-futures = { version = "0.4", optional = true }
-libp2p-wasm-ext = { version = "0.31.0", features = ["websocket"], optional = true }
+libp2p-wasm-ext = { version = "0.31.0", features = [
+  "websocket",
+], optional = true }
 console_error_panic_hook = { version = "0.1.6", optional = true }
 console_log = { version = "0.1.2", optional = true }
 
 # Side effects and Replacements
 clear_on_drop = { version = "0.2.3", features = ["no_cc"] }
-rand6 = { package = "rand", version = "0.6", features = ["wasm-bindgen"], optional = true }
-futures-timer = { version = "3.0.1", features = ["wasm-bindgen"], optional = true }
+rand6 = { package = "rand", version = "0.6", features = [
+  "wasm-bindgen",
+], optional = true }
+futures-timer = { version = "3.0.1", features = [
+  "wasm-bindgen",
+], optional = true }
 chrono = { version = "0.4", features = ["wasmbind"], optional = true }
 
 [features]
 default = ["native"]
 native = []
 browser = [
-	"libp2p-wasm-ext",
-	"wasm-bindgen",
-	"wasm-bindgen-futures",
-    "console_log",
-    "console_error_panic_hook",
-    "rand6",
-    # "rand",
-    "futures-timer",
-    "chrono",
-    "log"
+  "libp2p-wasm-ext",
+  "wasm-bindgen",
+  "wasm-bindgen-futures",
+  "console_log",
+  "console_error_panic_hook",
+  "rand6",
+  # "rand",
+  "futures-timer",
+  "chrono",
+  "log",
 ]

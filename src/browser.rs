@@ -4,7 +4,7 @@ use wasm_bindgen::prelude::*;
 
 use libp2p_wasm_ext::{ffi, ExtTransport};
 
-pub use console_error_panic_hook::set_once as set_console_error_panic_hook;
+// pub use console_error_panic_hook::set_once as set_console_error_panic_hook;
 pub use console_log::init_with_level as init_console_log;
 
 #[wasm_bindgen]
@@ -22,14 +22,13 @@ pub struct Client {}
 
 /// Starts the client.
 #[wasm_bindgen]
-pub async fn start_client(dial: String, log_level: String) -> Result<Client, JsValue> {
-    start_inner(dial, log_level)
+pub async fn start_client(log_level: String) -> Result<Client, JsValue> {
+    start_inner(log_level)
         .await
         .map_err(|err| JsValue::from_str(&err.to_string()))
 }
 
 async fn start_inner(
-    dial: String,
     log_level: String,
 ) -> Result<Client, Box<dyn std::error::Error>> {
     console_error_panic_hook::set_once();

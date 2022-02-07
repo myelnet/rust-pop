@@ -13,7 +13,7 @@ use libp2p::swarm::{
 };
 use smallvec::SmallVec;
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashMap, VecDeque},
     fmt,
     sync::{atomic::AtomicU64, Arc},
     task::{Context, Poll},
@@ -558,7 +558,7 @@ where
                     ));
 
                 match self.get_connection_mut(&peer, connection) {
-                    Some(connection) => {}
+                    Some(_connection) => {}
                     // Connection closed after `RequestResponseEvent::Request` has been emitted.
                     None => {
                         self.pending_events

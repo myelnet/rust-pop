@@ -1,9 +1,9 @@
 use crate::graphsync::{
-    Extensions, GraphsyncMessage, GraphsyncResponse, Prefix, RequestId, ResponseStatusCode,
+    GraphsyncMessage, GraphsyncResponse, Prefix, RequestId, ResponseStatusCode,
 };
 use crate::traversal::{BlockCallbackLoader, Progress, Selector};
 use async_std::channel::{bounded, Receiver, Sender};
-use async_std::task::{self, Context, Poll};
+use async_std::task::{Context, Poll};
 use futures_lite::stream::StreamExt;
 use libipld::codec::Decode;
 use libipld::ipld::Ipld;
@@ -12,6 +12,12 @@ use libipld::{Block, Cid};
 use libp2p::core::PeerId;
 use std::collections::{HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
+
+#[cfg(not(target_os = "unknown"))]
+use async_std::task::spawn;
+
+#[cfg(target_os = "unknown")]
+use async_std::task::spawn_local as spawn;
 
 const MAX_BLOCK_SIZE: usize = 512 * 1024;
 
@@ -55,7 +61,7 @@ impl<P: StoreParams> ResponseBuilder<P> {
     pub fn completed(&mut self) {
         self.send(ResponseStatusCode::RequestCompletedFull);
     }
-    pub fn failed(&mut self, err: String) {
+    pub fn failed(&mut self, _err: String) {
         self.send(ResponseStatusCode::RequestFailedUnknown);
     }
     pub fn not_found(&mut self) {
@@ -113,7 +119,7 @@ where
         let Self { store, sender, .. } = self;
         let store = Arc::clone(store);
         let sender = Arc::clone(sender);
-        task::spawn(async move {
+        spawn(async move {
             let mut builder = ResponseBuilder::new(id, peer, sender);
             if let Ok(block) = store.get(&root) {
                 builder.add_block(block.clone());

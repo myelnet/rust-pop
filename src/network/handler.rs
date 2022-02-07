@@ -2,7 +2,7 @@ use crate::network::codec::MessageCodec;
 use crate::network::{RequestId, EMPTY_QUEUE_SHRINK_THRESHOLD};
 use crossbeam_channel::{bounded, Receiver, Sender};
 use futures::{future::BoxFuture, prelude::*};
-use futures_lite::stream::StreamExt;
+// use futures_lite::stream::StreamExt;
 use instant::Instant;
 use libp2p::core::upgrade::{
     InboundUpgrade, NegotiationError, OutboundUpgrade, UpgradeError, UpgradeInfo,
@@ -294,7 +294,7 @@ where
         // self.inbound.push_back((request_id, sent));
     }
 
-    fn inject_fully_negotiated_outbound(&mut self, result: (), request_id: RequestId) {}
+    fn inject_fully_negotiated_outbound(&mut self, _result: (), _request_id: RequestId) {}
 
     fn inject_event(&mut self, request: Self::InEvent) {
         self.keep_alive = KeepAlive::Yes;
@@ -362,7 +362,7 @@ where
 
     fn poll(
         &mut self,
-        cx: &mut Context<'_>,
+        _cx: &mut Context<'_>,
     ) -> Poll<ProtocolsHandlerEvent<OutboundProtocol<TCodec>, RequestId, Self::OutEvent, Self::Error>>
     {
         // Check for a pending (fatal) error.

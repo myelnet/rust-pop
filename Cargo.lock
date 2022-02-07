@@ -991,6 +991,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "dag_service"
+version = "0.1.0"
+dependencies = [
+ "libipld",
+ "rand 0.7.3",
+ "unixfs-v1",
+]
+
+[[package]]
 name = "darling"
 version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1709,6 +1718,33 @@ dependencies = [
  "futures-core",
  "js-sys",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "graphsync"
+version = "0.1.0"
+dependencies = [
+ "async-recursion",
+ "async-std",
+ "async-trait",
+ "crossbeam-channel",
+ "cs_serde_cbor",
+ "dag_service",
+ "fnv",
+ "futures",
+ "futures-lite",
+ "hex",
+ "instant",
+ "integer-encoding 3.0.2",
+ "libipld",
+ "libp2p",
+ "protobuf",
+ "protoc-rust",
+ "rand 0.7.3",
+ "serde",
+ "serde_json",
+ "smallvec",
+ "thiserror",
 ]
 
 [[package]]
@@ -3470,36 +3506,21 @@ dependencies = [
 name = "pop"
 version = "0.1.0"
 dependencies = [
- "async-recursion",
  "async-std",
- "async-trait",
  "chrono",
  "clear_on_drop",
  "console_error_panic_hook",
  "console_log",
- "crossbeam-channel",
- "cs_serde_cbor",
- "fnv",
- "futures",
- "futures-lite",
+ "dag_service",
  "futures-timer",
  "getrandom 0.2.4",
- "hex",
- "instant",
- "integer-encoding 3.0.2",
+ "graphsync",
  "libipld",
  "libp2p",
  "libp2p-wasm-ext",
  "log",
- "protobuf",
- "protoc-rust",
  "rand 0.6.5",
  "rand 0.7.3",
- "serde",
- "serde_json",
- "smallvec",
- "thiserror",
- "unixfs-v1",
  "wasm-bindgen",
  "wasm-bindgen-futures",
 ]

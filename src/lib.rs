@@ -1,17 +1,9 @@
 #[cfg(feature = "browser")]
 mod browser;
 
-mod dag_service;
-mod empty_map;
-mod graphsync;
-mod graphsync_pb;
-mod network;
-mod request_manager;
-mod response_manager;
-mod traversal;
-
-use crate::graphsync::{Config as GraphsyncConfig, Graphsync, GraphsyncEvent};
-use crate::traversal::{RecursionLimit, Selector};
+use dag_service;
+use graphsync::traversal::{RecursionLimit, Selector};
+use graphsync::{Config as GraphsyncConfig, Graphsync, GraphsyncEvent};
 use libipld::mem::MemStore;
 use libipld::Cid;
 use libipld::DefaultParams;

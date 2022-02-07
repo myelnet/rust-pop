@@ -41,8 +41,8 @@ async fn start_inner(
         listening_multiaddr: "".parse()?,
         wasm_external_transport: Some(transport),
     };
-    let node = crate::Node::new(config);
-    wasm_bindgen_futures::spawn_local(node.run());
+    let mut node = crate::Node::new(config);
+    async_std::task::spawn_local(node.run());
 
     Ok(Client {})
 }

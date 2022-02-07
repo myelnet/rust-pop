@@ -2,7 +2,7 @@ use crate::network::codec::MessageCodec;
 use crate::network::{RequestId, EMPTY_QUEUE_SHRINK_THRESHOLD};
 use crossbeam_channel::{bounded, Receiver, Sender};
 use futures::{future::BoxFuture, prelude::*};
-use futures_lite::stream::StreamExt;
+// use futures_lite::stream::StreamExt;
 use instant::Instant;
 use libp2p::core::upgrade::{
     InboundUpgrade, NegotiationError, OutboundUpgrade, UpgradeError, UpgradeInfo,

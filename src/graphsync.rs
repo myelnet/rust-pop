@@ -8,7 +8,7 @@ use crate::response_manager::{ResponseEvent, ResponseManager};
 use crate::traversal::{Cbor, Error as EncodingError, Selector};
 use async_trait::async_trait;
 use fnv::FnvHashMap;
-use futures::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
+use futures::io::{AsyncRead, AsyncWrite};
 use futures::task::{Context, Poll};
 // use futures::{future::BoxFuture, prelude::*, stream::FuturesUnordered};
 use integer_encoding::{VarIntReader, VarIntWriter};

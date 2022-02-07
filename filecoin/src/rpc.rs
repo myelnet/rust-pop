@@ -1,8 +1,7 @@
 use jsonrpc_v2::{Error, Id, RequestObject, V2};
 use log::error;
 
-use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::env;
 use std::fmt::Debug;
 
@@ -11,8 +10,8 @@ pub const DEFAULT_URL: &str = "https://infura.myel.cloud";
 
 /// Message Pool API
 pub mod mpool_api {
+    use crate::cid_helpers::CidJson;
     use crate::types::signed_json::SignedMessageJson;
-    use cid::json::CidJson;
 
     pub const MPOOL_PUSH: &str = "Filecoin.MpoolPush";
     pub type MpoolPushParams = (SignedMessageJson,);
@@ -76,7 +75,6 @@ impl Client {
         let res = http_res.body_string().await?;
 
         let code = http_res.status() as i64;
-
 
         if code != 200 {
             return Err(Error::Full {

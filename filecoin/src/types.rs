@@ -1,16 +1,19 @@
+use crate::cid_helpers::*;
 use address::Address;
-use cid::{multihash::MultihashDigest, Cid, Code::Blake2b256, Code::Identity, RAW};
 use crypto::{signature::Signature, Error as CryptoError, Signer};
 use derive_builder::Builder;
+use libipld::multihash::Code;
+use libipld::Cid;
 use num_bigint::bigint_ser;
 use num_bigint::bigint_ser::{BigIntDe, BigIntSer};
 use num_bigint::BigInt;
-use serde::de::DeserializeOwned;
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{de::DeserializeOwned, Deserialize, Deserializer, Serialize, Serializer};
 use serde_cbor::{error::Error as CborError, from_slice, to_vec};
 use serde_tuple::{Deserialize_tuple, Serialize_tuple};
 use std::error::Error;
 use std::fmt;
+use std::vec::Vec;
+
 /// Epoch number of a chain. This acts as a proxy for time within the VM.
 pub type ChainEpoch = i64;
 use lazy_static::lazy_static;
@@ -19,6 +22,8 @@ use lazy_static::lazy_static;
 pub type TokenAmount = BigInt;
 
 pub type MethodNum = u64;
+
+// -----------------------------------------------------------------------------------
 
 /// Serialized bytes to be used as parameters into actor methods.
 /// This data is (de)serialized as a byte string.
@@ -55,12 +60,14 @@ impl Serialized {
     }
 }
 
-pub const PAYCH_ACTOR_CODE_ID_NAME: &[u8] = b"fil/5/paymentchannel";
-
 lazy_static! {
     pub static ref INIT_ACTOR_ADDR: Address = Address::new_id(1);
-    pub static ref PAYCH_ACTOR_CODE_ID: Cid =
-        Cid::new_v1(RAW, Identity.digest(&PAYCH_ACTOR_CODE_ID_NAME));
+    pub static ref PAYCH_ACTOR_CODE_ID: PaychActorCodeId = PaychActorCodeId {
+        bytes: Vec::from([
+            1u8, 85, 0, 20, 102, 105, 108, 47, 53, 47, 112, 97, 121, 109, 101, 110, 116, 99, 104,
+            97, 110, 110, 101, 108,
+        ])
+    };
 }
 /// Cbor utility functions for serializable objects
 pub trait Cbor: Serialize + DeserializeOwned {
@@ -77,7 +84,7 @@ pub trait Cbor: Serialize + DeserializeOwned {
     /// Returns the content identifier of the raw block of data
     /// Default is Blake2b256 hash
     fn cid(&self) -> Result<Cid, CborError> {
-        Ok(cid::new_from_cbor(&self.marshal_cbor()?, Blake2b256))
+        Ok(new_cid_from_cbor(&self.marshal_cbor()?, Code::Blake2b256))
     }
 }
 
@@ -112,7 +119,7 @@ impl Cbor for ConstructorParams {}
 
 #[derive(Serialize_tuple, Deserialize_tuple)]
 pub struct ExecParams {
-    pub code_cid: Cid,
+    pub code_cid: PaychActorCodeId,
     pub constructor_params: Serialized,
 }
 
@@ -239,13 +246,6 @@ impl UnsignedMessage {
         // Safe to unwrap here, unsigned message cannot fail to serialize.
         self.cid().unwrap().to_bytes()
     }
-
-    // /// Helper function to convert the message into signing bytes.
-    // /// This function returns the message `Cid` bytes.
-    // pub fn to_signing_bytes(&self) -> Vec<u8> {
-    //     // Safe to unwrap here, unsigned message cannot fail to serialize.
-    //     self.cid().unwrap().to_bytes()
-    // }
 
     /// Semantic validation and validates the message has enough gas.
     #[cfg(feature = "proofs")]
@@ -396,9 +396,7 @@ impl Cbor for UnsignedMessage {}
 pub mod unsigned_json {
     use super::*;
     use address::json::AddressJson;
-    use cid::Cid;
     use num_bigint::bigint_ser;
-    use serde::ser;
 
     /// Wrapper for serializing and deserializing a UnsignedMessage from JSON.
     #[derive(Deserialize, Serialize, Debug)]
@@ -440,8 +438,8 @@ pub mod unsigned_json {
         #[serde(rename = "Method")]
         method: u64,
         params: Option<String>,
-        #[serde(default, rename = "CID", with = "cid::json::opt")]
-        cid: Option<Cid>,
+        // #[serde(default, rename = "CID", with = "cid::json::opt")]
+        // cid: Option<Cid>,
     }
 
     pub fn serialize<S>(m: &UnsignedMessage, serializer: S) -> Result<S::Ok, S::Error>
@@ -459,7 +457,7 @@ pub mod unsigned_json {
             gas_premium: m.gas_premium.clone(),
             method: m.method,
             params: Some(base64::encode(&m.params.bytes())),
-            cid: Some(m.cid().map_err(ser::Error::custom)?),
+            // cid: Some(m.cid().map_err(ser::Error::custom)?),
         }
         .serialize(serializer)
     }
@@ -615,9 +613,8 @@ impl Cbor for SignedMessage {}
 // #[cfg(feature = "json")]
 pub mod signed_json {
     use super::*;
-    use cid::Cid;
     use crypto::signature;
-    use serde::{ser, Deserialize, Deserializer, Serialize, Serializer};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
     /// Wrapper for serializing and deserializing a SignedMessage from JSON.
     #[derive(Debug, Deserialize, Serialize)]
@@ -652,13 +649,13 @@ pub mod signed_json {
             message: &'a UnsignedMessage,
             #[serde(with = "signature::json")]
             signature: &'a Signature,
-            #[serde(default, rename = "CID", with = "cid::json::opt")]
-            cid: Option<Cid>,
+            // #[serde(default, rename = "CID", with = "cid::json::opt")]
+            // cid: Option<Cid>,
         }
         SignedMessageSer {
             message: &m.message,
             signature: &m.signature,
-            cid: Some(m.cid().map_err(ser::Error::custom)?),
+            // cid: Some(m.cid().map_err(ser::Error::custom)?),
         }
         .serialize(serializer)
     }

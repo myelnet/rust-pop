@@ -14,17 +14,15 @@ crypto = { package = "forest_crypto", version = "0.5", features = [
   "json",
   "blst",
 ] }
-bls-signatures = { version = "0.9", default-features = false, features = [
-  "blst",
-] }
 libsecp256k1 = "0.3.4"
 rand = "0.7.3"
-encoding = { package = "forest_encoding", version = "0.2.1" }
 serde = { version = "1.0", features = ["derive"] }
 base64 = "0.13"
 serde_json = "1.0.57"
 log = "0.4.8"
 libc = "0.2"
+libipld = "0.12"
+slice_as_array = { version = "1.1.0", default-features = false }
 
 [features]
 json = ["crypto/json"]

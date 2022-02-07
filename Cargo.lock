@@ -1218,10 +1218,10 @@ dependencies = [
  "fil_types",
  "forest_address",
  "forest_bigint",
- "forest_cid",
  "forest_crypto",
  "jsonrpc-v2",
  "lazy_static",
+ "libipld",
  "log",
  "once_cell",
  "serde",
@@ -3231,7 +3231,6 @@ dependencies = [
  "filecoin",
  "forest_address",
  "forest_bigint",
- "forest_cid",
  "forest_crypto",
  "jsonrpc-v2",
  "lazy_static",
@@ -3397,7 +3396,6 @@ dependencies = [
  "async-recursion",
  "async-std",
  "async-trait",
- "cid 0.6.1",
  "cs_serde_cbor",
  "fnv",
  "futures",
@@ -4128,6 +4126,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9def91fd1e018fe007022791f865d0ccc9b3a0d5001e01aabb8b40e46000afb5"
 
 [[package]]
+name = "slice_as_array"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "64c963ee59ddedb5ab95dc2cd97c48b4a292572a52c5636fbbabdb9985bfe4c3"
+
+[[package]]
 name = "sluice"
 version = "0.5.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4740,16 +4744,16 @@ name = "wallet"
 version = "0.1.0"
 dependencies = [
  "base64 0.13.0",
- "bls-signatures",
  "forest_address",
  "forest_crypto",
- "forest_encoding",
  "libc",
+ "libipld",
  "libsecp256k1 0.3.5",
  "log",
  "rand 0.7.3",
  "serde",
  "serde_json",
+ "slice_as_array",
  "thiserror",
 ]
 

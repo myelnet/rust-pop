@@ -62,7 +62,7 @@ impl MessageBuilder for PaymentMessage {
 
         let exec = Serialized::new(
             ExecParams {
-                code_cid: *PAYCH_ACTOR_CODE_ID,
+                code_cid: PAYCH_ACTOR_CODE_ID.clone(),
                 constructor_params: params,
             }
             .marshal_cbor()

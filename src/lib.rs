@@ -1,14 +1,34 @@
+#[cfg(feature = "browser")]
+mod browser;
+
+mod dag_service;
+mod empty_map;
+mod graphsync;
+mod graphsync_pb;
+mod network;
+mod request_manager;
+mod response_manager;
+mod traversal;
+
 use crate::graphsync::{Config as GraphsyncConfig, Graphsync};
 use libipld::mem::MemStore;
 use libipld::DefaultParams;
 use libp2p::futures::StreamExt;
 use libp2p::swarm::{Swarm, SwarmEvent};
+use libp2p::wasm_ext;
 use libp2p::{
-    core, core::muxing::StreamMuxerBox, core::transport::Boxed, identity, mplex, noise, yamux,
-    Multiaddr, PeerId, Transport,
+    self, core, core::muxing::StreamMuxerBox, core::transport::Boxed,
+    core::transport::OptionalTransport, identity, mplex, noise, yamux, Multiaddr, PeerId,
+    Transport,
 };
 use std::sync::Arc;
 use std::time::Duration;
+
+#[cfg(not(target_os = "unknown"))]
+use libp2p::{dns, tcp, websocket};
+
+#[cfg(not(target_os = "unknown"))]
+use async_std::task;
 
 pub struct Node {
     swarm: Swarm<Graphsync<MemStore<DefaultParams>>>,
@@ -17,6 +37,7 @@ pub struct Node {
 #[derive(Debug)]
 pub struct NodeConfig {
     pub listening_multiaddr: Multiaddr,
+    pub wasm_external_transport: Option<wasm_ext::ExtTransport>,
 }
 
 impl Node {
@@ -25,7 +46,7 @@ impl Node {
         let local_peer_id = PeerId::from(local_key.public());
         println!("Local peer id: {:?}", local_peer_id);
 
-        let transport = build_transport(local_key.clone());
+        let transport = build_transport(config.wasm_external_transport, local_key.clone());
 
         let store = Arc::new(MemStore::<DefaultParams>::default());
         // temp behaviour to be replaced with graphsync
@@ -34,6 +55,9 @@ impl Node {
 
         let mut swarm = Swarm::new(transport, behaviour, local_peer_id);
 
+        // Listen on all interfaces and whatever port the OS assigns.  Websockt can't receive incoming connections
+        // on browser
+        #[cfg(not(target_os = "unknown"))]
         Swarm::listen_on(&mut swarm, config.listening_multiaddr).unwrap();
 
         Node { swarm }
@@ -51,10 +75,35 @@ impl Node {
 }
 
 /// Builds the transport stack that LibP2P will communicate over.
-pub fn build_transport(local_key: identity::Keypair) -> Boxed<(PeerId, StreamMuxerBox)> {
-    let transport = libp2p::tcp::TcpConfig::new().nodelay(true);
-    let transport = libp2p::websocket::WsConfig::new(transport.clone()).or_transport(transport);
-    let transport = async_std::task::block_on(libp2p::dns::DnsConfig::system(transport)).unwrap();
+pub fn build_transport(
+    wasm_external_transport: Option<wasm_ext::ExtTransport>,
+    local_key: identity::Keypair,
+) -> Boxed<(PeerId, StreamMuxerBox)> {
+    // Can have no external transport if not compiling for wasm
+    let transport = if let Some(t) = wasm_external_transport {
+        OptionalTransport::some(t)
+    } else {
+        OptionalTransport::none()
+    };
+
+    // if not compiling for wasm
+    #[cfg(not(target_os = "unknown"))]
+    let transport = transport.or_transport({
+        let desktop_trans = tcp::TcpConfig::new().nodelay(true);
+        let desktop_trans =
+            websocket::WsConfig::new(desktop_trans.clone()).or_transport(desktop_trans);
+        OptionalTransport::some(
+            if let Ok(dns) = task::block_on(dns::DnsConfig::system(desktop_trans.clone())) {
+                dns.boxed()
+            } else {
+                desktop_trans.map_err(dns::DnsErr::Transport).boxed()
+            },
+        )
+    });
+
+    // let transport = libp2p::tcp::TcpConfig::new().nodelay(true);
+    // let transport = libp2p::websocket::WsConfig::new(transport.clone()).or_transport(transport);
+    // let transport = async_std::task::block_on(libp2p::dns::DnsConfig::system(transport)).unwrap();
     let auth_config = {
         let dh_keys = noise::Keypair::<noise::X25519Spec>::new()
             .into_authentic(&local_key)

@@ -6,13 +6,25 @@ name = "pop"
 version = "0.1.0"
 edition = "2021"
 
+[[bin]]
+name = "bootnode"
+path = "src/bin/main.rs"
+required-features = ["native"]
+
+
+[lib]
+crate-type = ["cdylib", "rlib"]
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[dependencies.libp2p]
+version = "0.42.0"
+default-features = true
+features = ["wasm-ext"]
+
 [dependencies]
-libp2p = "0.42"
 futures = "0.3.19"
 futures-lite = "1.12.0"
-async-std = { version = "1.6.2", features = ["attributes"] }
+async-std = { version = "1.6.2", features = ["attributes", "unstable"]}
 serde = { version = "1.0", features = ["derive"] }
 libipld = "0.12"
 async-recursion = "0.3.1"
@@ -28,6 +40,21 @@ integer-encoding = { version = "3.0", default-features = false }
 smallvec = "1.6.1"
 instant = "0.1.11"
 unixfs-v1 = "0.2.1"
+getrandom = { version = "0.2", features = ["js"] }
+
+log = { version = "0.4.14", optional = true}
+wasm-bindgen = { version = "0.2", optional = true}
+wasm-bindgen-futures = { version = "0.4", optional = true }
+libp2p-wasm-ext = { version = "0.31.0", features = ["websocket"], optional = true }
+console_error_panic_hook = { version = "0.1.6", optional = true }
+console_log = { version = "0.1.2", optional = true }
+
+# Side effects and Replacements
+clear_on_drop = { version = "0.2.3", features = ["no_cc"] }
+rand6 = { package = "rand", version = "0.6", features = ["wasm-bindgen"], optional = true }
+rand = { version = "0.7", features = ["wasm-bindgen"], optional = true }
+futures-timer = { version = "3.0.1", features = ["wasm-bindgen"], optional = true }
+chrono = { version = "0.4", features = ["wasmbind"], optional = true }
 
 [build-dependencies]
 protoc-rust = "2.25.2"
@@ -35,3 +62,19 @@ protoc-rust = "2.25.2"
 [dev-dependencies]
 serde_json = "1.0"
 rand = "0.8.4"
+
+[features]
+default = ["native"]
+native = []
+browser = [
+	"libp2p-wasm-ext",
+	"wasm-bindgen",
+	"wasm-bindgen-futures",
+    "console_log",
+    "console_error_panic_hook",
+    "rand6",
+    "rand",
+    "futures-timer",
+    "chrono",
+    "log"
+]

@@ -10,13 +10,13 @@ use async_trait::async_trait;
 use fnv::FnvHashMap;
 use futures::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use futures::task::{Context, Poll};
-use futures::{future::BoxFuture, prelude::*, stream::FuturesUnordered};
+// use futures::{future::BoxFuture, prelude::*, stream::FuturesUnordered};
 use integer_encoding::{VarIntReader, VarIntWriter};
 use libipld::cid::Version;
 use libipld::codec::Decode;
 use libipld::multihash::{Code, Multihash, MultihashDigest};
 use libipld::store::{Store, StoreParams};
-use libipld::{Block, Cid, DefaultParams, Ipld, Result as StoreResult};
+use libipld::{Cid, Ipld};
 use libp2p::core::connection::{ConnectionId, ListenerId};
 use libp2p::core::{upgrade, ConnectedPoint, Multiaddr, PeerId};
 use libp2p::swarm::{
@@ -24,7 +24,7 @@ use libp2p::swarm::{
     ProtocolsHandler,
 };
 use protobuf::Message as PBMessage;
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::error::Error;
 use std::io::{self, Cursor};
 use std::marker::PhantomData;
@@ -682,6 +682,7 @@ mod tests {
     use libipld::mem::MemStore;
     use libipld::multihash::Code;
     use libipld::DefaultParams;
+    use libipld::{Block, Cid};
     use libp2p::core::muxing::StreamMuxerBox;
     use libp2p::core::transport::Boxed;
     use libp2p::identity;
@@ -710,19 +711,19 @@ mod tests {
         let msg = GraphsyncMessage::try_from(req).unwrap();
 
         let msgc = msg.clone();
-        let msgEncoded = msg.to_bytes().unwrap();
+        let msg_encoded = msg.to_bytes().unwrap();
 
-        let desMsg = GraphsyncMessage::from_bytes(&msgEncoded).unwrap();
+        let des_msg = GraphsyncMessage::from_bytes(&msg_encoded).unwrap();
 
-        assert_eq!(msgc, desMsg)
+        assert_eq!(msgc, des_msg)
     }
 
     #[test]
     fn proto_msg_compat() {
         // request encoded from JS implementation
-        let jsHex = hex::decode("124a0801122401701220340887bdb4718b1632ea61e37ffaab03967013777973ed6bc4b6b5e23e8d7f171a1aa16152a2616ca1646e6f6e65a0623a3ea16161a1613ea16140a0280030003800").unwrap();
+        let js_hex = hex::decode("124a0801122401701220340887bdb4718b1632ea61e37ffaab03967013777973ed6bc4b6b5e23e8d7f171a1aa16152a2616ca1646e6f6e65a0623a3ea16161a1613ea16140a0280030003800").unwrap();
         // request encoded from go implementation
-        let goHex = hex::decode("12440801122401701220340887bdb4718b1632ea61e37ffaab03967013777973ed6bc4b6b5e23e8d7f171a1aa16152a2616ca1646e6f6e65a0623a3ea16161a1613ea16140a0").unwrap();
+        let go_hex = hex::decode("12440801122401701220340887bdb4718b1632ea61e37ffaab03967013777973ed6bc4b6b5e23e8d7f171a1aa16152a2616ca1646e6f6e65a0623a3ea16161a1613ea16140a0").unwrap();
 
         let selector = Selector::ExploreRecursive {
             limit: RecursionLimit::None,
@@ -740,13 +741,13 @@ mod tests {
 
         let msg = GraphsyncMessage::try_from(req).unwrap();
 
-        let jsDesMsg = GraphsyncMessage::from_bytes(&jsHex).unwrap();
+        let js_des_msg = GraphsyncMessage::from_bytes(&js_hex).unwrap();
 
-        assert_eq!(msg, jsDesMsg);
+        assert_eq!(msg, js_des_msg);
 
-        let goDesMsg = GraphsyncMessage::from_bytes(&goHex).unwrap();
+        let _go_des_msg = GraphsyncMessage::from_bytes(&go_hex).unwrap();
 
-        assert_eq!(msg, jsDesMsg)
+        assert_eq!(msg, js_des_msg)
     }
 
     fn mk_transport() -> (PeerId, Boxed<(PeerId, StreamMuxerBox)>) {
@@ -804,7 +805,7 @@ mod tests {
             &mut self.swarm
         }
 
-        fn spawn(mut self, name: &'static str) -> PeerId {
+        fn spawn(mut self, _name: &'static str) -> PeerId {
             let peer_id = self.peer_id;
             task::spawn(async move {
                 loop {
@@ -845,7 +846,7 @@ mod tests {
 
     #[async_std::test]
     async fn test_request() {
-        let mut peer1 = Peer::new();
+        let peer1 = Peer::new();
         let mut peer2 = Peer::new();
         peer2.add_address(&peer1);
 
@@ -854,11 +855,11 @@ mod tests {
 
         let leaf1 = ipld!({ "name": "leaf1", "size": 12 });
         let leaf1_block = Block::encode(DagCborCodec, Code::Sha2_256, &leaf1).unwrap();
-        store.insert(&leaf1_block);
+        store.insert(&leaf1_block).unwrap();
 
         let leaf2 = ipld!({ "name": "leaf2", "size": 6 });
         let leaf2_block = Block::encode(DagCborCodec, Code::Sha2_256, &leaf2).unwrap();
-        store.insert(&leaf2_block);
+        store.insert(&leaf2_block).unwrap();
 
         let parent = ipld!({
             "children": [leaf1_block.cid(), leaf2_block.cid()],
@@ -866,7 +867,7 @@ mod tests {
             "name": "parent",
         });
         let parent_block = Block::encode(DagCborCodec, Code::Sha2_256, &parent).unwrap();
-        store.insert(&parent_block);
+        store.insert(&parent_block).unwrap();
 
         let selector = Selector::ExploreRecursive {
             limit: RecursionLimit::None,
@@ -907,15 +908,15 @@ mod tests {
         use crate::dag_service::{add, cat};
         use rand::prelude::*;
 
-        let mut peer1 = Peer::new();
+        let peer1 = Peer::new();
         let mut peer2 = Peer::new();
         peer2.add_address(&peer1);
 
         let store = peer1.store.clone();
 
         // generate 4MiB of random bytes
-        const file_size: usize = 4 * 1024 * 1024;
-        let mut data = vec![0u8; file_size];
+        const FILE_SIZE: usize = 4 * 1024 * 1024;
+        let mut data = vec![0u8; FILE_SIZE];
         rand::thread_rng().fill_bytes(&mut data);
 
         let root = add(store.clone(), &data).unwrap();

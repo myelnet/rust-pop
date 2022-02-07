@@ -729,7 +729,7 @@ mod tests {
             ..
         } = gen_data();
 
-        let selData = r#"
+        let sel_data = r#"
             {
                 "R": {
                     "l": {
@@ -744,7 +744,7 @@ mod tests {
                     }
                 }
             }"#;
-        let selector: Selector = serde_json::from_str(selData).unwrap();
+        let selector: Selector = serde_json::from_str(sel_data).unwrap();
 
         let mut progress = Progress {
             loader: Some(loader),
@@ -777,8 +777,8 @@ mod tests {
             ..
         } = gen_data();
 
-        let selData = hex::decode("a16152a2616ca1646e6f6e65a0623a3ea16161a1613ea16140a0").unwrap();
-        let selector = Selector::unmarshal_cbor(&selData).unwrap();
+        let sel_data = hex::decode("a16152a2616ca1646e6f6e65a0623a3ea16161a1613ea16140a0").unwrap();
+        let selector = Selector::unmarshal_cbor(&sel_data).unwrap();
 
         let mut progress = Progress {
             loader: Some(loader),

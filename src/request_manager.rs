@@ -1,7 +1,7 @@
 use crate::graphsync::{GraphsyncMessage, GraphsyncRequest, Prefix, RequestId};
 use crate::traversal::{AsyncLoader, Error, Progress, Selector};
 use async_std::channel::{bounded, Receiver, Sender};
-use async_std::task::{self, Context, Poll};
+use async_std::task::{Context, Poll};
 use fnv::FnvHashMap;
 use futures_lite::stream::StreamExt;
 use libipld::codec::Decode;
@@ -12,6 +12,12 @@ use std::sync::{
     atomic::{AtomicI32, Ordering},
     Arc, Mutex,
 };
+
+#[cfg(not(target_os = "unknown"))]
+use async_std::task::spawn;
+
+#[cfg(target_os = "unknown")]
+use async_std::task::spawn_local as spawn;
 
 #[derive(Debug)]
 pub enum RequestEvent {
@@ -64,7 +70,7 @@ where
         });
         let sender = self.sender.clone();
         self.ongoing.lock().unwrap().insert(id, loader.sender());
-        task::spawn(async move {
+        spawn(async move {
             let mut progress = Progress::new(loader);
             let result = progress
                 .walk_adv(&Ipld::Link(root), selector, &|_, _| Ok(()))

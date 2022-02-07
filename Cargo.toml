@@ -25,13 +25,14 @@ hex = "0.4.3"
 fnv = "1.0.6"
 protobuf = "2.25.2"
 integer-encoding = { version = "3.0", default-features = false }
-smallvec = "1.6.1"
+smallvec = "1.8.0"
 instant = "0.1.11"
 unixfs-v1 = "0.2.1"
+rand = "0.8.4"
+crossbeam-channel = "0.5.2"
 
 [build-dependencies]
 protoc-rust = "2.25.2"
 
 [dev-dependencies]
 serde_json = "1.0"
-rand = "0.8.4"

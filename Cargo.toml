@@ -37,9 +37,14 @@ hex = "0.4.3"
 fnv = "1.0.6"
 protobuf = "2.25.2"
 integer-encoding = { version = "3.0", default-features = false }
-smallvec = "1.6.1"
+smallvec = "1.8.0"
 instant = "0.1.11"
 unixfs-v1 = "0.2.1"
+# rand = "0.8.4"
+crossbeam-channel = "0.5.2"
+rand = { version = "0.7", features = ["wasm-bindgen"]}
+
+
 getrandom = { version = "0.2", features = ["js"] }
 
 log = { version = "0.4.14", optional = true}
@@ -52,16 +57,15 @@ console_log = { version = "0.1.2", optional = true }
 # Side effects and Replacements
 clear_on_drop = { version = "0.2.3", features = ["no_cc"] }
 rand6 = { package = "rand", version = "0.6", features = ["wasm-bindgen"], optional = true }
-rand = { version = "0.7", features = ["wasm-bindgen"], optional = true }
 futures-timer = { version = "3.0.1", features = ["wasm-bindgen"], optional = true }
 chrono = { version = "0.4", features = ["wasmbind"], optional = true }
+
 
 [build-dependencies]
 protoc-rust = "2.25.2"
 
 [dev-dependencies]
 serde_json = "1.0"
-rand = "0.8.4"
 
 [features]
 default = ["native"]
@@ -73,7 +77,7 @@ browser = [
     "console_log",
     "console_error_panic_hook",
     "rand6",
-    "rand",
+    # "rand",
     "futures-timer",
     "chrono",
     "log"

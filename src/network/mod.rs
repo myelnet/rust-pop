@@ -3,6 +3,7 @@ pub mod handler;
 
 pub use codec::{MessageCodec, ProtocolName};
 
+use crossbeam_channel::{bounded, Sender};
 use handler::{OutboundProtocol, RequestResponseHandler, RequestResponseHandlerEvent};
 use libp2p::core::{connection::ConnectionId, ConnectedPoint, Multiaddr, PeerId};
 use libp2p::swarm::{
@@ -200,7 +201,7 @@ where
     >,
     /// The currently connected peers, their pending outbound and inbound responses and their known,
     /// reachable addresses, if any.
-    connected: HashMap<PeerId, SmallVec<[Connection; 2]>>,
+    connected: HashMap<PeerId, SmallVec<[Connection<TCodec::Message>; 2]>>,
     /// Externally managed addresses via `add_address` and `remove_address`.
     addresses: HashMap<PeerId, SmallVec<[Multiaddr; 6]>>,
     /// Requests that have not yet been sent and are waiting for a connection
@@ -257,6 +258,7 @@ where
             codec: self.codec.clone(),
             protocols: self.outbound_protocols.clone(),
             message,
+            receiver: None,
         };
 
         if let Some(request) = self.try_send_request(peer, request) {
@@ -274,6 +276,58 @@ where
         }
 
         request_id
+    }
+
+    /// if no outbound substream exists, creates a new one and keeps reference to a channel Sender
+    /// otherwise sends directly to the sender.
+    pub fn send_response(&mut self, peer: &PeerId, message: TCodec::Message) -> RequestId {
+        let request_id = self.next_request_id();
+        if let Some(connections) = self.connected.get_mut(peer) {
+            if let Some(conn) = connections.first_mut() {
+                // If we have an open substream, we send to it instead of creating a new one
+                if let Some((req_id, sender)) = &conn.open {
+                    match sender.send(message) {
+                        Ok(()) => {}
+                        Err(e) => {
+                            println!("failed to send {:?}", e);
+                        }
+                    }
+                    return req_id.clone();
+                }
+                let (s, r) = bounded(1000);
+                let response = OutboundProtocol {
+                    request_id,
+                    codec: self.codec.clone(),
+                    protocols: self.outbound_protocols.clone(),
+                    message,
+                    receiver: Some(r.clone()),
+                };
+                conn.open = Some((request_id, s.clone()));
+                if let Some(request) = self.try_send_request(peer, response) {
+                    let handler = self.new_handler();
+                    self.pending_events.push_back(NetworkBehaviourAction::Dial {
+                        opts: DialOpts::peer_id(*peer)
+                            .condition(dial_opts::PeerCondition::Disconnected)
+                            .build(),
+                        handler,
+                    });
+                    self.pending_outbound_requests
+                        .entry(*peer)
+                        .or_default()
+                        .push(request);
+                }
+            }
+        }
+        request_id
+    }
+
+    /// drops reference to the sender so the outbound substream can be closed
+    pub fn finish_outbound(&mut self, peer: &PeerId) {
+        if let Some(connections) = self.connected.get_mut(peer) {
+            if let Some(conn) = connections.first_mut() {
+                conn.open = None;
+            }
+        }
     }
 
     /// Adds a known address for a peer that can be used for
@@ -344,7 +398,7 @@ where
         &mut self,
         peer: &PeerId,
         connection: ConnectionId,
-    ) -> Option<&mut Connection> {
+    ) -> Option<&mut Connection<TCodec::Message>> {
         self.connected
             .get_mut(peer)
             .and_then(|connections| connections.iter_mut().find(|c| c.id == connection))
@@ -586,13 +640,18 @@ where
 const EMPTY_QUEUE_SHRINK_THRESHOLD: usize = 100;
 
 /// Internal information tracked for an established connection.
-struct Connection {
+struct Connection<M> {
     id: ConnectionId,
     address: Option<Multiaddr>,
+    open: Option<(RequestId, Sender<M>)>,
 }
 
-impl Connection {
+impl<M> Connection<M> {
     fn new(id: ConnectionId, address: Option<Multiaddr>) -> Self {
-        Self { id, address }
+        Self {
+            id,
+            address,
+            open: None,
+        }
     }
 }

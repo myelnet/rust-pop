@@ -22,21 +22,23 @@ use async_std::task::spawn_local as spawn;
 const MAX_BLOCK_SIZE: usize = 512 * 1024;
 
 #[derive(Debug)]
+pub enum ResponseEvent {
+    Partial(PeerId, GraphsyncMessage),
+    Completed(PeerId, GraphsyncMessage),
+}
+
+#[derive(Debug)]
 pub struct ResponseBuilder<P: StoreParams> {
     req_id: RequestId,
     peer_id: PeerId,
     size: usize,
     blocks: VecDeque<Block<P>>,
-    sender: Arc<Sender<(PeerId, GraphsyncMessage)>>,
+    sender: Arc<Sender<ResponseEvent>>,
     sent: HashSet<Cid>,
 }
 
 impl<P: StoreParams> ResponseBuilder<P> {
-    pub fn new(
-        req_id: RequestId,
-        peer_id: PeerId,
-        sender: Arc<Sender<(PeerId, GraphsyncMessage)>>,
-    ) -> Self {
+    pub fn new(req_id: RequestId, peer_id: PeerId, sender: Arc<Sender<ResponseEvent>>) -> Self {
         Self {
             req_id,
             peer_id,
@@ -82,8 +84,11 @@ impl<P: StoreParams> ResponseBuilder<P> {
                 self.sent.insert(cid);
             }
         }
-        println!("sending message with {} blocks", msg.blocks.len());
-        match self.sender.try_send((self.peer_id, msg)) {
+        let event = match status {
+            ResponseStatusCode::RequestCompletedFull => ResponseEvent::Completed(self.peer_id, msg),
+            _ => ResponseEvent::Partial(self.peer_id, msg),
+        };
+        match self.sender.try_send(event) {
             Ok(()) => {}
             Err(_) => {}
         }
@@ -93,8 +98,8 @@ impl<P: StoreParams> ResponseBuilder<P> {
 #[derive(Debug)]
 pub struct ResponseManager<S> {
     store: Arc<S>,
-    sender: Arc<Sender<(PeerId, GraphsyncMessage)>>,
-    receiver: Arc<Mutex<Receiver<(PeerId, GraphsyncMessage)>>>,
+    sender: Arc<Sender<ResponseEvent>>,
+    receiver: Arc<Mutex<Receiver<ResponseEvent>>>,
 }
 
 impl<S> ResponseManager<S>
@@ -147,7 +152,7 @@ where
         });
     }
 
-    pub fn next(&self, ctx: &mut Context) -> Poll<Option<(PeerId, GraphsyncMessage)>> {
+    pub fn next(&self, ctx: &mut Context) -> Poll<Option<ResponseEvent>> {
         self.receiver.lock().unwrap().poll_next(ctx)
     }
 }
@@ -207,7 +212,9 @@ mod tests {
         };
 
         manager.inject_request(1, PeerId::random(), root, selector);
-        if let Ok((peer, msg)) = manager.receiver.lock().unwrap().recv().await {
+        if let Ok(ResponseEvent::Completed(peer, msg)) =
+            manager.receiver.lock().unwrap().recv().await
+        {
             assert_eq!(msg.responses.len(), 1);
             assert_eq!(msg.blocks.len(), 3);
             assert_eq!(

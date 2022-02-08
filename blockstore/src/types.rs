@@ -1,6 +1,6 @@
 use crate::errors::Error;
 
-pub trait Store {
+pub trait Store: Send + Sync {
     /// Read single value from data store and return `None` if key doesn't exist.
     fn read<K>(&self, key: K) -> Result<Option<Vec<u8>>, Error>
     where

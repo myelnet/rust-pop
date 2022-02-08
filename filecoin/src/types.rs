@@ -62,7 +62,7 @@ impl Serialized {
 
 lazy_static! {
     pub static ref INIT_ACTOR_ADDR: Address = Address::new_id(1);
-    pub static ref PAYCH_ACTOR_CODE_ID: PaychActorCodeId = PaychActorCodeId {
+    pub static ref PAYCH_ACTOR_CODE_ID: CidCbor = CidCbor {
         bytes: Vec::from([
             1u8, 85, 0, 20, 102, 105, 108, 47, 53, 47, 112, 97, 121, 109, 101, 110, 116, 99, 104,
             97, 110, 110, 101, 108,
@@ -119,7 +119,7 @@ impl Cbor for ConstructorParams {}
 
 #[derive(Serialize_tuple, Deserialize_tuple)]
 pub struct ExecParams {
-    pub code_cid: PaychActorCodeId,
+    pub code_cid: CidCbor,
     pub constructor_params: Serialized,
 }
 

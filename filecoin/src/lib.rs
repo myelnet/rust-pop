@@ -1,4 +1,4 @@
-mod cid_helpers;
+pub mod cid_helpers;
 mod rpc;
 pub mod types;
 

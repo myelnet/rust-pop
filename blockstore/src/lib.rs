@@ -12,17 +12,6 @@ struct DbBlockStore<T: types::Store> {
     db: T,
 }
 
-impl<T: types::Store> DbBlockStore<T> {
-    fn get_bytes(&self, cid: &Cid) -> Result<Option<Vec<u8>>, Box<dyn StdError>> {
-        Ok(self.db.read(cid.to_bytes())?)
-    }
-    fn delete_bytes(&self, cid: &Cid) -> Result<(), Box<dyn StdError>> {
-        Ok(self.db.delete(cid.to_bytes())?)
-    }
-    fn bytes_exist(&self, cid: &Cid) -> Result<bool, Box<dyn StdError>> {
-        Ok(self.db.exists(cid.to_bytes())?)
-    }
-}
 /// Wrapper for database to handle inserting and retrieving ipld data with Cids
 pub trait BlockStore {
     type Params: StoreParams;
@@ -40,7 +29,8 @@ impl<T: types::Store> BlockStore for DbBlockStore<T> {
     type Params = DefaultParams;
 
     fn get(&self, cid: &Cid) -> Result<Block<Self::Params>, Box<dyn StdError>> {
-        match self.get_bytes(cid)? {
+        let read_res = self.db.read(cid.to_bytes())?;
+        match read_res {
             Some(bz) => Ok(Block::<DefaultParams>::new(*cid, bz)?),
             None => Err(Box::new(errors::Error::Other(
                 "Cid not in blockstore".to_string(),
@@ -54,11 +44,11 @@ impl<T: types::Store> BlockStore for DbBlockStore<T> {
     }
 
     fn evict(&self, cid: &Cid) -> Result<(), Box<dyn StdError>> {
-        self.delete_bytes(cid)
+        Ok(self.db.delete(cid.to_bytes())?)
     }
 
     fn contains(&self, cid: &Cid) -> Result<bool, Box<dyn StdError>> {
-        self.bytes_exist(cid)
+        Ok(self.db.exists(cid.to_bytes())?)
     }
 }
 

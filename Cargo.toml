@@ -1,5 +1,5 @@
 [workspace]
-members = ["wallet", "filecoin", "payments", "graphsync", "dag_service"]
+members = ["wallet", "filecoin", "payments", "graphsync", "dag_service", "blockstore"]
 
 [package]
 name = "pop"

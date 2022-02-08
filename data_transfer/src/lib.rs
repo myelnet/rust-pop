@@ -3,13 +3,25 @@ use futures::future::BoxFuture;
 use futures::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use graphsync::traversal::{RecursionLimit, Selector};
 use libipld::Cid;
-use libp2p::core::{upgrade, InboundUpgrade, OutboundUpgrade, UpgradeInfo};
+use libp2p::core::{
+    connection::ConnectionId, upgrade, ConnectedPoint, InboundUpgrade, Multiaddr, OutboundUpgrade,
+    PeerId, UpgradeInfo,
+};
+use libp2p::swarm::{
+    IntoProtocolsHandler, NetworkBehaviour, NetworkBehaviourAction, NotifyHandler, OneShotHandler,
+    PollParameters, ProtocolsHandler,
+};
 use num_bigint::bigint_ser;
 use num_bigint::{BigInt, ToBigInt};
 use serde::{Deserialize, Serialize};
 use serde_repr::{Deserialize_repr, Serialize_repr};
 use serde_tuple::{Deserialize_tuple, Serialize_tuple};
-use std::{io, iter};
+use smallvec::SmallVec;
+use std::{
+    collections::{HashMap, VecDeque},
+    io, iter,
+    task::{Context, Poll},
+};
 
 #[derive(Debug, PartialEq, Clone, Serialize_repr, Deserialize_repr)]
 #[repr(u64)]
@@ -100,7 +112,27 @@ pub struct TransferResponse {
     voucher_type: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+impl Default for TransferResponse {
+    fn default() -> Self {
+        let zero: isize = 0;
+        let voucher = DealResponse {
+            id: 1,
+            status: DealStatus::Accepted,
+            message: "".to_string(),
+            payment_owed: zero.to_bigint().unwrap(),
+        };
+        Self {
+            mtype: MessageType::NewMessage,
+            accepted: true,
+            paused: false,
+            transfer_id: 1,
+            voucher,
+            voucher_type: DealResponse::voucher_type(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "PascalCase")]
 pub struct TransferMessage {
     #[serde(default = "not_req")]
@@ -113,6 +145,12 @@ impl Cbor for TransferMessage {}
 
 fn not_req() -> bool {
     false
+}
+
+impl From<()> for TransferMessage {
+    fn from(_: ()) -> Self {
+        Default::default()
+    }
 }
 
 #[derive(Debug, PartialEq, Clone, Serialize_repr, Deserialize_repr)]
@@ -206,6 +244,12 @@ pub struct DealResponse {
     message: String,
 }
 
+impl DealResponse {
+    pub fn voucher_type() -> String {
+        "RetrievalDealResponse/1".to_string()
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct TransferProtocol;
 
@@ -268,13 +312,204 @@ where
     }
 }
 
+const EMPTY_QUEUE_SHRINK_THRESHOLD: usize = 100;
+
+pub struct DataTransferNetwork {
+    pending_events: VecDeque<
+        NetworkBehaviourAction<
+            TransferMessage,
+            OneShotHandler<TransferProtocol, TransferMessage, TransferMessage>,
+        >,
+    >,
+    connected: HashMap<PeerId, SmallVec<[Connection; 2]>>,
+    pending_outbound_requests: HashMap<PeerId, SmallVec<[TransferMessage; 10]>>,
+}
+
+impl DataTransferNetwork {
+    pub fn new() -> Self {
+        Self {
+            pending_events: VecDeque::new(),
+            connected: HashMap::new(),
+            pending_outbound_requests: HashMap::new(),
+        }
+    }
+
+    pub fn send_message(&mut self, peer: &PeerId, message: TransferMessage) {
+        if let Some(message) = self.try_send_message(peer, message) {
+            self.pending_outbound_requests
+                .entry(*peer)
+                .or_default()
+                .push(message);
+        }
+    }
+
+    fn try_send_message(
+        &mut self,
+        peer: &PeerId,
+        message: TransferMessage,
+    ) -> Option<TransferMessage> {
+        if let Some(connections) = self.connected.get_mut(peer) {
+            if connections.is_empty() {
+                return Some(message);
+            }
+            self.pending_events
+                .push_back(NetworkBehaviourAction::NotifyHandler {
+                    peer_id: *peer,
+                    handler: NotifyHandler::One(connections[0].id),
+                    event: message,
+                });
+            None
+        } else {
+            Some(message)
+        }
+    }
+}
+
+impl NetworkBehaviour for DataTransferNetwork {
+    type ProtocolsHandler = OneShotHandler<TransferProtocol, TransferMessage, TransferMessage>;
+
+    type OutEvent = TransferMessage;
+
+    fn new_handler(&mut self) -> Self::ProtocolsHandler {
+        OneShotHandler::default()
+    }
+
+    fn addresses_of_peer(&mut self, peer: &PeerId) -> Vec<Multiaddr> {
+        let mut addresses = Vec::new();
+        if let Some(connections) = self.connected.get(peer) {
+            addresses.extend(connections.iter().filter_map(|c| c.address.clone()));
+        }
+        addresses
+    }
+
+    fn inject_event(
+        &mut self,
+        peer_id: PeerId,
+        conn: ConnectionId,
+        event: <Self::ProtocolsHandler as ProtocolsHandler>::OutEvent,
+    ) {
+        self.pending_events
+            .push_back(NetworkBehaviourAction::GenerateEvent(event));
+    }
+
+    fn inject_address_change(
+        &mut self,
+        peer: &PeerId,
+        conn: &ConnectionId,
+        _old: &ConnectedPoint,
+        new: &ConnectedPoint,
+    ) {
+        let new_address = match new {
+            ConnectedPoint::Dialer { address, .. } => Some(address.clone()),
+            ConnectedPoint::Listener { .. } => None,
+        };
+        let connections = self
+            .connected
+            .get_mut(peer)
+            .expect("Address change can only happen on an established connection.");
+
+        let connection = connections
+            .iter_mut()
+            .find(|c| &c.id == conn)
+            .expect("Address change can only happen on an established connection.");
+        connection.address = new_address;
+    }
+
+    fn inject_connection_established(
+        &mut self,
+        peer: &PeerId,
+        conn: &ConnectionId,
+        endpoint: &ConnectedPoint,
+        _errors: Option<&Vec<Multiaddr>>,
+    ) {
+        let address = match endpoint {
+            ConnectedPoint::Dialer { address, .. } => Some(address.clone()),
+            ConnectedPoint::Listener { .. } => None,
+        };
+        self.connected
+            .entry(*peer)
+            .or_default()
+            .push(Connection::new(*conn, address));
+    }
+
+    fn inject_connection_closed(
+        &mut self,
+        peer_id: &PeerId,
+        conn: &ConnectionId,
+        _: &ConnectedPoint,
+        _: <Self::ProtocolsHandler as IntoProtocolsHandler>::Handler,
+    ) {
+        let connections = self
+            .connected
+            .get_mut(peer_id)
+            .expect("Expected some established connection to peer before closing.");
+
+        connections
+            .iter()
+            .position(|c| &c.id == conn)
+            .map(|p: usize| connections.remove(p))
+            .expect("Expected connection to be established before closing.");
+
+        if connections.is_empty() {
+            self.connected.remove(peer_id);
+        }
+    }
+
+    fn inject_connected(&mut self, peer: &PeerId) {
+        if let Some(pending) = self.pending_outbound_requests.remove(peer) {
+            for request in pending {
+                let msg = self.try_send_message(peer, request);
+                assert!(msg.is_none());
+            }
+        }
+    }
+
+    fn inject_disconnected(&mut self, peer: &PeerId) {
+        self.connected.remove(peer);
+    }
+
+    fn poll(
+        &mut self,
+        _: &mut Context<'_>,
+        _: &mut impl PollParameters,
+    ) -> Poll<NetworkBehaviourAction<Self::OutEvent, Self::ProtocolsHandler>> {
+        if let Some(ev) = self.pending_events.pop_front() {
+            return Poll::Ready(ev);
+        } else if self.pending_events.capacity() > EMPTY_QUEUE_SHRINK_THRESHOLD {
+            self.pending_events.shrink_to_fit();
+        }
+        Poll::Pending
+    }
+}
+
+/// Internal information tracked for an established connection.
+struct Connection {
+    id: ConnectionId,
+    address: Option<Multiaddr>,
+}
+
+impl Connection {
+    fn new(id: ConnectionId, address: Option<Multiaddr>) -> Self {
+        Self { id, address }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use async_std::net::{TcpListener, TcpStream};
+    use async_std::task;
     use futures::prelude::*;
-    use graphsync::traversal::RecursionLimit;
     use hex;
+    use libp2p::core::muxing::StreamMuxerBox;
+    use libp2p::core::transport::Boxed;
+    use libp2p::identity;
+    use libp2p::noise::{Keypair, NoiseConfig, X25519Spec};
+    use libp2p::swarm::SwarmEvent;
+    use libp2p::tcp::TcpConfig;
+    use libp2p::yamux::YamuxConfig;
+    use libp2p::{PeerId, Swarm, Transport};
+    use std::time::Duration;
 
     #[test]
     fn it_decodes_request() {
@@ -319,14 +554,6 @@ mod tests {
                 .unwrap();
         };
 
-        let selector = Selector::ExploreRecursive {
-            limit: RecursionLimit::None,
-            sequence: Box::new(Selector::ExploreAll {
-                next: Box::new(Selector::ExploreRecursiveEdge),
-            }),
-            current: None,
-        };
-
         let client = async move {
             let stream = TcpStream::connect(&listener_addr).await.unwrap();
             upgrade::apply_outbound(
@@ -347,5 +574,102 @@ mod tests {
         };
 
         future::select(Box::pin(server), Box::pin(client)).await;
+    }
+
+    fn mk_transport() -> (PeerId, Boxed<(PeerId, StreamMuxerBox)>) {
+        let id_key = identity::Keypair::generate_ed25519();
+        let peer_id = id_key.public().to_peer_id();
+        let dh_key = Keypair::<X25519Spec>::new()
+            .into_authentic(&id_key)
+            .unwrap();
+        let noise = NoiseConfig::xx(dh_key).into_authenticated();
+
+        let transport = TcpConfig::new()
+            .nodelay(true)
+            .upgrade(libp2p::core::upgrade::Version::V1)
+            .authenticate(noise)
+            .multiplex(YamuxConfig::default())
+            .timeout(Duration::from_secs(20))
+            .boxed();
+        (peer_id, transport)
+    }
+
+    struct Peer {
+        peer_id: PeerId,
+        addr: Multiaddr,
+        swarm: Swarm<DataTransferNetwork>,
+    }
+
+    impl Peer {
+        fn new() -> Self {
+            let (peer_id, trans) = mk_transport();
+            let mut swarm = Swarm::new(trans, DataTransferNetwork::new(), peer_id);
+            Swarm::listen_on(&mut swarm, "/ip4/127.0.0.1/tcp/0".parse().unwrap()).unwrap();
+            while swarm.next().now_or_never().is_some() {}
+            let addr = Swarm::listeners(&swarm).next().unwrap().clone();
+            Self {
+                peer_id,
+                addr,
+                swarm,
+            }
+        }
+
+        fn swarm(&mut self) -> &mut Swarm<DataTransferNetwork> {
+            &mut self.swarm
+        }
+
+        fn spawn(mut self, _name: &'static str) -> PeerId {
+            let peer_id = self.peer_id;
+            task::spawn(async move {
+                loop {
+                    let event = self.swarm.next().await;
+                    println!("event {:?}", event);
+                }
+            });
+            peer_id
+        }
+
+        async fn next(&mut self) -> Option<TransferMessage> {
+            loop {
+                let ev = self.swarm.next().await?;
+                if let SwarmEvent::Behaviour(event) = ev {
+                    return Some(event);
+                }
+            }
+        }
+    }
+
+    fn assert_complete_ok(event: Option<TransferMessage>, root: Cid) {
+        if let Some(msg) = event {
+            assert_eq!(msg.is_rq, true);
+            assert_eq!(msg.request.unwrap().root.to_cid().unwrap(), root);
+        } else {
+            panic!("{:?} is not a complete event", event);
+        }
+    }
+
+    #[async_std::test]
+    async fn send_message() {
+        let mut peer1 = Peer::new();
+        let mut peer2 = Peer::new();
+
+        peer2.swarm().dial(peer1.addr.clone());
+
+        let cid = Cid::default();
+
+        peer2.swarm().behaviour_mut().send_message(
+            &peer1.peer_id,
+            TransferMessage {
+                is_rq: true,
+                request: Some(TransferRequest {
+                    root: CidCbor::from(cid.clone()),
+                    mtype: MessageType::NewMessage,
+                    ..Default::default()
+                }),
+                response: None,
+            },
+        );
+        peer2.spawn("peer2");
+        assert_complete_ok(peer1.next().await, cid);
     }
 }

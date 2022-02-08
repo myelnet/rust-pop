@@ -25,6 +25,7 @@ num-bigint = { package = "forest_bigint", version = "0.1.1", features = [
   "json",
 ] }
 libipld = "0.12"
+smallvec = "1.8.0"
 
 [dev-dependencies]
 hex = "0.4.3"

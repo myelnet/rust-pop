@@ -11,6 +11,7 @@ pub enum Error {
     #[error("Cannot use unopened database")]
     Unopened,
     #[error(transparent)]
+    #[cfg(feature = "native")]
     Database(#[from] rocksdb::Error),
     #[error(transparent)]
     Encoding(#[from] CborError),
@@ -25,6 +26,7 @@ impl PartialEq for Error {
         match (self, other) {
             (&InvalidBulkLen, &InvalidBulkLen) => true,
             (&Unopened, &Unopened) => true,
+            #[cfg(feature = "native")]
             (&Database(_), &Database(_)) => true,
             (&Encoding(_), &Encoding(_)) => true,
             (&Other(ref a), &Other(ref b)) => a == b,

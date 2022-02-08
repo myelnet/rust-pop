@@ -17,7 +17,7 @@ rustup target add wasm32-unknown-unknown
 rustup target add wasm32-unknown-unknown --toolchain nightly
 
 # Build the browser pkg (linked in root/package.json)
-wasm-pack build --target bundler -- --features browser
+wasm-pack build --target bundler -- --features browser --no-default-features
 
 # Build the native service
 cargo build --bin bootnode

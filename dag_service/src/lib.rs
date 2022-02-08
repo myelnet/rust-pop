@@ -58,7 +58,7 @@ mod tests {
     #[test]
     fn test_add_cat() {
         use super::*;
-        use blockstore::db::MemoryDB;
+        use blockstore::memory::MemoryDB;
         use rand::prelude::*;
 
         // generate some random bytes

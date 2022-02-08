@@ -160,7 +160,7 @@ where
 mod tests {
     use super::*;
     use crate::traversal::RecursionLimit;
-    use blockstore::db::MemoryDB as MemoryBlockStore;
+    use blockstore::memory::MemoryDB as MemoryBlockStore;
     use libipld::cbor::DagCborCodec;
     use libipld::ipld;
     use libipld::multihash::Code;

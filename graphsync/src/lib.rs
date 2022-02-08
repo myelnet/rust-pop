@@ -694,7 +694,7 @@ mod tests {
     use super::traversal::{RecursionLimit, Selector};
     use super::*;
     use async_std::task;
-    use blockstore::db::MemoryDB as MemoryBlockStore;
+    use blockstore::memory::MemoryDB as MemoryBlockStore;
     use futures::prelude::*;
     use hex;
     use libipld::cbor::DagCborCodec;

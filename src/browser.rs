@@ -1,5 +1,7 @@
 use std::str::FromStr;
 
+use blockstore::memory::MemoryDB as BlockstoreMemory;
+
 use wasm_bindgen::prelude::*;
 
 use libp2p_wasm_ext::{ffi, ExtTransport};
@@ -39,6 +41,7 @@ async fn start_inner(
     let config = crate::NodeConfig {
         listening_multiaddr: "".parse()?,
         wasm_external_transport: Some(transport),
+        blockstore: BlockstoreMemory::default()
     };
     wasm_bindgen_futures::spawn_local(crate::Node::new(config).run());
 

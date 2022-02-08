@@ -580,7 +580,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use blockstore::db::MemoryDB as MemoryBlockStore;
+    use blockstore::memory::MemoryDB as MemoryBlockStore;
     use hex;
     use libipld::block::Block;
     use libipld::cbor::DagCborCodec;

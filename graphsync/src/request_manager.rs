@@ -120,7 +120,7 @@ mod tests {
     use super::super::{GraphsyncResponse, ResponseStatusCode};
     use super::*;
     use async_std::channel::RecvError;
-    use blockstore::db::MemoryDB as MemoryBlockStore;
+    use blockstore::memory::MemoryDB as MemoryBlockStore;
     use libipld::cbor::DagCborCodec;
     use libipld::ipld;
     use libipld::multihash::Code;

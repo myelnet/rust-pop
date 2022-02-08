@@ -1130,6 +1130,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "data_transfer"
+version = "0.1.0"
+dependencies = [
+ "async-std",
+ "cs_serde_bytes",
+ "cs_serde_cbor",
+ "filecoin",
+ "forest_bigint",
+ "futures",
+ "graphsync",
+ "hex",
+ "libipld",
+ "libp2p",
+ "serde",
+ "serde_repr",
+ "serde_tuple",
+]
+
+[[package]]
 name = "derive_builder"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

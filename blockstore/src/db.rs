@@ -1,5 +1,6 @@
 use crate::errors::Error;
-use crate::types::Store;
+use crate::types::{BlockStore, DBStore};
+use libipld::DefaultParams;
 use parking_lot::RwLock;
 pub use rocksdb::{Options, WriteBatch, DB};
 use std::collections::{hash_map::DefaultHasher, HashMap};
@@ -26,7 +27,7 @@ impl Db {
     }
 }
 
-impl Store for Db {
+impl DBStore for Db {
     fn write<K, V>(&self, key: K, value: V) -> Result<(), Error>
     where
         K: AsRef<[u8]>,
@@ -72,6 +73,10 @@ impl Store for Db {
     }
 }
 
+impl BlockStore for Db {
+    type Params = DefaultParams;
+}
+
 // --------------------------------------------------------------------------------------
 
 /// A thread-safe `HashMap` wrapper.
@@ -99,7 +104,7 @@ impl Clone for MemoryDB {
     }
 }
 
-impl Store for MemoryDB {
+impl DBStore for MemoryDB {
     fn write<K, V>(&self, key: K, value: V) -> Result<(), Error>
     where
         K: AsRef<[u8]>,
@@ -134,10 +139,18 @@ impl Store for MemoryDB {
     }
 }
 
+impl BlockStore for MemoryDB {
+    type Params = DefaultParams;
+}
+
 #[cfg(test)]
 pub mod tests {
 
     use super::*;
+    use libipld::cbor::DagCborCodec;
+    use libipld::ipld;
+    use libipld::multihash::Code;
+    use libipld::Block;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -178,7 +191,7 @@ pub mod tests {
 
     pub fn test_write<DB>(db: &DB)
     where
-        DB: Store,
+        DB: DBStore,
     {
         let key = [1];
         let value = [1];
@@ -187,7 +200,7 @@ pub mod tests {
 
     pub fn test_read<DB>(db: &DB)
     where
-        DB: Store,
+        DB: DBStore,
     {
         let key = [0];
         let value = [1];
@@ -198,7 +211,7 @@ pub mod tests {
 
     pub fn test_exists<DB>(db: &DB)
     where
-        DB: Store,
+        DB: DBStore,
     {
         let key = [0];
         let value = [1];
@@ -209,7 +222,7 @@ pub mod tests {
 
     pub fn test_does_not_exist<DB>(db: &DB)
     where
-        DB: Store,
+        DB: DBStore,
     {
         let key = [0];
         let res = db.exists(key).unwrap();
@@ -218,7 +231,7 @@ pub mod tests {
 
     pub fn test_delete<DB>(db: &DB)
     where
-        DB: Store,
+        DB: DBStore,
     {
         let key = [0];
         let value = [1];
@@ -232,7 +245,7 @@ pub mod tests {
 
     pub fn test_bulk_write<DB>(db: &DB)
     where
-        DB: Store,
+        DB: DBStore,
     {
         let values = [([0], [0]), ([1], [1]), ([2], [2])];
         db.bulk_write(&values).unwrap();
@@ -244,7 +257,7 @@ pub mod tests {
 
     pub fn test_bulk_read<DB>(db: &DB)
     where
-        DB: Store,
+        DB: DBStore,
     {
         let keys = [[0], [1], [2]];
         let values = [[0], [1], [2]];
@@ -261,7 +274,7 @@ pub mod tests {
 
     pub fn test_bulk_delete<DB>(db: &DB)
     where
-        DB: Store,
+        DB: DBStore,
     {
         let keys = [[0], [1], [2]];
         let values = [[0], [1], [2]];
@@ -376,5 +389,89 @@ pub mod tests {
     fn mem_db_bulk_delete() {
         let db = MemoryDB::default();
         test_bulk_delete(&db);
+    }
+
+    #[test]
+    fn test_mem_recovers_block() {
+        let store = MemoryDB::default();
+
+        let leaf1 = ipld!({ "name": "leaf1", "size": 12 });
+        let leaf1_block = Block::encode(DagCborCodec, Code::Sha2_256, &leaf1).unwrap();
+        store.insert(&leaf1_block).unwrap();
+
+        let leaf2 = ipld!({ "name": "leaf2", "size": 6 });
+        let leaf2_block = Block::encode(DagCborCodec, Code::Sha2_256, &leaf2).unwrap();
+        store.insert(&leaf2_block).unwrap();
+
+        let leaf1_recovered_block = store.get(leaf1_block.cid()).unwrap();
+        let leaf2_recovered_block = store.get(leaf2_block.cid()).unwrap();
+
+        assert_eq!(leaf1_block, leaf1_recovered_block);
+        assert_eq!(leaf2_block, leaf2_recovered_block);
+    }
+
+    #[test]
+    fn test_mem_delete_block() {
+        let store = MemoryDB::default();
+
+        let leaf1 = ipld!({ "name": "leaf1", "size": 12 });
+        let leaf1_block = Block::encode(DagCborCodec, Code::Sha2_256, &leaf1).unwrap();
+        store.insert(&leaf1_block.clone()).unwrap();
+
+        let leaf2 = ipld!({ "name": "leaf2", "size": 6 });
+        let leaf2_block = Block::encode(DagCborCodec, Code::Sha2_256, &leaf2).unwrap();
+        store.insert(&leaf2_block.clone()).unwrap();
+
+        store.evict(leaf1_block.cid()).unwrap();
+        store.evict(leaf2_block.cid()).unwrap();
+
+        let exists_leaf1 = store.contains(leaf1_block.cid()).unwrap();
+        let exists_leaf2 = store.contains(leaf2_block.cid()).unwrap();
+
+        assert_eq!(false, exists_leaf1);
+        assert_eq!(false, exists_leaf2);
+    }
+
+    #[test]
+    fn test_db_recovers_block() {
+        let path = DBPath::new("get_test");
+        let store = Db::open(path.as_ref()).unwrap();
+
+        let leaf1 = ipld!({ "name": "leaf1", "size": 12 });
+        let leaf1_block = Block::encode(DagCborCodec, Code::Sha2_256, &leaf1).unwrap();
+        store.insert(&leaf1_block).unwrap();
+
+        let leaf2 = ipld!({ "name": "leaf2", "size": 6 });
+        let leaf2_block = Block::encode(DagCborCodec, Code::Sha2_256, &leaf2).unwrap();
+        store.insert(&leaf2_block).unwrap();
+
+        let leaf1_recovered_block = store.get(leaf1_block.cid()).unwrap();
+        let leaf2_recovered_block = store.get(leaf2_block.cid()).unwrap();
+
+        assert_eq!(leaf1_block, leaf1_recovered_block);
+        assert_eq!(leaf2_block, leaf2_recovered_block);
+    }
+
+    #[test]
+    fn test_db_delete_block() {
+        let path = DBPath::new("evict_test");
+        let store = Db::open(path.as_ref()).unwrap();
+
+        let leaf1 = ipld!({ "name": "leaf1", "size": 12 });
+        let leaf1_block = Block::encode(DagCborCodec, Code::Sha2_256, &leaf1).unwrap();
+        store.insert(&leaf1_block.clone()).unwrap();
+
+        let leaf2 = ipld!({ "name": "leaf2", "size": 6 });
+        let leaf2_block = Block::encode(DagCborCodec, Code::Sha2_256, &leaf2).unwrap();
+        store.insert(&leaf2_block.clone()).unwrap();
+
+        store.evict(leaf1_block.cid()).unwrap();
+        store.evict(leaf2_block.cid()).unwrap();
+
+        let exists_leaf1 = store.contains(leaf1_block.cid()).unwrap();
+        let exists_leaf2 = store.contains(leaf2_block.cid()).unwrap();
+
+        assert_eq!(false, exists_leaf1);
+        assert_eq!(false, exists_leaf2);
     }
 }

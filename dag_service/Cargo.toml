@@ -8,6 +8,8 @@ edition = "2021"
 [dependencies]
 libipld = "0.12"
 unixfs-v1 = "0.2.1"
+blockstore = { path = "../blockstore" }
+
 
 [dev-dependencies]
 rand = { version = "0.7", features = ["wasm-bindgen"] }

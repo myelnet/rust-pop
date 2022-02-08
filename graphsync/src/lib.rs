@@ -19,11 +19,12 @@ use request_manager::{RequestEvent, RequestManager};
 use response_manager::{ResponseEvent, ResponseManager};
 use traversal::{Cbor, Error as EncodingError, Selector};
 // use futures::{future::BoxFuture, prelude::*, stream::FuturesUnordered};
+use blockstore::types::BlockStore;
 use integer_encoding::{VarIntReader, VarIntWriter};
 use libipld::cid::Version;
 use libipld::codec::Decode;
 use libipld::multihash::{Code, Multihash, MultihashDigest};
-use libipld::store::{Store, StoreParams};
+use libipld::store::StoreParams;
 use libipld::{Cid, Ipld};
 use libp2p::core::connection::{ConnectionId, ListenerId};
 use libp2p::core::{upgrade, ConnectedPoint, Multiaddr, PeerId};
@@ -134,14 +135,14 @@ impl Default for Config {
     }
 }
 
-pub struct Graphsync<S: Store> {
+pub struct Graphsync<S: BlockStore> {
     config: Config,
     inner: RequestResponse<GraphsyncCodec<S::Params>>,
     request_manager: RequestManager<S>,
     response_manager: ResponseManager<S>,
 }
 
-impl<S: 'static + Store> Graphsync<S>
+impl<S: 'static + BlockStore> Graphsync<S>
 where
     Ipld: Decode<<S::Params as StoreParams>::Codecs>,
 {
@@ -185,7 +186,7 @@ where
     }
 }
 
-impl<S: 'static + Store> NetworkBehaviour for Graphsync<S>
+impl<S: 'static + BlockStore> NetworkBehaviour for Graphsync<S>
 where
     Ipld: Decode<<S::Params as StoreParams>::Codecs>,
 {
@@ -693,13 +694,12 @@ mod tests {
     use super::traversal::{RecursionLimit, Selector};
     use super::*;
     use async_std::task;
+    use blockstore::db::MemoryDB as MemoryBlockStore;
     use futures::prelude::*;
     use hex;
     use libipld::cbor::DagCborCodec;
     use libipld::ipld;
-    use libipld::mem::MemStore;
     use libipld::multihash::Code;
-    use libipld::DefaultParams;
     use libipld::{Block, Cid};
     use libp2p::core::muxing::StreamMuxerBox;
     use libp2p::core::transport::Boxed;
@@ -786,17 +786,23 @@ mod tests {
         (peer_id, transport)
     }
 
-    struct Peer {
+    struct Peer<B: 'static + BlockStore>
+    where
+        Ipld: Decode<<<B>::Params as StoreParams>::Codecs>,
+    {
         peer_id: PeerId,
         addr: Multiaddr,
-        store: Arc<MemStore<DefaultParams>>,
-        swarm: Swarm<Graphsync<MemStore<DefaultParams>>>,
+        store: Arc<B>,
+        swarm: Swarm<Graphsync<B>>,
     }
 
-    impl Peer {
-        fn new() -> Self {
+    impl<B: BlockStore> Peer<B>
+    where
+        Ipld: Decode<<<B>::Params as StoreParams>::Codecs>,
+    {
+        fn new(bs: B) -> Self {
             let (peer_id, trans) = mk_transport();
-            let store = Arc::new(MemStore::<DefaultParams>::default());
+            let store = Arc::new(bs);
             let mut swarm = Swarm::new(
                 trans,
                 Graphsync::new(Config::default(), store.clone()),
@@ -813,13 +819,13 @@ mod tests {
             }
         }
 
-        fn add_address(&mut self, peer: &Peer) {
+        fn add_address(&mut self, peer: &Peer<B>) {
             self.swarm
                 .behaviour_mut()
                 .add_address(&peer.peer_id, peer.addr.clone());
         }
 
-        fn swarm(&mut self) -> &mut Swarm<Graphsync<MemStore<DefaultParams>>> {
+        fn swarm(&mut self) -> &mut Swarm<Graphsync<B>> {
             &mut self.swarm
         }
 
@@ -864,8 +870,8 @@ mod tests {
 
     #[async_std::test]
     async fn test_request() {
-        let peer1 = Peer::new();
-        let mut peer2 = Peer::new();
+        let peer1 = Peer::new(MemoryBlockStore::default());
+        let mut peer2 = Peer::new(MemoryBlockStore::default());
         peer2.add_address(&peer1);
 
         let store = peer1.store.clone();
@@ -926,8 +932,9 @@ mod tests {
         use dag_service::{add, cat};
         use rand::prelude::*;
 
-        let peer1 = Peer::new();
-        let mut peer2 = Peer::new();
+        // let bs = ;
+        let peer1 = Peer::new(MemoryBlockStore::default());
+        let mut peer2 = Peer::new(MemoryBlockStore::default());
         peer2.add_address(&peer1);
 
         let store = peer1.store.clone();

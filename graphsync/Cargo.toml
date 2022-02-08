@@ -29,6 +29,8 @@ smallvec = "1.8.0"
 instant = "0.1.11"
 crossbeam-channel = "0.5.2"
 rand = { version = "0.7", features = ["wasm-bindgen"] }
+blockstore = { path = "../blockstore" }
+
 
 [build-dependencies]
 protoc-rust = "2.25.2"

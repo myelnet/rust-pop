@@ -1049,6 +1049,7 @@ dependencies = [
 name = "dag_service"
 version = "0.1.0"
 dependencies = [
+ "blockstore",
  "libipld",
  "rand 0.7.3",
  "unixfs-v1",
@@ -1782,6 +1783,7 @@ dependencies = [
  "async-recursion",
  "async-std",
  "async-trait",
+ "blockstore",
  "crossbeam-channel",
  "cs_serde_cbor",
  "dag_service",
@@ -3622,6 +3624,7 @@ name = "pop"
 version = "0.1.0"
 dependencies = [
  "async-std",
+ "blockstore",
  "chrono",
  "clear_on_drop",
  "console_error_panic_hook",

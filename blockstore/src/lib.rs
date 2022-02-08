@@ -8,9 +8,6 @@ use libipld::DefaultParams;
 use libipld::{store::StoreParams, Block, Cid};
 use std::error::Error as StdError;
 
-struct DbBlockStore<T: types::Store> {
-    db: T,
-}
 
 /// Wrapper for database to handle inserting and retrieving ipld data with Cids
 pub trait BlockStore {
@@ -24,6 +21,11 @@ pub trait BlockStore {
 
     fn contains(&self, cid: &Cid) -> Result<bool, Box<dyn StdError>>;
 }
+
+struct DbBlockStore<T: types::Store> {
+    db: T,
+}
+
 
 impl<T: types::Store> BlockStore for DbBlockStore<T> {
     type Params = DefaultParams;

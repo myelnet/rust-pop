@@ -1,3 +1,4 @@
+use blockstore::db::Db as BlockstoreDB;
 use libipld::Cid;
 use libp2p::{Multiaddr, PeerId};
 use pop::{Node, NodeConfig};
@@ -9,6 +10,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let config = NodeConfig {
         listening_multiaddr: "/ip4/0.0.0.0/tcp/0/ws".parse()?,
         wasm_external_transport: None,
+        blockstore: BlockstoreDB::open("path")?,
     };
     let mut node = Node::new(config);
 

@@ -2,10 +2,11 @@ use super::traversal::{AsyncLoader, Error, Progress, Selector};
 use super::{GraphsyncMessage, GraphsyncRequest, Prefix, RequestId};
 use async_std::channel::{bounded, Receiver, Sender};
 use async_std::task::{Context, Poll};
+use blockstore::types::BlockStore;
 use fnv::FnvHashMap;
 use futures_lite::stream::StreamExt;
 use libipld::codec::Decode;
-use libipld::store::{Store, StoreParams};
+use libipld::store::StoreParams;
 use libipld::{Block, Cid, Ipld};
 use libp2p::core::PeerId;
 use std::sync::{
@@ -31,7 +32,7 @@ pub enum RequestEvent {
 }
 
 #[derive(Debug)]
-pub struct RequestManager<S: Store> {
+pub struct RequestManager<S: BlockStore> {
     id_counter: Arc<AtomicI32>,
     store: Arc<S>,
     sender: Arc<Sender<RequestEvent>>,
@@ -39,7 +40,7 @@ pub struct RequestManager<S: Store> {
     ongoing: Arc<Mutex<FnvHashMap<RequestId, Arc<Sender<Block<S::Params>>>>>>,
 }
 
-impl<S: Store + 'static> RequestManager<S>
+impl<S: BlockStore + 'static> RequestManager<S>
 where
     Ipld: Decode<<S::Params as StoreParams>::Codecs>,
 {
@@ -119,9 +120,9 @@ mod tests {
     use super::super::{GraphsyncResponse, ResponseStatusCode};
     use super::*;
     use async_std::channel::RecvError;
+    use blockstore::memory::MemoryDB as MemoryBlockStore;
     use libipld::cbor::DagCborCodec;
     use libipld::ipld;
-    use libipld::mem::MemStore;
     use libipld::multihash::Code;
     use libipld::DefaultParams;
 
@@ -147,7 +148,7 @@ mod tests {
 
     #[async_std::test]
     async fn test_start_request() {
-        let store = Arc::new(MemStore::<DefaultParams>::default());
+        let store = Arc::new(MemoryBlockStore::default());
 
         let leaf1 = ipld!({ "name": "leaf1", "size": 12 });
         let leaf1_block =
@@ -186,7 +187,7 @@ mod tests {
         // we should receive an outbound message to send over the network
         if let Ok(evt) = manager.receiver.lock().unwrap().recv().await {
             match evt {
-                RequestEvent::NewRequest(poer, msg) => {
+                RequestEvent::NewRequest(_poer, msg) => {
                     assert_eq!(msg.requests.len(), 1);
                 }
                 _ => panic!("Received wrong event"),

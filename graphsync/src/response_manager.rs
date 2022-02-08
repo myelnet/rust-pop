@@ -2,10 +2,11 @@ use super::traversal::{BlockCallbackLoader, Progress, Selector};
 use super::{GraphsyncMessage, GraphsyncResponse, Prefix, RequestId, ResponseStatusCode};
 use async_std::channel::{bounded, Receiver, Sender};
 use async_std::task::{Context, Poll};
+use blockstore::types::BlockStore;
 use futures_lite::stream::StreamExt;
 use libipld::codec::Decode;
 use libipld::ipld::Ipld;
-use libipld::store::{Store, StoreParams};
+use libipld::store::StoreParams;
 use libipld::{Block, Cid};
 use libp2p::core::PeerId;
 use std::collections::{HashSet, VecDeque};
@@ -102,7 +103,7 @@ pub struct ResponseManager<S> {
 
 impl<S> ResponseManager<S>
 where
-    S: Store + 'static,
+    S: BlockStore + 'static,
     Ipld: Decode<<S::Params as StoreParams>::Codecs>,
 {
     pub fn new(store: Arc<S>) -> Self {
@@ -159,27 +160,26 @@ where
 mod tests {
     use super::*;
     use crate::traversal::RecursionLimit;
+    use blockstore::memory::MemoryDB as MemoryBlockStore;
     use libipld::cbor::DagCborCodec;
     use libipld::ipld;
-    use libipld::mem::MemStore;
     use libipld::multihash::Code;
-    use libipld::DefaultParams;
 
     struct TestData {
         root: Cid,
-        store: Arc<MemStore<DefaultParams>>,
+        store: Arc<MemoryBlockStore>,
     }
 
     fn gen_data() -> TestData {
-        let store = Arc::new(MemStore::<DefaultParams>::default());
+        let store = Arc::new(MemoryBlockStore::default());
 
         let leaf1 = ipld!({ "name": "leaf1", "size": 12 });
         let leaf1_block = Block::encode(DagCborCodec, Code::Sha2_256, &leaf1).unwrap();
-        store.insert(&leaf1_block);
+        store.insert(&leaf1_block).unwrap();
 
         let leaf2 = ipld!({ "name": "leaf2", "size": 6 });
         let leaf2_block = Block::encode(DagCborCodec, Code::Sha2_256, &leaf2).unwrap();
-        store.insert(&leaf2_block);
+        store.insert(&leaf2_block).unwrap();
 
         let parent = ipld!({
             "children": [leaf1_block.cid(), leaf2_block.cid()],
@@ -187,7 +187,7 @@ mod tests {
             "name": "parent",
         });
         let parent_block = Block::encode(DagCborCodec, Code::Sha2_256, &parent).unwrap();
-        store.insert(&parent_block);
+        store.insert(&parent_block).unwrap();
 
         TestData {
             root: parent_block.cid().clone(),
@@ -210,7 +210,7 @@ mod tests {
         };
 
         manager.inject_request(1, PeerId::random(), root, selector);
-        if let Ok(ResponseEvent::Completed(peer, msg)) =
+        if let Ok(ResponseEvent::Completed(_peer, msg)) =
             manager.receiver.lock().unwrap().recv().await
         {
             assert_eq!(msg.responses.len(), 1);

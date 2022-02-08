@@ -1,5 +1,12 @@
 [workspace]
-members = ["wallet", "filecoin", "payments", "graphsync", "dag_service"]
+members = [
+  "wallet",
+  "filecoin",
+  "payments",
+  "graphsync",
+  "dag_service",
+  "blockstore",
+]
 
 [package]
 name = "pop"
@@ -25,8 +32,10 @@ features = ["wasm-ext"]
 libipld = "0.12"
 rand = { version = "0.7", features = ["wasm-bindgen"] }
 async-std = { version = "1.6.2", features = ["attributes", "unstable"] }
-graphsync = { path = "./graphsync" }
-dag_service = { path = "./dag_service" }
+graphsync = { path = "./graphsync", default_features=false }
+dag_service = { path = "./dag_service", default_features=false }
+blockstore = { path = "./blockstore", default_features=false }
+
 
 getrandom = { version = "0.2", features = ["js"] }
 
@@ -49,9 +58,10 @@ futures-timer = { version = "3.0.1", features = [
 ], optional = true }
 chrono = { version = "0.4", features = ["wasmbind"], optional = true }
 
+
 [features]
 default = ["native"]
-native = []
+native = ["blockstore/native", "graphsync/native", "dag_service/native"]
 browser = [
   "libp2p-wasm-ext",
   "wasm-bindgen",
@@ -63,4 +73,7 @@ browser = [
   "futures-timer",
   "chrono",
   "log",
+  "blockstore/browser",
+  "graphsync/browser",
+  "dag_service/browser"
 ]

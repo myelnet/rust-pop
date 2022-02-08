@@ -1,10 +1,10 @@
-use libipld::store::Store;
+use blockstore::types::BlockStore;
 use libipld::{Block, Cid};
 use std::io::Write;
 use std::sync::Arc;
 use unixfs_v1::file::{adder::FileAdder, visit::IdleFileVisit};
 
-pub fn add<S: Store>(store: Arc<S>, data: &[u8]) -> Result<Option<Cid>, String> {
+pub fn add<S: BlockStore>(store: Arc<S>, data: &[u8]) -> Result<Option<Cid>, String> {
     let mut adder = FileAdder::default();
 
     let mut total = 0;
@@ -29,7 +29,7 @@ pub fn add<S: Store>(store: Arc<S>, data: &[u8]) -> Result<Option<Cid>, String> 
     Ok(root)
 }
 
-pub fn cat<S: Store>(store: Arc<S>, root: Cid) -> Result<Vec<u8>, String> {
+pub fn cat<S: BlockStore>(store: Arc<S>, root: Cid) -> Result<Vec<u8>, String> {
     let mut buf = Vec::new();
 
     let first = store.get(&root).map_err(|e| e.to_string())?;
@@ -58,16 +58,15 @@ mod tests {
     #[test]
     fn test_add_cat() {
         use super::*;
-        use libipld::mem::MemStore;
-        use libipld::DefaultParams;
+        use blockstore::memory::MemoryDB;
         use rand::prelude::*;
 
         // generate some random bytes
-        const file_size: usize = 500 * 1024;
-        let mut data = vec![0u8; file_size];
+        const FILE_SIZE: usize = 500 * 1024;
+        let mut data = vec![0u8; FILE_SIZE];
         rand::thread_rng().fill_bytes(&mut data);
 
-        let store = Arc::new(MemStore::<DefaultParams>::default());
+        let store = Arc::new(MemoryDB::default());
 
         let root = add(store.clone(), &data).unwrap();
         let buf = cat(store, root.unwrap()).unwrap();

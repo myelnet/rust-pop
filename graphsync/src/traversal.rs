@@ -2,12 +2,13 @@ use crate::empty_map;
 use async_recursion::async_recursion;
 use async_std::channel::{bounded, Receiver, Sender};
 use async_trait::async_trait;
+use blockstore::types::BlockStore;
 use fnv::FnvHashMap;
 use libipld::cid::Error as CidError;
 use libipld::codec::Decode;
 use libipld::ipld::{Ipld, IpldIndex};
 use libipld::multihash::Error as MultihashError;
-use libipld::store::{Store, StoreParams};
+use libipld::store::StoreParams;
 use libipld::{Block, Cid};
 use protobuf::ProtobufError;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -407,8 +408,8 @@ pub struct StoreLoader<S = ()> {
 #[async_trait]
 impl<S> LinkLoader for StoreLoader<S>
 where
-    S: Store,
-    Ipld: Decode<<<S as Store>::Params as StoreParams>::Codecs>,
+    S: BlockStore,
+    Ipld: Decode<<<S as BlockStore>::Params as StoreParams>::Codecs>,
 {
     async fn load_link(&mut self, link: &Cid) -> Result<Option<Ipld>, String> {
         if let Some(store) = &mut self.store {
@@ -433,7 +434,7 @@ pub struct BlockCallbackLoader<S, F> {
 
 impl<S, F> BlockCallbackLoader<S, F>
 where
-    S: Store,
+    S: BlockStore,
     F: FnMut(Option<Block<S::Params>>) -> Result<(), String> + Send + Sync,
 {
     pub fn new(store: Arc<S>, cb: F) -> Self {
@@ -444,7 +445,7 @@ where
 #[async_trait]
 impl<S, F> LinkLoader for BlockCallbackLoader<S, F>
 where
-    S: Store,
+    S: BlockStore,
     F: FnMut(Option<Block<S::Params>>) -> Result<(), String> + Send + Sync,
     Ipld: Decode<<S::Params as StoreParams>::Codecs>,
 {
@@ -464,7 +465,7 @@ where
 
 // TODO: add a max cache size so we start evicting pending blocks to
 // prevent an attack where a peer would flood us with unrelated blocks
-pub struct AsyncLoader<S: Store, F> {
+pub struct AsyncLoader<S: BlockStore, F> {
     store: Arc<S>,
     sender: Arc<Sender<Block<S::Params>>>,
     receiver: Arc<Receiver<Block<S::Params>>>,
@@ -476,7 +477,7 @@ pub struct AsyncLoader<S: Store, F> {
     lookup: FnvHashMap<Cid, u64>,
 }
 
-impl<S: Store, F> AsyncLoader<S, F>
+impl<S: BlockStore, F> AsyncLoader<S, F>
 where
     F: Fn(&Block<S::Params>) -> Result<(), String> + Send + Sync,
     Ipld: Decode<<S::Params as StoreParams>::Codecs>,
@@ -536,7 +537,7 @@ where
 }
 
 #[async_trait]
-impl<S: Store, F> LinkLoader for AsyncLoader<S, F>
+impl<S: BlockStore, F> LinkLoader for AsyncLoader<S, F>
 where
     F: Fn(&Block<S::Params>) -> Result<(), String> + Send + Sync,
     Ipld: Decode<<S::Params as StoreParams>::Codecs>,
@@ -579,13 +580,12 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use blockstore::memory::MemoryDB as MemoryBlockStore;
     use hex;
     use libipld::block::Block;
     use libipld::cbor::DagCborCodec;
     use libipld::ipld;
-    use libipld::mem::MemStore;
     use libipld::multihash::Code;
-    use libipld::DefaultParams;
     use std::sync::{Arc, Mutex};
 
     struct ExpectVisit {
@@ -594,21 +594,21 @@ mod tests {
 
     struct TestData {
         node: Ipld,
-        loader: StoreLoader<MemStore<DefaultParams>>,
+        loader: StoreLoader<MemoryBlockStore>,
         expect_full_traversal: [ExpectVisit; 12],
         expect_entries_traversal: [ExpectVisit; 4],
     }
 
     fn gen_data() -> TestData {
-        let store = MemStore::<DefaultParams>::default();
+        let store = MemoryBlockStore::default();
 
         let leaf1 = ipld!({ "name": "leaf1", "size": 12 });
         let leaf1_block = Block::encode(DagCborCodec, Code::Sha2_256, &leaf1).unwrap();
-        store.insert(&leaf1_block);
+        store.insert(&leaf1_block).unwrap();
 
         let leaf2 = ipld!({ "name": "leaf2", "size": 6 });
         let leaf2_block = Block::encode(DagCborCodec, Code::Sha2_256, &leaf2).unwrap();
-        store.insert(&leaf2_block);
+        store.insert(&leaf2_block).unwrap();
 
         let parent = ipld!({
             "children": [leaf1_block.cid(), leaf2_block.cid()],
@@ -616,7 +616,7 @@ mod tests {
             "name": "parent",
         });
         let parent_block = Block::encode(DagCborCodec, Code::Sha2_256, &parent).unwrap();
-        store.insert(&parent_block);
+        store.insert(&parent_block).unwrap();
 
         let expect_full_traversal: [ExpectVisit; 12] = [
             ExpectVisit {
@@ -706,7 +706,7 @@ mod tests {
 
         let index = Arc::new(Mutex::new(0));
         progress
-            .walk_adv(&node, selector, &|prog, ipld| -> Result<(), String> {
+            .walk_adv(&node, selector, &|prog, _ipld| -> Result<(), String> {
                 let mut idx = index.lock().unwrap();
                 let exp = &expect[*idx];
                 assert_eq!(prog.path, exp.path);
@@ -754,7 +754,7 @@ mod tests {
 
         let index = Arc::new(Mutex::new(0));
         progress
-            .walk_adv(&node, selector, &|prog, ipld| -> Result<(), String> {
+            .walk_adv(&node, selector, &|prog, _ipld| -> Result<(), String> {
                 let mut idx = index.lock().unwrap();
                 let exp = &expect[*idx];
                 assert_eq!(prog.path, exp.path);
@@ -788,7 +788,7 @@ mod tests {
 
         let index = Arc::new(Mutex::new(0));
         progress
-            .walk_adv(&node, selector, &|prog, ipld| -> Result<(), String> {
+            .walk_adv(&node, selector, &|prog, _ipld| -> Result<(), String> {
                 let mut idx = index.lock().unwrap();
                 let exp = &expect[*idx];
                 assert_eq!(prog.path, exp.path);
@@ -827,7 +827,7 @@ mod tests {
 
         let index = Arc::new(Mutex::new(0));
         progress
-            .walk_adv(&node, selector, &|prog, ipld| -> Result<(), String> {
+            .walk_adv(&node, selector, &|prog, _ipld| -> Result<(), String> {
                 let mut idx = index.lock().unwrap();
                 let exp = &expect[*idx];
                 assert_eq!(prog.path, exp.path);
@@ -845,7 +845,7 @@ mod tests {
     async fn async_loader() {
         use futures::join;
 
-        let store = Arc::new(MemStore::<DefaultParams>::default());
+        let store = Arc::new(MemoryBlockStore::default());
 
         let unrelated1 = ipld!({ "name": "not in this tree" });
         let unrelated1_block = Block::encode(DagCborCodec, Code::Sha2_256, &unrelated1).unwrap();
@@ -889,7 +889,7 @@ mod tests {
                 };
 
                 progress
-                    .walk_adv(&parent, selector, &|prog, ipld| -> Result<(), String> {
+                    .walk_adv(&parent, selector, &|_prog, _ipld| -> Result<(), String> {
                         let mut idx = idxmut.lock().unwrap();
                         *idx += 1;
                         Ok(())

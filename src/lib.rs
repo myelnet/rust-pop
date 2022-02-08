@@ -1,12 +1,15 @@
 #[cfg(feature = "browser")]
 mod browser;
 
+use blockstore::types::BlockStore;
 use dag_service;
 use graphsync::traversal::{RecursionLimit, Selector};
 use graphsync::{Config as GraphsyncConfig, Graphsync, GraphsyncEvent};
-use libipld::mem::MemStore;
+use libipld::codec::Decode;
+use libipld::store::StoreParams;
 use libipld::Cid;
-use libipld::DefaultParams;
+use libipld::Ipld;
+
 use libp2p::futures::StreamExt;
 use libp2p::swarm::{Swarm, SwarmEvent};
 use libp2p::wasm_ext;
@@ -26,26 +29,33 @@ use libp2p::{dns, tcp, websocket};
 use async_std::task;
 
 const DATA_SIZE: usize = 104857600;
-pub struct Node {
-    pub swarm: Swarm<Graphsync<MemStore<DefaultParams>>>,
-    pub store: Arc<MemStore<DefaultParams>>,
+pub struct Node<B: 'static + BlockStore>
+where
+    Ipld: Decode<<<B as BlockStore>::Params as StoreParams>::Codecs>,
+{
+    pub swarm: Swarm<Graphsync<B>>,
+    pub store: Arc<B>,
 }
 
 #[derive(Debug)]
-pub struct NodeConfig {
+pub struct NodeConfig<B: 'static + BlockStore> {
     pub listening_multiaddr: Multiaddr,
     pub wasm_external_transport: Option<wasm_ext::ExtTransport>,
+    pub blockstore: B,
 }
 
-impl Node {
-    pub fn new(config: NodeConfig) -> Self {
+impl<B: BlockStore> Node<B>
+where
+    Ipld: Decode<<<B as BlockStore>::Params as StoreParams>::Codecs>,
+{
+    pub fn new(config: NodeConfig<B>) -> Self {
         let local_key = identity::Keypair::generate_ed25519();
         let local_peer_id = PeerId::from(local_key.public());
         println!("Local peer id: {:?}", local_peer_id);
 
         let transport = build_transport(config.wasm_external_transport, local_key.clone());
 
-        let store = Arc::new(MemStore::<DefaultParams>::default());
+        let store = Arc::new(config.blockstore);
         // temp behaviour to be replaced with graphsync
         // let behaviour = Ping::new(PingConfig::new().with_keep_alive(true));
         let behaviour = Graphsync::new(GraphsyncConfig::default(), store.clone());

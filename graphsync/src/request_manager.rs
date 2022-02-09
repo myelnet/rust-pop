@@ -1,5 +1,5 @@
 use super::traversal::{AsyncLoader, Error, Progress, Selector};
-use super::{GraphsyncMessage, GraphsyncRequest, Prefix, RequestId};
+use super::{Extensions, GraphsyncMessage, GraphsyncRequest, Prefix, RequestId};
 use async_std::channel::{bounded, Receiver, Sender};
 use async_std::task::{Context, Poll};
 use blockstore::types::BlockStore;
@@ -54,7 +54,13 @@ where
             receiver: Arc::new(Mutex::new(r)),
         }
     }
-    pub fn start_request(&self, responder: PeerId, root: Cid, selector: Selector) -> RequestId {
+    pub fn start_request(
+        &self,
+        responder: PeerId,
+        root: Cid,
+        selector: Selector,
+        extensions: Extensions,
+    ) -> RequestId {
         let id = self.id_counter.fetch_add(1, Ordering::Relaxed);
         let store = self.store.clone();
         let sender = self.sender.clone();
@@ -87,7 +93,7 @@ where
                 id,
                 root,
                 selector: sel,
-                extensions: Default::default(),
+                extensions,
             },
         );
         self.sender
@@ -183,7 +189,7 @@ mod tests {
         };
 
         // Start the request and traversal
-        manager.start_request(PeerId::random(), root, selector);
+        manager.start_request(PeerId::random(), root, selector, Extensions::default());
         // we should receive an outbound message to send over the network
         if let Ok(evt) = manager.receiver.lock().unwrap().recv().await {
             match evt {

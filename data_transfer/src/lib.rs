@@ -1,7 +1,9 @@
+use blockstore::types::BlockStore;
 use filecoin::{cid_helpers::CidCbor, types::Cbor};
 use futures::future::BoxFuture;
 use futures::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use graphsync::traversal::{RecursionLimit, Selector};
+use graphsync::Graphsync;
 use libipld::Cid;
 use libp2p::core::{
     connection::ConnectionId, upgrade, ConnectedPoint, InboundUpgrade, Multiaddr, OutboundUpgrade,
@@ -491,6 +493,21 @@ struct Connection {
 impl Connection {
     fn new(id: ConnectionId, address: Option<Multiaddr>) -> Self {
         Self { id, address }
+    }
+}
+
+#[derive(NetworkBehaviour)]
+struct DataTransferBehaviour<S: BlockStore> {
+    graphsync: Graphsync<S>,
+    network: DataTransferNetwork,
+}
+
+impl<S: 'static + BlockStore> DataTransferBehaviour<S> {
+    pub fn new(graphsync: Graphsync<S>) -> Self {
+        Self {
+            graphsync,
+            network: DataTransferNetwork::new(),
+        }
     }
 }
 

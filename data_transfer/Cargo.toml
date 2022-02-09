@@ -21,6 +21,7 @@ serde_tuple = "0.5"
 serde_bytes = { package = "cs_serde_bytes", version = "0.12" }
 filecoin = { path = "../filecoin" }
 graphsync = { path = "../graphsync" }
+blockstore = { path = "../blockstore" }
 num-bigint = { package = "forest_bigint", version = "0.1.1", features = [
   "json",
 ] }

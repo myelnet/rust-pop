@@ -37,7 +37,7 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::io::{self, Cursor};
 use std::marker::PhantomData;
-use std::sync::{Arc};
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 const MAX_CID_SIZE: usize = 4 * 10 + 64;
@@ -104,12 +104,42 @@ impl<P: StoreParams> MessageCodec for GraphsyncCodec<P> {
 
 #[derive(Debug)]
 pub enum GraphsyncEvent {
+    // We may receive more than one response at once
+    ResponseReceived(Vec<GraphsyncResponse>),
     Progress {
         req_id: RequestId,
         link: Cid,
         size: usize,
     },
     Complete(RequestId, Result<(), EncodingError>),
+}
+
+type IncomingRequestHook =
+    Arc<dyn Fn(PeerId, &GraphsyncRequest) -> (bool, Extensions) + Send + Sync>;
+
+type OutgoingBlockHook = Arc<dyn Fn(PeerId, Cid, usize) -> Extensions + Send + Sync>;
+
+pub struct GraphsyncHooks {
+    incoming_request: IncomingRequestHook,
+    outgoing_block: OutgoingBlockHook,
+}
+
+impl Default for GraphsyncHooks {
+    fn default() -> Self {
+        Self {
+            incoming_request: Arc::new(|_, _| (true, Extensions::default())),
+            outgoing_block: Arc::new(|_, _, _| Extensions::default()),
+        }
+    }
+}
+
+impl GraphsyncHooks {
+    pub fn register_incoming_request(&mut self, f: IncomingRequestHook) {
+        self.incoming_request = f;
+    }
+    pub fn register_outgoing_block(&mut self, f: OutgoingBlockHook) {
+        self.outgoing_block = f
+    }
 }
 
 #[derive(Clone)]
@@ -140,6 +170,7 @@ pub struct Graphsync<S: BlockStore> {
     inner: RequestResponse<GraphsyncCodec<S::Params>>,
     request_manager: RequestManager<S>,
     response_manager: ResponseManager<S>,
+    hooks: Arc<RwLock<GraphsyncHooks>>,
 }
 
 impl<S: 'static + BlockStore> Graphsync<S>
@@ -152,18 +183,27 @@ where
         rr_config.set_connection_keep_alive(config.connection_keep_alive);
         rr_config.set_request_timeout(config.request_timeout);
         let inner = RequestResponse::new(GraphsyncCodec::default(), protocols, rr_config);
+        let hooks = Arc::new(RwLock::new(GraphsyncHooks::default()));
         Self {
             config,
             inner,
             request_manager: RequestManager::new(store.clone()),
-            response_manager: ResponseManager::new(store.clone()),
+            response_manager: ResponseManager::new(store.clone(), hooks.clone()),
+            hooks,
         }
     }
     pub fn add_address(&mut self, peer_id: &PeerId, addr: Multiaddr) {
         self.inner.add_address(peer_id, addr);
     }
-    pub fn request(&mut self, peer_id: PeerId, root: Cid, selector: Selector) -> RequestId {
-        self.request_manager.start_request(peer_id, root, selector)
+    pub fn request(
+        &mut self,
+        peer_id: PeerId,
+        root: Cid,
+        selector: Selector,
+        extensions: Extensions,
+    ) -> RequestId {
+        self.request_manager
+            .start_request(peer_id, root, selector, extensions)
     }
     fn inject_outbound_failure(
         &mut self,
@@ -183,6 +223,12 @@ where
         error: &InboundFailure,
     ) {
         println!("inbound failure {} {} {:?}", peer, request_id, error);
+    }
+    fn register_incoming_request_hook(&mut self, hook: IncomingRequestHook) {
+        self.hooks.write().unwrap().register_incoming_request(hook);
+    }
+    fn register_outgoing_block_hook(&mut self, hook: OutgoingBlockHook) {
+        self.hooks.write().unwrap().register_outgoing_block(hook);
     }
 }
 
@@ -349,17 +395,17 @@ where
                     RequestResponseEvent::Message { peer, message } => {
                         let msg = message.message;
                         if !msg.requests.is_empty() {
-                            for (_, req) in msg.requests {
-                                self.response_manager.inject_request(
-                                    req.id,
-                                    peer,
-                                    req.root,
-                                    req.selector.clone(),
-                                );
-                                break;
+                            for (_, req) in &msg.requests {
+                                self.response_manager.inject_request(peer, req);
                             }
-                        } else {
+                        }
+                        if !msg.responses.is_empty() {
+                            let responses: Vec<GraphsyncResponse> =
+                                msg.responses.values().map(|res| res.clone()).collect();
                             self.request_manager.inject_response(msg);
+                            return Poll::Ready(NetworkBehaviourAction::GenerateEvent(
+                                GraphsyncEvent::ResponseReceived(responses),
+                            ));
                         }
                     }
                     RequestResponseEvent::OutboundFailure {
@@ -850,13 +896,21 @@ mod tests {
         }
     }
 
+    fn assert_response_ok(event: Option<GraphsyncEvent>, id: RequestId) {
+        if let Some(GraphsyncEvent::ResponseReceived(responses)) = event {
+            assert_eq!(responses[0].id, id);
+        } else {
+            panic!("{:?} is not a response event", event);
+        }
+    }
+
     fn assert_progress_ok(event: Option<GraphsyncEvent>, id: RequestId, cid: Cid, size2: usize) {
         if let Some(GraphsyncEvent::Progress { req_id, link, size }) = event {
             assert_eq!(req_id, id);
             assert_eq!(link, cid);
             assert_eq!(size, size2);
         } else {
-            panic!("{:?} is not a complete event", event);
+            panic!("{:?} is not a progress event", event);
         }
     }
 
@@ -901,10 +955,14 @@ mod tests {
             current: None,
         };
 
-        let id = peer2
-            .swarm()
-            .behaviour_mut()
-            .request(peer1, parent_block.cid().clone(), selector);
+        let id = peer2.swarm().behaviour_mut().request(
+            peer1,
+            parent_block.cid().clone(),
+            selector,
+            Extensions::default(),
+        );
+
+        assert_response_ok(peer2.next().await, id);
 
         assert_progress_ok(
             peer2.next().await,
@@ -958,9 +1016,13 @@ mod tests {
 
         let cid = root.unwrap();
 
-        let id = peer2.swarm().behaviour_mut().request(peer1, cid, selector);
+        let id = peer2
+            .swarm()
+            .behaviour_mut()
+            .request(peer1, cid, selector, Extensions::default());
 
-        for n in 1..=17 {
+        let mut n = 0;
+        loop {
             if let Some(event) = peer2.next().await {
                 match event {
                     GraphsyncEvent::Progress { req_id, size, .. } => {
@@ -971,13 +1033,20 @@ mod tests {
                         assert_eq!(req_id, id);
                         assert_eq!(size, exp_size);
                     }
+                    GraphsyncEvent::ResponseReceived(responses) => {}
+                    GraphsyncEvent::Complete(rid, Ok(())) => {
+                        assert_eq!(rid, id);
+                        break;
+                    }
                     _ => {
-                        panic!("{:?} is not a complete event", event);
+                        panic!("transfer failed {:?}", event);
                     }
                 }
+            } else {
+                break;
             }
+            n += 1;
         }
-        assert_complete_ok(peer2.next().await, id);
 
         let store = peer2.store.clone();
 

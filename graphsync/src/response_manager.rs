@@ -1,5 +1,8 @@
 use super::traversal::{BlockCallbackLoader, Progress, Selector};
-use super::{GraphsyncMessage, GraphsyncResponse, Prefix, RequestId, ResponseStatusCode};
+use super::{
+    Extensions, GraphsyncHooks, GraphsyncMessage, GraphsyncRequest, GraphsyncResponse, Prefix,
+    RequestId, ResponseStatusCode,
+};
 use async_std::channel::{bounded, Receiver, Sender};
 use async_std::task::{Context, Poll};
 use blockstore::types::BlockStore;
@@ -10,7 +13,7 @@ use libipld::store::StoreParams;
 use libipld::{Block, Cid};
 use libp2p::core::PeerId;
 use std::collections::{HashSet, VecDeque};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 #[cfg(not(target_os = "unknown"))]
 use async_std::task::spawn;
@@ -34,6 +37,7 @@ pub struct ResponseBuilder<P: StoreParams> {
     blocks: VecDeque<Block<P>>,
     sender: Arc<Sender<ResponseEvent>>,
     sent: HashSet<Cid>,
+    extensions: Extensions,
 }
 
 impl<P: StoreParams> ResponseBuilder<P> {
@@ -45,6 +49,7 @@ impl<P: StoreParams> ResponseBuilder<P> {
             blocks: VecDeque::new(),
             sender,
             sent: HashSet::new(),
+            extensions: Default::default(),
         }
     }
     pub fn add_block(&mut self, block: Block<P>) {
@@ -66,6 +71,9 @@ impl<P: StoreParams> ResponseBuilder<P> {
     pub fn not_found(&mut self) {
         self.send(ResponseStatusCode::RequestFailedContentNotFound);
     }
+    pub fn rejected(&mut self) {
+        self.send(ResponseStatusCode::RequestRejected);
+    }
     fn send(&mut self, status: ResponseStatusCode) {
         let mut msg = GraphsyncMessage::default();
         msg.responses.insert(
@@ -73,7 +81,7 @@ impl<P: StoreParams> ResponseBuilder<P> {
             GraphsyncResponse {
                 id: self.req_id,
                 status,
-                extensions: Default::default(),
+                extensions: self.extensions.clone(),
             },
         );
         while let Some(blk) = self.blocks.pop_front() {
@@ -92,13 +100,16 @@ impl<P: StoreParams> ResponseBuilder<P> {
             Err(_) => {}
         }
     }
+    fn set_extensions(&mut self, extensions: Extensions) {
+        self.extensions = extensions;
+    }
 }
 
-#[derive(Debug)]
 pub struct ResponseManager<S> {
     store: Arc<S>,
     sender: Arc<Sender<ResponseEvent>>,
     receiver: Arc<Mutex<Receiver<ResponseEvent>>>,
+    hooks: Arc<RwLock<GraphsyncHooks>>,
 }
 
 impl<S> ResponseManager<S>
@@ -106,27 +117,53 @@ where
     S: BlockStore + 'static,
     Ipld: Decode<<S::Params as StoreParams>::Codecs>,
 {
-    pub fn new(store: Arc<S>) -> Self {
+    pub fn new(store: Arc<S>, hooks: Arc<RwLock<GraphsyncHooks>>) -> Self {
         let (s, r) = bounded(1000);
         Self {
             store,
             sender: Arc::new(s),
             receiver: Arc::new(Mutex::new(r)),
+            hooks,
         }
     }
-    pub fn inject_request(&self, id: RequestId, peer: PeerId, root: Cid, selector: Selector) {
-        let Self { store, sender, .. } = self;
+    pub fn inject_request(&self, peer: PeerId, request: &GraphsyncRequest) {
+        let Self {
+            store,
+            sender,
+            hooks,
+            ..
+        } = self;
         let store = Arc::clone(store);
         let sender = Arc::clone(sender);
+        let id = request.id;
+        let mut builder = ResponseBuilder::new(id, peer, sender);
+        // validate request and add any extensions
+        let (approved, extensions) = (hooks.read().unwrap().incoming_request)(peer, request);
+        builder.set_extensions(extensions);
+        if !approved {
+            builder.rejected();
+            return;
+        }
+        let root = request.root;
+        let selector = request.selector.clone();
+        let hooks = hooks.clone();
         spawn(async move {
-            let mut builder = ResponseBuilder::new(id, peer, sender);
-            let root_b = store.get(&root);
-            if let Ok(block) = root_b {
+            if let Ok(block) = store.get(&root) {
+                builder.set_extensions((hooks.read().unwrap().outgoing_block)(
+                    peer,
+                    root,
+                    block.data().len(),
+                ));
                 builder.add_block(block.clone());
                 if let Ok(node) = block.ipld() {
                     let loader = BlockCallbackLoader::new(store, |block| {
                         match block {
                             Some(block) => {
+                                builder.set_extensions((hooks.read().unwrap().outgoing_block)(
+                                    peer,
+                                    block.cid().clone(),
+                                    block.data().len(),
+                                ));
                                 builder.add_block(block);
                             }
                             None => {}
@@ -200,7 +237,9 @@ mod tests {
     async fn test_responses() {
         let TestData { root, store } = gen_data();
 
-        let manager = ResponseManager::new(store.clone());
+        let hooks = Arc::new(RwLock::new(GraphsyncHooks::default()));
+
+        let manager = ResponseManager::new(store.clone(), hooks);
 
         let selector = Selector::ExploreRecursive {
             limit: RecursionLimit::None,
@@ -210,7 +249,15 @@ mod tests {
             current: None,
         };
 
-        manager.inject_request(1, PeerId::random(), root, selector);
+        manager.inject_request(
+            PeerId::random(),
+            &GraphsyncRequest {
+                root,
+                selector,
+                id: 1,
+                extensions: Default::default(),
+            },
+        );
         if let Ok(ResponseEvent::Completed(_peer, msg)) =
             manager.receiver.lock().unwrap().recv().await
         {

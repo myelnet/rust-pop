@@ -1,4 +1,3 @@
-use std::fmt;
 use std::fmt::{Debug, Formatter};
 use std::hash::{Hash, Hasher};
 use std::ptr::NonNull;
@@ -223,7 +222,6 @@ impl Drop for FrequencyList {
 }
 
 impl FrequencyList {
-    #[inline]
     pub(super) fn new() -> Self {
         Self { head: None, len: 0 }
     }
@@ -334,7 +332,6 @@ impl FrequencyList {
         }
     }
 
-    #[inline]
     pub(super) fn pop_lfu(&mut self) -> Option<NonNull<LfuEntry>> {
         self.head
             .as_mut()

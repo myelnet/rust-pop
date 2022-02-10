@@ -35,7 +35,7 @@ impl Clone for MemoryDB {
 
 impl DBStore for MemoryDB {
     fn total_size(&self) -> Result<usize, Error> {
-        Ok(mem::size_of_val(&self.db))
+        Ok(mem::size_of_val(&self.db.read()))
     }
 
     fn write<K, V>(&self, key: K, value: V) -> Result<(), Error>

@@ -5,32 +5,20 @@ use libipld::{store::StoreParams, Block, Cid};
 use std::error::Error as StdError;
 
 #[async_trait]
-pub trait BlockStore: Send + Sync + Sized + DBStore {
+pub trait BlockStore: Send + Sync + Sized {
     type Params: StoreParams;
 
-    fn get(&self, cid: &Cid) -> Result<Block<Self::Params>, Box<dyn StdError + Send + Sync>> {
-        let read_res = self.read(cid.to_bytes())?;
-        match read_res {
-            Some(bz) => Ok(Block::<Self::Params>::new(*cid, bz)?),
-            None => Err(Box::new(Error::Other("Cid not in blockstore".to_string()))),
-        }
-    }
-    fn insert(&self, block: &Block<Self::Params>) -> Result<(), Box<dyn StdError>> {
-        let bytes = block.data();
-        let cid = &block.cid().to_bytes();
-        Ok(self.write(cid, bytes)?)
-    }
+    fn get(&mut self, cid: &Cid) -> Result<Block<Self::Params>, Box<dyn StdError + Send + Sync>>;
+    fn insert(&mut self, block: &Block<Self::Params>) -> Result<(), Box<dyn StdError>>;
 
-    fn evict(&self, cid: &Cid) -> Result<(), Box<dyn StdError>> {
-        Ok(self.delete(cid.to_bytes())?)
-    }
+    fn evict(&mut self, cid: &Cid) -> Result<(), Box<dyn StdError>>;
 
-    fn contains(&self, cid: &Cid) -> Result<bool, Box<dyn StdError>> {
-        Ok(self.exists(cid.to_bytes())?)
-    }
+    fn contains(&self, cid: &Cid) -> Result<bool, Box<dyn StdError>>;
 }
 
 pub trait DBStore: Send + Sync {
+    fn total_size(&self) -> Result<usize, Error>;
+
     fn read<K>(&self, key: K) -> Result<Option<Vec<u8>>, Error>
     where
         K: AsRef<[u8]>;

@@ -1,9 +1,12 @@
 use crate::errors::Error;
 use crate::types::{BlockStore, DBStore};
 use libipld::DefaultParams;
+use libipld::{Block, Cid};
 use parking_lot::RwLock;
 use std::collections::{hash_map::DefaultHasher, HashMap};
+use std::error::Error as StdError;
 use std::hash::{Hash, Hasher};
+use std::mem;
 
 /// A thread-safe `HashMap` wrapper.
 #[derive(Debug, Default)]
@@ -31,6 +34,10 @@ impl Clone for MemoryDB {
 }
 
 impl DBStore for MemoryDB {
+    fn total_size(&self) -> Result<usize, Error> {
+        Ok(mem::size_of_val(&self.db))
+    }
+
     fn write<K, V>(&self, key: K, value: V) -> Result<(), Error>
     where
         K: AsRef<[u8]>,
@@ -67,6 +74,27 @@ impl DBStore for MemoryDB {
 
 impl BlockStore for MemoryDB {
     type Params = DefaultParams;
+
+    fn get(&mut self, cid: &Cid) -> Result<Block<Self::Params>, Box<dyn StdError + Send + Sync>> {
+        let read_res = self.read(cid.to_bytes())?;
+        match read_res {
+            Some(bz) => Ok(Block::<Self::Params>::new(*cid, bz)?),
+            None => Err(Box::new(Error::Other("Cid not in blockstore".to_string()))),
+        }
+    }
+    fn insert(&mut self, block: &Block<Self::Params>) -> Result<(), Box<dyn StdError>> {
+        let bytes = block.data();
+        let cid = &block.cid().to_bytes();
+        Ok(self.write(cid, bytes)?)
+    }
+
+    fn evict(&mut self, cid: &Cid) -> Result<(), Box<dyn StdError>> {
+        Ok(self.delete(cid.to_bytes())?)
+    }
+
+    fn contains(&self, cid: &Cid) -> Result<bool, Box<dyn StdError>> {
+        Ok(self.exists(cid.to_bytes())?)
+    }
 }
 
 #[cfg(test)]
@@ -82,55 +110,55 @@ pub mod tests {
 
     #[test]
     fn mem_db_write() {
-        let db = MemoryDB::default();
-        test_write(&db);
+        let mut db = MemoryDB::default();
+        test_write(&mut db);
     }
 
     #[test]
     fn mem_db_read() {
-        let db = MemoryDB::default();
-        test_read(&db);
+        let mut db = MemoryDB::default();
+        test_read(&mut db);
     }
 
     #[test]
     fn mem_db_exists() {
-        let db = MemoryDB::default();
-        test_exists(&db);
+        let mut db = MemoryDB::default();
+        test_exists(&mut db);
     }
 
     #[test]
     fn mem_db_does_not_exist() {
-        let db = MemoryDB::default();
-        test_does_not_exist(&db);
+        let mut db = MemoryDB::default();
+        test_does_not_exist(&mut db);
     }
 
     #[test]
     fn mem_db_delete() {
-        let db = MemoryDB::default();
-        test_delete(&db);
+        let mut db = MemoryDB::default();
+        test_delete(&mut db);
     }
 
     #[test]
     fn mem_db_bulk_write() {
-        let db = MemoryDB::default();
-        test_bulk_write(&db);
+        let mut db = MemoryDB::default();
+        test_bulk_write(&mut db);
     }
 
     #[test]
     fn mem_db_bulk_read() {
-        let db = MemoryDB::default();
-        test_bulk_read(&db);
+        let mut db = MemoryDB::default();
+        test_bulk_read(&mut db);
     }
 
     #[test]
     fn mem_db_bulk_delete() {
-        let db = MemoryDB::default();
-        test_bulk_delete(&db);
+        let mut db = MemoryDB::default();
+        test_bulk_delete(&mut db);
     }
 
     #[test]
     fn test_mem_recovers_block() {
-        let store = MemoryDB::default();
+        let mut store = MemoryDB::default();
 
         let leaf1 = ipld!({ "name": "leaf1", "size": 12 });
         let leaf1_block = Block::encode(DagCborCodec, Code::Sha2_256, &leaf1).unwrap();
@@ -149,7 +177,7 @@ pub mod tests {
 
     #[test]
     fn test_mem_delete_block() {
-        let store = MemoryDB::default();
+        let mut store = MemoryDB::default();
 
         let leaf1 = ipld!({ "name": "leaf1", "size": 12 });
         let leaf1_block = Block::encode(DagCborCodec, Code::Sha2_256, &leaf1).unwrap();

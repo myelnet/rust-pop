@@ -96,7 +96,7 @@ impl<P: StoreParams> ResponseBuilder<P> {
 
 #[derive(Debug)]
 pub struct ResponseManager<S> {
-    store: Arc<S>,
+    store: Arc<Mutex<S>>,
     sender: Arc<Sender<ResponseEvent>>,
     receiver: Arc<Mutex<Receiver<ResponseEvent>>>,
 }
@@ -106,7 +106,7 @@ where
     S: BlockStore + 'static,
     Ipld: Decode<<S::Params as StoreParams>::Codecs>,
 {
-    pub fn new(store: Arc<S>) -> Self {
+    pub fn new(store: Arc<Mutex<S>>) -> Self {
         let (s, r) = bounded(1000);
         Self {
             store,
@@ -120,7 +120,8 @@ where
         let sender = Arc::clone(sender);
         spawn(async move {
             let mut builder = ResponseBuilder::new(id, peer, sender);
-            if let Ok(block) = store.get(&root) {
+            let root_b = store.lock().unwrap().get(&root);
+            if let Ok(block) = root_b {
                 builder.add_block(block.clone());
                 if let Ok(node) = block.ipld() {
                     let loader = BlockCallbackLoader::new(store, |block| {
@@ -167,19 +168,19 @@ mod tests {
 
     struct TestData {
         root: Cid,
-        store: Arc<MemoryBlockStore>,
+        store: Arc<Mutex<MemoryBlockStore>>,
     }
 
     fn gen_data() -> TestData {
-        let store = Arc::new(MemoryBlockStore::default());
+        let store = Arc::new(Mutex::new(MemoryBlockStore::default()));
 
         let leaf1 = ipld!({ "name": "leaf1", "size": 12 });
         let leaf1_block = Block::encode(DagCborCodec, Code::Sha2_256, &leaf1).unwrap();
-        store.insert(&leaf1_block).unwrap();
+        store.lock().unwrap().insert(&leaf1_block).unwrap();
 
         let leaf2 = ipld!({ "name": "leaf2", "size": 6 });
         let leaf2_block = Block::encode(DagCborCodec, Code::Sha2_256, &leaf2).unwrap();
-        store.insert(&leaf2_block).unwrap();
+        store.lock().unwrap().insert(&leaf2_block).unwrap();
 
         let parent = ipld!({
             "children": [leaf1_block.cid(), leaf2_block.cid()],
@@ -187,7 +188,7 @@ mod tests {
             "name": "parent",
         });
         let parent_block = Block::encode(DagCborCodec, Code::Sha2_256, &parent).unwrap();
-        store.insert(&parent_block).unwrap();
+        store.lock().unwrap().insert(&parent_block).unwrap();
 
         TestData {
             root: parent_block.cid().clone(),

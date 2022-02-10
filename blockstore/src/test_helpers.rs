@@ -1,4 +1,4 @@
-use crate::types::{DBStore};
+use crate::types::DBStore;
 
 pub fn test_write<DB>(db: &DB)
 where

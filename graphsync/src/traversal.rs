@@ -15,7 +15,7 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_cbor::{error::Error as CborError, from_slice, to_vec};
 use std::fmt;
 use std::io::Error as StdError;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use thiserror::Error;
 use Selector::*;
 
@@ -428,7 +428,7 @@ where
 }
 
 pub struct BlockCallbackLoader<S, F> {
-    store: Arc<S>,
+    store: Arc<Mutex<S>>,
     cb: F,
 }
 
@@ -437,7 +437,7 @@ where
     S: BlockStore,
     F: FnMut(Option<Block<S::Params>>) -> Result<(), String> + Send + Sync,
 {
-    pub fn new(store: Arc<S>, cb: F) -> Self {
+    pub fn new(store: Arc<Mutex<S>>, cb: F) -> Self {
         Self { store, cb }
     }
 }
@@ -450,7 +450,7 @@ where
     Ipld: Decode<<S::Params as StoreParams>::Codecs>,
 {
     async fn load_link(&mut self, link: &Cid) -> Result<Option<Ipld>, String> {
-        let block = match self.store.get(link) {
+        let block = match self.store.lock().unwrap().get(link) {
             Ok(block) => block,
             Err(e) => return Err(e.to_string()),
         };
@@ -466,7 +466,7 @@ where
 // TODO: add a max cache size so we start evicting pending blocks to
 // prevent an attack where a peer would flood us with unrelated blocks
 pub struct AsyncLoader<S: BlockStore, F> {
-    store: Arc<S>,
+    store: Arc<Mutex<S>>,
     sender: Arc<Sender<Block<S::Params>>>,
     receiver: Arc<Receiver<Block<S::Params>>>,
     cb: F,
@@ -482,7 +482,7 @@ where
     F: Fn(&Block<S::Params>) -> Result<(), String> + Send + Sync,
     Ipld: Decode<<S::Params as StoreParams>::Codecs>,
 {
-    pub fn new(store: Arc<S>, cb: F) -> Self {
+    pub fn new(store: Arc<Mutex<S>>, cb: F) -> Self {
         let (s, r) = bounded(1000);
         Self {
             cb,
@@ -526,7 +526,11 @@ where
         self.cid.remove(&id);
         self.data.remove(&id);
         self.lookup.remove(block.cid());
-        self.store.insert(block).map_err(|e| e.to_string())?;
+        self.store
+            .lock()
+            .unwrap()
+            .insert(block)
+            .map_err(|e| e.to_string())?;
         (self.cb)(block)?;
         Ok(())
     }
@@ -553,7 +557,7 @@ where
                 }
             }
             // check if it is already in the blockstore
-            if let Ok(block) = self.store.get(link) {
+            if let Ok(block) = self.store.lock().unwrap().get(link) {
                 match block.ipld() {
                     Ok(node) => return Ok(Some(node)),
                     Err(e) => return Err(e.to_string()),
@@ -562,7 +566,11 @@ where
             match self.receiver.recv().await {
                 Ok(block) => {
                     if block.cid() == link {
-                        self.store.insert(&block).map_err(|e| e.to_string())?;
+                        self.store
+                            .lock()
+                            .unwrap()
+                            .insert(&block)
+                            .map_err(|e| e.to_string())?;
                         (self.cb)(&block)?;
                         match block.ipld() {
                             Ok(node) => return Ok(Some(node)),
@@ -600,7 +608,7 @@ mod tests {
     }
 
     fn gen_data() -> TestData {
-        let store = MemoryBlockStore::default();
+        let mut store = MemoryBlockStore::default();
 
         let leaf1 = ipld!({ "name": "leaf1", "size": 12 });
         let leaf1_block = Block::encode(DagCborCodec, Code::Sha2_256, &leaf1).unwrap();
@@ -845,7 +853,7 @@ mod tests {
     async fn async_loader() {
         use futures::join;
 
-        let store = Arc::new(MemoryBlockStore::default());
+        let store = Arc::new(Mutex::new(MemoryBlockStore::default()));
 
         let unrelated1 = ipld!({ "name": "not in this tree" });
         let unrelated1_block = Block::encode(DagCborCodec, Code::Sha2_256, &unrelated1).unwrap();

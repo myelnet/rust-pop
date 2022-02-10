@@ -38,8 +38,8 @@ unsafe impl<B: DBStore> Sync for LfuBlockstore<B> {}
 /// all the keys for blocks that are equally popular (popularity being measured as the
 /// number of reads). When the node reaches a maximum disk capacity in bytes it pops out
 /// keys to delete until it is below that capacity. The removed keys are the eldest in the store
-/// + the least popular (i.e the lowest level node in the frequency linked list). For read O(1)
-/// speed in evicting content from this list we maintain a lookup table which maps CIDS/Hashes to
+/// + the least popular (i.e the lowest level node in the frequency linked list). For O(1)
+/// in evicting elements from this list we maintain a lookup table which maps CIDS/Hashes to
 /// pointer elements in the linked list. The evicted keys are then used to evict content from the
 /// blockstore.
 impl<B> LfuBlockstore<B>
@@ -171,7 +171,7 @@ where
     }
 }
 
-// Lfu is also a blockstore so can be used interchangeably within the node. 
+// Lfu is also a blockstore so can be used interchangeably within the node.
 impl<B: DBStore> BlockStore for LfuBlockstore<B> {
     type Params = DefaultParams;
 

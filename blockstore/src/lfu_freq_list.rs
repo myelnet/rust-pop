@@ -49,7 +49,10 @@ pub(super) fn remove_entry_pointer(
 pub(super) struct Node {
     pub(super) next: Option<NonNull<Self>>,
     pub(super) prev: Option<NonNull<Self>>,
+    // youngest entry
     pub(super) elements: Option<NonNull<LfuEntry>>,
+    // eldest entry
+    pub(super) root: Option<NonNull<LfuEntry>>,
     pub(super) frequency: usize,
 }
 
@@ -82,6 +85,7 @@ impl Node {
             next: self.next,
             prev: Some(self.into()),
             elements: None,
+            root: None,
             frequency: self.frequency + 1,
         });
 
@@ -100,7 +104,6 @@ impl Node {
 
     /// Pushes the entry to the front of the list
     pub(super) fn push(&mut self, mut entry: NonNull<LfuEntry>) {
-        // Fix next
         if let Some(mut head) = self.elements {
             // SAFETY: self is exclusively accessed
             let head_ptr = unsafe { head.as_mut() };
@@ -116,20 +119,26 @@ impl Node {
         // Fix previous
         entry_ptr.prev = None;
         self.elements = Some(entry);
+        // Fix next
+        match self.root {
+            Some(_) => {}
+            None => self.root = Some(entry),
+        }
     }
 
+    /// pops the root (the eldest node)
     pub(super) fn pop(&mut self) -> Option<NonNull<LfuEntry>> {
-        if let Some(mut node_ptr) = self.elements {
+        if let Some(mut node_ptr) = self.root {
             // SAFETY: self is exclusively accessed
             let node = unsafe { node_ptr.as_mut() };
 
-            if let Some(mut next) = node.next {
+            if let Some(mut prev) = node.prev {
                 // SAFETY: self is exclusively accessed
-                let next = unsafe { next.as_mut() };
-                next.prev = None;
+                let prev = unsafe { prev.as_mut() };
+                prev.next = None;
             }
 
-            self.elements = node.next;
+            self.root = node.prev;
 
             node.next = None;
             node.prev = None;
@@ -244,6 +253,7 @@ impl FrequencyList {
             next: self.head,
             prev: None,
             elements: None,
+            root: None,
             frequency: 0,
         });
 
@@ -295,7 +305,6 @@ impl FrequencyList {
                 self.len += 1;
             }
         }
-
 
         // Drop frequency list node if it contains no elements
         if freq_list_node.elements.is_none() {

@@ -33,6 +33,15 @@ where
 unsafe impl<B: DBStore> Send for LfuBlockstore<B> {}
 unsafe impl<B: DBStore> Sync for LfuBlockstore<B> {}
 
+/// LFU blockstore with an architecture inspired by the O(1) algorithm for LFU cache inviction
+/// http://dhruvbird.com/lfu.pdf. We maintain a linked list, where each node represents
+/// all the keys for blocks that are equally popular (popularity being measured as the
+/// number of reads). When the node reaches a maximum disk capacity in bytes it pops out
+/// keys to delete until it is below that capacity. The removed keys are the eldest in the store
+/// + the least popular (i.e the lowest level node in the frequency linked list). For read O(1)
+/// speed in evicting content from this list we maintain a lookup table which maps CIDS/Hashes to
+/// pointer elements in the linked list. The evicted keys are then used to evict content from the
+/// blockstore.
 impl<B> LfuBlockstore<B>
 where
     B: DBStore,
@@ -141,15 +150,8 @@ where
 
     /// Evicts the least frequently used key and returns it. If the lfu is
     /// empty, then this returns None. If there are multiple items that have an
-    /// equal access count, then the most recently added key is evicted.
+    /// equal access count, then the eldest key is evicted (LIFO).
     pub fn pop_lfu(&mut self) -> Option<&Vec<u8>> {
-        self.pop_lfu_key_value()
-    }
-
-    /// Evicts the least frequently used key and returns it. If the lfu is empty, then
-    /// this returns None. If there are multiple items that have an equal access
-    /// count, then the most recently added key is evicted.
-    pub fn pop_lfu_key_value(&mut self) -> Option<&Vec<u8>> {
         self.freq_list.pop_lfu().map(|entry_ptr| {
             // SAFETY: This is fine since self is uniquely borrowed.
             let key = unsafe { entry_ptr.as_ref().key.as_ref() };
@@ -169,6 +171,7 @@ where
     }
 }
 
+// Lfu is also a blockstore so can be used interchangeably within the node. 
 impl<B: DBStore> BlockStore for LfuBlockstore<B> {
     type Params = DefaultParams;
 
@@ -434,9 +437,10 @@ mod pop {
             lfu.write(k, &v).unwrap();
         }
 
+        // evicts the oldest
         for i in 0..100 {
             assert_eq!(lfu.lookup.0.len(), 100);
-            let evicted_index = 100 - i - 1;
+            let evicted_index = i;
             let k = Vec::from([evicted_index as u8]);
             assert_eq!(lfu.pop_lfu(), Some(&k));
         }

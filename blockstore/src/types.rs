@@ -3,6 +3,7 @@ use async_trait::async_trait;
 
 use libipld::{store::StoreParams, Block, Cid};
 use std::error::Error as StdError;
+use std::iter::FromIterator;
 
 #[async_trait]
 pub trait BlockStore: Send + Sync + Sized {
@@ -17,6 +18,8 @@ pub trait BlockStore: Send + Sync + Sized {
 }
 
 pub trait DBStore: Send + Sync {
+    fn key_iterator<I: FromIterator<Vec<u8>>>(&self) -> Result<I, Error>;
+
     fn total_size(&self) -> Result<usize, Error>;
 
     fn read<K>(&self, key: K) -> Result<Option<Vec<u8>>, Error>

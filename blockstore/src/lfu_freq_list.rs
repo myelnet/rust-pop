@@ -38,9 +38,6 @@ pub(super) fn remove_entry_pointer(
         owner.next = None;
 
         // Drop the node, since the node is empty now.
-        // TODO: low frequency count optimization, where we don't dealloc
-        // very low frequency counts since we're likely to just realloc them
-        // sooner than later.
         unsafe { Box::from_raw(owner) };
         freq_list.len -= 1;
     };
@@ -299,8 +296,6 @@ impl FrequencyList {
             }
         }
 
-        // TODO: move the insert item into next_owner lines up here.
-        // This is blocked on 1.53: https://link.eddie.sh/40IiP
 
         // Drop frequency list node if it contains no elements
         if freq_list_node.elements.is_none() {

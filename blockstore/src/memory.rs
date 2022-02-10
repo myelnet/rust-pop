@@ -6,12 +6,14 @@ use parking_lot::RwLock;
 use std::collections::{hash_map::DefaultHasher, HashMap};
 use std::error::Error as StdError;
 use std::hash::{Hash, Hasher};
+use std::iter;
 use std::mem;
-
 /// A thread-safe `HashMap` wrapper.
 #[derive(Debug, Default)]
 pub struct MemoryDB {
-    db: RwLock<HashMap<u64, Vec<u8>>>,
+    pub db: RwLock<HashMap<u64, Vec<u8>>>,
+    /// only set for testing purposes
+    pub keys: Option<RwLock<HashMap<Vec<u8>, u64>>>,
 }
 
 impl MemoryDB {
@@ -29,11 +31,19 @@ impl Clone for MemoryDB {
     fn clone(&self) -> Self {
         Self {
             db: RwLock::new(self.db.read().clone()),
+            keys: None,
         }
     }
 }
 
 impl DBStore for MemoryDB {
+    fn key_iterator<I: FromIterator<Vec<u8>>>(&self) -> Result<I, Error> {
+        match &self.keys {
+            Some(keys) => Ok(keys.read().iter().map(|(k, _)| k.clone()).collect()),
+            None => Ok(iter::empty::<Vec<u8>>().collect()),
+        }
+    }
+
     fn total_size(&self) -> Result<usize, Error> {
         Ok(mem::size_of_val(&self.db.read()))
     }
@@ -43,9 +53,18 @@ impl DBStore for MemoryDB {
         K: AsRef<[u8]>,
         V: AsRef<[u8]>,
     {
+        match &self.keys {
+            Some(keys) => {
+                keys.write()
+                    .insert(key.as_ref().to_vec(), Self::db_index(&key));
+            }
+            None => {}
+        }
+
         self.db
             .write()
             .insert(Self::db_index(key), value.as_ref().to_vec());
+
         Ok(())
     }
 
@@ -53,6 +72,13 @@ impl DBStore for MemoryDB {
     where
         K: AsRef<[u8]>,
     {
+        match &self.keys {
+            Some(keys) => {
+                keys.write().remove(&key.as_ref().to_vec());
+            }
+            None => {}
+        }
+
         self.db.write().remove(&Self::db_index(key));
         Ok(())
     }
@@ -195,5 +221,21 @@ pub mod tests {
 
         assert_eq!(false, exists_leaf1);
         assert_eq!(false, exists_leaf2);
+    }
+
+    #[test]
+    fn test_mem_keys() {
+        let db = MemoryDB {
+            db: RwLock::new(HashMap::new()),
+            keys: Some(RwLock::new(HashMap::new())),
+        };
+        db.write(Vec::from([1u8]), Vec::from([2u8])).unwrap();
+        db.write(Vec::from([2u8]), Vec::from([3u8])).unwrap();
+        db.write(Vec::from([3u8]), Vec::from([4u8])).unwrap();
+
+        let keys = db.key_iterator::<Vec<Vec<u8>>>().unwrap();
+        assert!(keys.contains(&Vec::from([1u8])));
+        assert!(keys.contains(&Vec::from([2u8])));
+        assert!(keys.contains(&Vec::from([3u8])));
     }
 }

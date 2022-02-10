@@ -37,18 +37,19 @@ impl<B> LfuBlockstore<B>
 where
     B: DBStore,
 {
-
     #[must_use]
     pub fn new(capacity: usize, bs: B) -> Self {
-        Self {
+        let mut lfu = Self {
             db: bs,
             lookup: LookupMap(HashMap::new()),
             freq_list: FrequencyList::new(),
             capacity: NonZeroUsize::new(capacity),
             len: 0,
-        }
+        };
+        lfu.sync().unwrap();
+        lfu
     }
-    
+
     fn exists(&self, key: &Vec<u8>) -> Result<bool, Error> {
         self.db.exists(key)
     }
@@ -74,13 +75,16 @@ where
         if let Some(capacity) = self.capacity {
             // After writing data - empty out old data !
             while capacity.get() <= self.total_size().unwrap() {
-                println!("{:?}", self.total_size().unwrap());
                 self.pop_lfu();
             }
         }
+        self.add_key_index(key)
+    }
 
-        // Since an entry has a reference to its key, we've created a situation
-        // where we have self-referential data. We can't construct the entry
+    //
+    fn add_key_index(&mut self, key: Arc<Vec<u8>>) -> Result<(), Error> {
+        // Since an entry has a reference to its key, we
+        // have self-referential data. We can't construct the entry
         // before inserting it into the lookup table because the key may be
         // moved when inserting it (so the memory address may become invalid)
         // but we can't insert the entry without constructing the value first.
@@ -94,13 +98,8 @@ where
     }
 
     /// Removes a value from the lfu and blockstore by key, if it exists.
-
     fn delete(&mut self, key: &Vec<u8>) -> Result<(), Error> {
         self.lookup.0.remove(key).map(|mut node| {
-            // SAFETY: We have unique access to self. At this point, we've
-            // removed the entry from the lookup map but haven't removed it from
-            // the frequency data structure, so we need to clean it up there
-            // // before returning the value.
             remove_entry_pointer(
                 *unsafe { Box::from_raw(node.as_mut()) },
                 &mut self.freq_list,
@@ -114,7 +113,6 @@ where
 
     /// Gets a value and incrementing the internal frequency counter of that
     /// value, if it exists.
-
     fn read(&mut self, key: &Vec<u8>) -> Result<Option<Vec<u8>>, Error> {
         match self.lookup.0.get(key) {
             Some(entry) => {
@@ -125,20 +123,32 @@ where
         }
     }
 
-
+    /// If the blockstore already has elements allocated (eg. loading from disk) but the
+    /// lookup table and freq list are booted from scratch this creates a new entry for each key
+    fn sync(&mut self) -> Result<(), Error> {
+        for k in self.db.key_iterator::<Vec<Vec<u8>>>() {
+            for j in k {
+                match self.lookup.0.get(&j) {
+                    Some(_entry) => {}
+                    None => {
+                        self.add_key_index(Arc::new(j)).unwrap();
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
 
     /// Evicts the least frequently used key and returns it. If the lfu is
     /// empty, then this returns None. If there are multiple items that have an
-    /// equal access count, then the most recently added value is evicted.
-
+    /// equal access count, then the most recently added key is evicted.
     pub fn pop_lfu(&mut self) -> Option<&Vec<u8>> {
         self.pop_lfu_key_value()
     }
 
     /// Evicts the least frequently used key and returns it. If the lfu is empty, then
     /// this returns None. If there are multiple items that have an equal access
-    /// count, then the most recently added key-value pair is evicted.
-
+    /// count, then the most recently added key is evicted.
     pub fn pop_lfu_key_value(&mut self) -> Option<&Vec<u8>> {
         self.freq_list.pop_lfu().map(|entry_ptr| {
             // SAFETY: This is fine since self is uniquely borrowed.
@@ -148,18 +158,12 @@ where
         })
     }
 
-    /// Returns the frequencies that this lfu has. This is a linear time
-    /// operation.
-
-    #[must_use]
+    /// Returns the frequencies that this lfu has. Linear time operation.
     pub fn frequencies(&self) -> Vec<usize> {
         self.freq_list.frequencies()
     }
 
-    /// Returns the current number of items in the lfu. This is a constant
-    /// time operation.
-
-    #[must_use]
+    /// Returns the current number of items in the lfu. Constant time operation.
     pub fn len(&self) -> usize {
         self.len
     }
@@ -452,7 +456,7 @@ mod delete {
     use std::sync::Arc;
 
     #[test]
-    fn remove_to_empty() {
+    fn delete_to_empty() {
         let mut lfu = LfuBlockstore::new(0, MemoryDB::default());
         lfu.write(Arc::new(Vec::from([1u8])), Vec::from([2u8]))
             .unwrap();
@@ -462,13 +466,13 @@ mod delete {
     }
 
     #[test]
-    fn remove_empty() {
+    fn delete_empty() {
         let mut lfu = LfuBlockstore::new(0, MemoryDB::default());
         lfu.delete(&Vec::from([1u8])).unwrap();
     }
 
     #[test]
-    fn remove_to_nonempty() {
+    fn delete_to_nonempty() {
         let mut lfu = LfuBlockstore::new(0, MemoryDB::default());
         lfu.write(Arc::new(Vec::from([1u8])), Vec::from([2u8]))
             .unwrap();
@@ -487,7 +491,7 @@ mod delete {
     }
 
     #[test]
-    fn remove_middle() {
+    fn delete_middle() {
         let mut lfu = LfuBlockstore::new(0, MemoryDB::default());
         lfu.write(Arc::new(Vec::from([1u8])), Vec::from([2u8]))
             .unwrap();
@@ -519,7 +523,7 @@ mod delete {
     }
 
     #[test]
-    fn remove_end() {
+    fn delete_end() {
         let mut lfu = LfuBlockstore::new(0, MemoryDB::default());
         lfu.write(Arc::new(Vec::from([1u8])), Vec::from([2u8]))
             .unwrap();
@@ -551,7 +555,7 @@ mod delete {
     }
 
     #[test]
-    fn remove_start() {
+    fn delete_start() {
         let mut lfu = LfuBlockstore::new(0, MemoryDB::default());
         lfu.write(Arc::new(Vec::from([1u8])), Vec::from([2u8]))
             .unwrap();
@@ -583,7 +587,7 @@ mod delete {
     }
 
     #[test]
-    fn remove_connects_next_owner() {
+    fn delete_connects_next_owner() {
         let mut lfu = LfuBlockstore::new(0, MemoryDB::default());
         lfu.write(Arc::new(Vec::from([1u8])), Vec::from([1u8]))
             .unwrap();
@@ -642,5 +646,32 @@ mod bookkeeping {
         assert_eq!(lfu.freq_list.len, 2);
         lfu.read(&Vec::from([3u8])).unwrap();
         assert_eq!(lfu.freq_list.len, 1);
+    }
+}
+
+#[cfg(test)]
+mod sync {
+    use super::LfuBlockstore;
+    use crate::memory::MemoryDB;
+    use crate::types::DBStore;
+    use parking_lot::RwLock;
+    use std::collections::HashMap;
+
+    #[test]
+    fn db_syncs_freq_list() {
+        let db = MemoryDB {
+            db: RwLock::new(HashMap::new()),
+            keys: Some(RwLock::new(HashMap::new())),
+        };
+        db.write(Vec::from([1u8]), Vec::from([2u8])).unwrap();
+        db.write(Vec::from([2u8]), Vec::from([3u8])).unwrap();
+        db.write(Vec::from([3u8]), Vec::from([4u8])).unwrap();
+
+        let mut lfu = LfuBlockstore::new(0, db);
+        assert_eq!(lfu.len, 3);
+        assert_eq!(lfu.freq_list.len, 1);
+        assert!(lfu.read(&Vec::from([1u8])).unwrap().is_some());
+        assert!(lfu.read(&Vec::from([2u8])).unwrap().is_some());
+        assert!(lfu.read(&Vec::from([3u8])).unwrap().is_some());
     }
 }

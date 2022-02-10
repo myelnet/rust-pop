@@ -2,7 +2,9 @@ use crate::errors::Error;
 use crate::types::{BlockStore, DBStore};
 use libipld::DefaultParams;
 use libipld::{Block, Cid};
-pub use rocksdb::{perf::get_memory_usage_stats, Options, WriteBatch, DB};
+pub use rocksdb::{
+    perf::get_memory_usage_stats, DBIterator, IteratorMode, Options, WriteBatch, DB,
+};
 use std::error::Error as StdError;
 use std::path::Path;
 
@@ -27,6 +29,14 @@ impl Db {
 }
 
 impl DBStore for Db {
+    fn key_iterator<I: FromIterator<Vec<u8>>>(&self) -> Result<I, Error> {
+        Ok(self
+            .db
+            .iterator(IteratorMode::Start)
+            .map(|(k, _)| k.to_vec())
+            .collect())
+    }
+
     fn total_size(&self) -> Result<usize, Error> {
         Ok(get_memory_usage_stats(Some(&[&self.db]), None)?.mem_table_total as usize)
     }
@@ -247,5 +257,20 @@ pub mod tests {
 
         assert_eq!(false, exists_leaf1);
         assert_eq!(false, exists_leaf2);
+    }
+
+    #[test]
+    fn test_db_keys() {
+        let path = DBPath::new("keys_test");
+        let db = Db::open(path.as_ref()).unwrap();
+
+        db.write(Vec::from([1u8]), Vec::from([2u8])).unwrap();
+        db.write(Vec::from([2u8]), Vec::from([3u8])).unwrap();
+        db.write(Vec::from([3u8]), Vec::from([4u8])).unwrap();
+
+        let keys = db.key_iterator::<Vec<Vec<u8>>>().unwrap();
+        assert!(keys.contains(&Vec::from([1u8])));
+        assert!(keys.contains(&Vec::from([2u8])));
+        assert!(keys.contains(&Vec::from([3u8])));
     }
 }

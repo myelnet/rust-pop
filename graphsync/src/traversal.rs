@@ -15,7 +15,7 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_cbor::{error::Error as CborError, from_slice, to_vec};
 use std::fmt;
 use std::io::Error as StdError;
-use std::sync::Arc;
+use std::sync::{Arc};
 use thiserror::Error;
 use Selector::*;
 

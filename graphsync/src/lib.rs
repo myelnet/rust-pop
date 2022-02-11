@@ -37,7 +37,7 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::io::{self, Cursor};
 use std::marker::PhantomData;
-use std::sync::Arc;
+use std::sync::{Arc};
 use std::time::Duration;
 
 const MAX_CID_SIZE: usize = 4 * 10 + 64;

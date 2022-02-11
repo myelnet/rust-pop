@@ -1,7 +1,7 @@
 use blockstore::types::BlockStore;
 use libipld::{Block, Cid};
 use std::io::Write;
-use std::sync::Arc;
+use std::sync::{Arc};
 use unixfs_v1::file::{adder::FileAdder, visit::IdleFileVisit};
 
 pub fn add<S: BlockStore>(store: Arc<S>, data: &[u8]) -> Result<Option<Cid>, String> {

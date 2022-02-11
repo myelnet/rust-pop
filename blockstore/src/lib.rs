@@ -5,3 +5,7 @@ pub mod types;
 
 #[cfg(feature = "native")]
 pub mod db;
+#[cfg(feature = "native")]
+pub mod lfu;
+#[cfg(feature = "native")]
+mod lfu_freq_list;

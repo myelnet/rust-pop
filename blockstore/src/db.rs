@@ -1,7 +1,11 @@
 use crate::errors::Error;
 use crate::types::{BlockStore, DBStore};
 use libipld::DefaultParams;
-pub use rocksdb::{Options, WriteBatch, DB};
+use libipld::{Block, Cid};
+pub use rocksdb::{
+    perf::get_memory_usage_stats, DBIterator, IteratorMode, Options, WriteBatch, DB,
+};
+use std::error::Error as StdError;
 use std::path::Path;
 
 #[derive(Debug)]
@@ -19,12 +23,24 @@ impl Db {
         db_opts.increase_parallelism(num_cpus::get() as i32);
         db_opts.set_write_buffer_size(256 * 1024 * 1024); // increase from 64MB to 256MB
         Ok(Self {
-            db: DB::open(&db_opts, path)?,
+            db: DB::open(&mut db_opts, path)?,
         })
     }
 }
 
 impl DBStore for Db {
+    fn key_iterator<I: FromIterator<Vec<u8>>>(&self) -> Result<I, Error> {
+        Ok(self
+            .db
+            .iterator(IteratorMode::Start)
+            .map(|(k, _)| k.to_vec())
+            .collect())
+    }
+
+    fn total_size(&self) -> Result<usize, Error> {
+        Ok(get_memory_usage_stats(Some(&[&self.db]), None)?.mem_table_total as usize)
+    }
+
     fn write<K, V>(&self, key: K, value: V) -> Result<(), Error>
     where
         K: AsRef<[u8]>,
@@ -72,6 +88,27 @@ impl DBStore for Db {
 
 impl BlockStore for Db {
     type Params = DefaultParams;
+
+    fn get(&self, cid: &Cid) -> Result<Block<Self::Params>, Box<dyn StdError + Send + Sync>> {
+        let read_res = self.read(cid.to_bytes())?;
+        match read_res {
+            Some(bz) => Ok(Block::<Self::Params>::new(*cid, bz)?),
+            None => Err(Box::new(Error::Other("Cid not in blockstore".to_string()))),
+        }
+    }
+    fn insert(&self, block: &Block<Self::Params>) -> Result<(), Box<dyn StdError>> {
+        let bytes = block.data();
+        let cid = &block.cid().to_bytes();
+        Ok(self.write(cid, bytes)?)
+    }
+
+    fn evict(&self, cid: &Cid) -> Result<(), Box<dyn StdError>> {
+        Ok(self.delete(cid.to_bytes())?)
+    }
+
+    fn contains(&self, cid: &Cid) -> Result<bool, Box<dyn StdError>> {
+        Ok(self.exists(cid.to_bytes())?)
+    }
 }
 
 // --------------------------------------------------------------------------------------
@@ -126,57 +163,57 @@ pub mod tests {
     #[test]
     fn db_write() {
         let path = DBPath::new("write_test");
-        let db = Db::open(path.as_ref()).unwrap();
-        test_write(&db);
+        let mut db = Db::open(path.as_ref()).unwrap();
+        test_write(&mut db);
     }
 
     #[test]
     fn db_read() {
         let path = DBPath::new("read_test");
-        let db = Db::open(path.as_ref()).unwrap();
-        test_read(&db);
+        let mut db = Db::open(path.as_ref()).unwrap();
+        test_read(&mut db);
     }
 
     #[test]
     fn db_exists() {
         let path = DBPath::new("exists_test");
-        let db = Db::open(path.as_ref()).unwrap();
-        test_exists(&db);
+        let mut db = Db::open(path.as_ref()).unwrap();
+        test_exists(&mut db);
     }
 
     #[test]
     fn db_does_not_exist() {
         let path = DBPath::new("does_not_exists_test");
-        let db = Db::open(path.as_ref()).unwrap();
-        test_does_not_exist(&db);
+        let mut db = Db::open(path.as_ref()).unwrap();
+        test_does_not_exist(&mut db);
     }
 
     #[test]
     fn db_delete() {
         let path = DBPath::new("delete_test");
-        let db = Db::open(path.as_ref()).unwrap();
-        test_delete(&db);
+        let mut db = Db::open(path.as_ref()).unwrap();
+        test_delete(&mut db);
     }
 
     #[test]
     fn db_bulk_write() {
         let path = DBPath::new("bulk_write_test");
-        let db = Db::open(path.as_ref()).unwrap();
-        test_bulk_write(&db);
+        let mut db = Db::open(path.as_ref()).unwrap();
+        test_bulk_write(&mut db);
     }
 
     #[test]
     fn db_bulk_read() {
         let path = DBPath::new("bulk_read_test");
-        let db = Db::open(path.as_ref()).unwrap();
-        test_bulk_read(&db);
+        let mut db = Db::open(path.as_ref()).unwrap();
+        test_bulk_read(&mut db);
     }
 
     #[test]
     fn db_bulk_delete() {
         let path = DBPath::new("bulk_delete_test");
-        let db = Db::open(path.as_ref()).unwrap();
-        test_bulk_delete(&db);
+        let mut db = Db::open(path.as_ref()).unwrap();
+        test_bulk_delete(&mut db);
     }
 
     #[test]
@@ -220,5 +257,20 @@ pub mod tests {
 
         assert_eq!(false, exists_leaf1);
         assert_eq!(false, exists_leaf2);
+    }
+
+    #[test]
+    fn test_db_keys() {
+        let path = DBPath::new("keys_test");
+        let db = Db::open(path.as_ref()).unwrap();
+
+        db.write(Vec::from([1u8]), Vec::from([2u8])).unwrap();
+        db.write(Vec::from([2u8]), Vec::from([3u8])).unwrap();
+        db.write(Vec::from([3u8]), Vec::from([4u8])).unwrap();
+
+        let keys = db.key_iterator::<Vec<Vec<u8>>>().unwrap();
+        assert!(keys.contains(&Vec::from([1u8])));
+        assert!(keys.contains(&Vec::from([2u8])));
+        assert!(keys.contains(&Vec::from([3u8])));
     }
 }

@@ -120,7 +120,8 @@ where
         let sender = Arc::clone(sender);
         spawn(async move {
             let mut builder = ResponseBuilder::new(id, peer, sender);
-            if let Ok(block) = store.get(&root) {
+            let root_b = store.get(&root);
+            if let Ok(block) = root_b {
                 builder.add_block(block.clone());
                 if let Ok(node) = block.ipld() {
                     let loader = BlockCallbackLoader::new(store, |block| {

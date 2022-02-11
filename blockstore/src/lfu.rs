@@ -47,7 +47,7 @@ where
     B: DBStore,
 {
     #[must_use]
-    pub fn new(capacity: usize, bs: B) -> Self {
+    pub fn new(capacity: usize, bs: B) -> Result<Self, Error> {
         let lfu = Self {
             db: bs,
             lookup: Mutex::new(LookupMap(HashMap::new())),
@@ -55,8 +55,10 @@ where
             capacity: NonZeroUsize::new(capacity),
             len: Mutex::new(0),
         };
-        lfu.sync().unwrap();
-        lfu
+        match lfu.sync() {
+            Ok(_) => return Ok(lfu),
+            Err(_) => return Err(Error::Other("DB sync failed".to_string())),
+        }
     }
 
     fn exists(&self, key: &Vec<u8>) -> Result<bool, Error> {
@@ -73,7 +75,9 @@ where
         // Protects against overly large files emptying out the store entirely
         if let Some(capacity) = self.capacity {
             if capacity.get() <= mem::size_of_val(&value) {
-                return Ok(());
+                return Err(Error::Other(
+                    "Attempted to store value larger than LFU capacity".to_string(),
+                ));
             }
         }
 
@@ -98,9 +102,7 @@ where
         // moved when inserting it (so the memory address may become invalid)
         // but we can't insert the entry without constructing the value first.
         let mut lookup = self.lookup.lock().unwrap();
-        lookup
-            .0
-            .insert(Arc::clone(&key), NonNull::dangling());
+        lookup.0.insert(Arc::clone(&key), NonNull::dangling());
         let v = lookup.0.get_mut(&key).unwrap();
         *v = self.freq_list.lock().unwrap().insert(key);
 
@@ -261,41 +263,41 @@ mod blockstore {
     #[test]
     fn mem_db_write() {
         let db = MemoryDB::default();
-        let lfu = LfuBlockstore::new(0, db);
+        let lfu = LfuBlockstore::new(0, db).unwrap();
         test_write(&lfu);
     }
 
     #[test]
     fn mem_db_read() {
         let db = MemoryDB::default();
-        let lfu = LfuBlockstore::new(0, db);
+        let lfu = LfuBlockstore::new(0, db).unwrap();
         test_read(&lfu);
     }
 
     #[test]
     fn mem_db_exists() {
         let db = MemoryDB::default();
-        let lfu = LfuBlockstore::new(0, db);
+        let lfu = LfuBlockstore::new(0, db).unwrap();
         test_exists(&lfu);
     }
 
     #[test]
     fn mem_db_does_not_exist() {
         let db = MemoryDB::default();
-        let lfu = LfuBlockstore::new(0, db);
+        let lfu = LfuBlockstore::new(0, db).unwrap();
         test_does_not_exist(&lfu);
     }
 
     #[test]
     fn mem_db_delete() {
         let db = MemoryDB::default();
-        let lfu = LfuBlockstore::new(0, db);
+        let lfu = LfuBlockstore::new(0, db).unwrap();
         test_delete(&lfu);
     }
 
     #[test]
     fn test_mem_recovers_block() {
-        let store = LfuBlockstore::new(0, MemoryDB::default());
+        let store = LfuBlockstore::new(0, MemoryDB::default()).unwrap();
 
         let leaf1 = ipld!({ "name": "leaf1", "size": 12 });
         let leaf1_block = Block::encode(DagCborCodec, Code::Sha2_256, &leaf1).unwrap();
@@ -314,7 +316,7 @@ mod blockstore {
 
     #[test]
     fn test_mem_delete_block() {
-        let store = LfuBlockstore::new(0, MemoryDB::default());
+        let store = LfuBlockstore::new(0, MemoryDB::default()).unwrap();
 
         let leaf1 = ipld!({ "name": "leaf1", "size": 12 });
         let leaf1_block = Block::encode(DagCborCodec, Code::Sha2_256, &leaf1).unwrap();
@@ -343,7 +345,7 @@ mod read {
 
     #[test]
     fn empty() {
-        let lfu = LfuBlockstore::new(0, MemoryDB::default());
+        let lfu = LfuBlockstore::new(0, MemoryDB::default()).unwrap();
         for i in 0..100 {
             match lfu.read(&Vec::from([i as u8])).unwrap() {
                 Some(_value) => {
@@ -356,7 +358,7 @@ mod read {
 
     #[test]
     fn getting_is_ok_after_adding_other_value() {
-        let lfu = LfuBlockstore::new(0, MemoryDB::default());
+        let lfu = LfuBlockstore::new(0, MemoryDB::default()).unwrap();
         let key1 = Arc::new(Vec::from([1u8]));
         let v1 = Vec::from([2]);
         lfu.write(key1.clone(), &v1).unwrap();
@@ -369,7 +371,7 @@ mod read {
 
     #[test]
     fn bounded_alternating_values() {
-        let lfu = LfuBlockstore::new(0, MemoryDB::default());
+        let lfu = LfuBlockstore::new(0, MemoryDB::default()).unwrap();
         let key1 = Arc::new(Vec::from([1u8]));
         let v1 = Vec::from([1]);
         let key2 = Arc::new(Vec::from([2u8]));
@@ -394,7 +396,7 @@ mod write {
 
     #[test]
     fn insert_unbounded() {
-        let lfu = LfuBlockstore::new(0, MemoryDB::default());
+        let lfu = LfuBlockstore::new(0, MemoryDB::default()).unwrap();
 
         for i in 0..100 {
             let k = Arc::new(Vec::from([i as u8]));
@@ -412,7 +414,7 @@ mod write {
 
     #[test]
     fn reinsertion_of_same_key_resets_freq() {
-        let lfu = LfuBlockstore::new(0, MemoryDB::default());
+        let lfu = LfuBlockstore::new(0, MemoryDB::default()).unwrap();
         let k = Arc::new(Vec::from([1u8]));
         let v = Vec::from([1]);
         lfu.write(k.clone(), &v).unwrap();
@@ -423,7 +425,7 @@ mod write {
 
     #[test]
     fn insert_bounded() {
-        let lfu = LfuBlockstore::new(10, MemoryDB::default());
+        let lfu = LfuBlockstore::new(10, MemoryDB::default()).unwrap();
 
         for i in 0..100 {
             let k = Arc::new(Vec::from([i as u8]));
@@ -441,7 +443,7 @@ mod pop {
 
     #[test]
     fn pop() {
-        let lfu = LfuBlockstore::new(0, MemoryDB::default());
+        let lfu = LfuBlockstore::new(0, MemoryDB::default()).unwrap();
         for i in 0..100 {
             let k = Arc::new(Vec::from([i as u8]));
             let v = Vec::from([i + 100 as u8]);
@@ -459,7 +461,7 @@ mod pop {
 
     #[test]
     fn pop_empty() {
-        let lfu = LfuBlockstore::new(0, MemoryDB::default());
+        let lfu = LfuBlockstore::new(0, MemoryDB::default()).unwrap();
         assert_eq!(None, lfu.pop_lfu());
     }
 }
@@ -472,7 +474,7 @@ mod delete {
 
     #[test]
     fn delete_to_empty() {
-        let lfu = LfuBlockstore::new(0, MemoryDB::default());
+        let lfu = LfuBlockstore::new(0, MemoryDB::default()).unwrap();
         lfu.write(Arc::new(Vec::from([1u8])), Vec::from([2u8]))
             .unwrap();
         lfu.delete(&Vec::from([1u8])).unwrap();
@@ -482,13 +484,13 @@ mod delete {
 
     #[test]
     fn delete_empty() {
-        let lfu = LfuBlockstore::new(0, MemoryDB::default());
+        let lfu = LfuBlockstore::new(0, MemoryDB::default()).unwrap();
         lfu.delete(&Vec::from([1u8])).unwrap();
     }
 
     #[test]
     fn delete_to_nonempty() {
-        let lfu = LfuBlockstore::new(0, MemoryDB::default());
+        let lfu = LfuBlockstore::new(0, MemoryDB::default()).unwrap();
         lfu.write(Arc::new(Vec::from([1u8])), Vec::from([2u8]))
             .unwrap();
         lfu.write(Arc::new(Vec::from([3u8])), Vec::from([4u8]))
@@ -507,7 +509,7 @@ mod delete {
 
     #[test]
     fn delete_middle() {
-        let lfu = LfuBlockstore::new(0, MemoryDB::default());
+        let lfu = LfuBlockstore::new(0, MemoryDB::default()).unwrap();
         lfu.write(Arc::new(Vec::from([1u8])), Vec::from([2u8]))
             .unwrap();
         lfu.write(Arc::new(Vec::from([3u8])), Vec::from([4u8]))
@@ -539,7 +541,7 @@ mod delete {
 
     #[test]
     fn delete_end() {
-        let lfu = LfuBlockstore::new(0, MemoryDB::default());
+        let lfu = LfuBlockstore::new(0, MemoryDB::default()).unwrap();
         lfu.write(Arc::new(Vec::from([1u8])), Vec::from([2u8]))
             .unwrap();
         lfu.write(Arc::new(Vec::from([3u8])), Vec::from([4u8]))
@@ -571,7 +573,7 @@ mod delete {
 
     #[test]
     fn delete_start() {
-        let lfu = LfuBlockstore::new(0, MemoryDB::default());
+        let lfu = LfuBlockstore::new(0, MemoryDB::default()).unwrap();
         lfu.write(Arc::new(Vec::from([1u8])), Vec::from([2u8]))
             .unwrap();
         lfu.write(Arc::new(Vec::from([3u8])), Vec::from([4u8]))
@@ -603,7 +605,7 @@ mod delete {
 
     #[test]
     fn delete_connects_next_owner() {
-        let lfu = LfuBlockstore::new(0, MemoryDB::default());
+        let lfu = LfuBlockstore::new(0, MemoryDB::default()).unwrap();
         lfu.write(Arc::new(Vec::from([1u8])), Vec::from([1u8]))
             .unwrap();
         lfu.write(Arc::new(Vec::from([2u8])), Vec::from([2u8]))
@@ -622,7 +624,7 @@ mod bookkeeping {
 
     #[test]
     fn getting_one_element_has_constant_freq_list_size() {
-        let lfu = LfuBlockstore::new(0, MemoryDB::default());
+        let lfu = LfuBlockstore::new(0, MemoryDB::default()).unwrap();
         lfu.write(Arc::new(Vec::from([1u8])), Vec::from([2u8]))
             .unwrap();
         assert_eq!(lfu.freq_list.lock().unwrap().len, 1);
@@ -635,7 +637,7 @@ mod bookkeeping {
 
     #[test]
     fn freq_list_node_merges() {
-        let lfu = LfuBlockstore::new(0, MemoryDB::default());
+        let lfu = LfuBlockstore::new(0, MemoryDB::default()).unwrap();
         lfu.write(Arc::new(Vec::from([1u8])), Vec::from([2u8]))
             .unwrap();
         lfu.write(Arc::new(Vec::from([3u8])), Vec::from([4u8]))
@@ -649,7 +651,7 @@ mod bookkeeping {
 
     #[test]
     fn freq_list_multi_items() {
-        let lfu = LfuBlockstore::new(0, MemoryDB::default());
+        let lfu = LfuBlockstore::new(0, MemoryDB::default()).unwrap();
         lfu.write(Arc::new(Vec::from([1u8])), Vec::from([2u8]))
             .unwrap();
         lfu.read(&Vec::from([1u8])).unwrap();
@@ -682,7 +684,7 @@ mod sync {
         db.write(Vec::from([2u8]), Vec::from([3u8])).unwrap();
         db.write(Vec::from([3u8]), Vec::from([4u8])).unwrap();
 
-        let lfu = LfuBlockstore::new(0, db);
+        let lfu = LfuBlockstore::new(0, db).unwrap();
         assert_eq!(lfu.len(), 3);
         assert_eq!(lfu.freq_list.lock().unwrap().len, 1);
         assert!(lfu.read(&Vec::from([1u8])).unwrap().is_some());

@@ -24,6 +24,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 node.run_request(remote, peer_id, cid).await;
             }
         }
+    } else {
+        node.fill_random_data();
     }
     node.run().await;
 

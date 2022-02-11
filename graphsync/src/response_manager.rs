@@ -6,12 +6,15 @@ use super::{
 use async_std::channel::{bounded, Receiver, Sender};
 use async_std::task::{Context, Poll};
 use blockstore::types::BlockStore;
+use filecoin::cid_helpers::CidCbor;
 use futures_lite::stream::StreamExt;
 use libipld::codec::Decode;
 use libipld::ipld::Ipld;
 use libipld::store::StoreParams;
 use libipld::{Block, Cid};
 use libp2p::core::PeerId;
+use serde::{Deserialize, Serialize};
+use serde_cbor::to_vec;
 use std::collections::{HashSet, VecDeque};
 use std::sync::{Arc, Mutex, RwLock};
 
@@ -22,9 +25,18 @@ use async_std::task::spawn;
 use async_std::task::spawn_local as spawn;
 
 const MAX_BLOCK_SIZE: usize = 512 * 1024;
+pub static METADATA_EXTENSION: &str = "graphsync/response-metadata";
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MetadataItem {
+    link: CidCbor,
+    block_present: bool,
+}
 
 #[derive(Debug)]
 pub enum ResponseEvent {
+    Accepted(PeerId, GraphsyncRequest),
     Partial(PeerId, GraphsyncMessage),
     Completed(PeerId, GraphsyncMessage),
 }
@@ -38,6 +50,7 @@ pub struct ResponseBuilder<P: StoreParams> {
     sender: Arc<Sender<ResponseEvent>>,
     sent: HashSet<Cid>,
     extensions: Extensions,
+    metadata: Vec<MetadataItem>,
 }
 
 impl<P: StoreParams> ResponseBuilder<P> {
@@ -50,17 +63,23 @@ impl<P: StoreParams> ResponseBuilder<P> {
             sender,
             sent: HashSet::new(),
             extensions: Default::default(),
+            metadata: Vec::new(),
         }
     }
     pub fn add_block(&mut self, block: Block<P>) {
-        let next_size = self.size + block.data().len();
+        let block_size = block.data().len();
+        let next_size = self.size + block_size;
         // batch all blocks together until we get to the max size
         if next_size > MAX_BLOCK_SIZE {
             // flush the blocks to the network
             self.send(ResponseStatusCode::RequestCompletedPartial);
         }
+        self.metadata.push(MetadataItem {
+            link: CidCbor::from(block.cid().clone()),
+            block_present: true,
+        });
         self.blocks.push_back(block);
-        self.size = next_size;
+        self.size = self.size + block_size;
     }
     pub fn completed(&mut self) {
         self.send(ResponseStatusCode::RequestCompletedFull);
@@ -76,12 +95,15 @@ impl<P: StoreParams> ResponseBuilder<P> {
     }
     fn send(&mut self, status: ResponseStatusCode) {
         let mut msg = GraphsyncMessage::default();
+        let metadata = to_vec(&self.metadata).expect("Expected metadata to encode");
+        let mut extensions = self.extensions.clone();
+        extensions.insert(METADATA_EXTENSION.to_string(), metadata);
         msg.responses.insert(
             self.req_id,
             GraphsyncResponse {
                 id: self.req_id,
                 status,
-                extensions: self.extensions.clone(),
+                extensions,
             },
         );
         while let Some(blk) = self.blocks.pop_front() {
@@ -96,12 +118,16 @@ impl<P: StoreParams> ResponseBuilder<P> {
             _ => ResponseEvent::Partial(self.peer_id, msg),
         };
         match self.sender.try_send(event) {
-            Ok(()) => {}
+            Ok(()) => {
+                //reset extensions after message is sent
+                self.extensions = Default::default();
+                self.size = 0;
+            }
             Err(_) => {}
         }
     }
-    fn set_extensions(&mut self, extensions: Extensions) {
-        self.extensions = extensions;
+    fn add_extensions(&mut self, extensions: Extensions) {
+        self.extensions.extend(extensions);
     }
 }
 
@@ -136,20 +162,23 @@ where
         let store = Arc::clone(store);
         let sender = Arc::clone(sender);
         let id = request.id;
-        let mut builder = ResponseBuilder::new(id, peer, sender);
+        let mut builder = ResponseBuilder::new(id, peer, sender.clone());
         // validate request and add any extensions
         let (approved, extensions) = (hooks.read().unwrap().incoming_request)(peer, request);
-        builder.set_extensions(extensions);
+        builder.add_extensions(extensions);
         if !approved {
             builder.rejected();
             return;
         }
+        sender
+            .try_send(ResponseEvent::Accepted(peer, request.clone()))
+            .unwrap();
         let root = request.root;
         let selector = request.selector.clone();
         let hooks = hooks.clone();
         spawn(async move {
             if let Ok(block) = store.get(&root) {
-                builder.set_extensions((hooks.read().unwrap().outgoing_block)(
+                builder.add_extensions((hooks.read().unwrap().outgoing_block)(
                     peer,
                     root,
                     block.data().len(),
@@ -159,7 +188,7 @@ where
                     let loader = BlockCallbackLoader::new(store, |block| {
                         match block {
                             Some(block) => {
-                                builder.set_extensions((hooks.read().unwrap().outgoing_block)(
+                                builder.add_extensions((hooks.read().unwrap().outgoing_block)(
                                     peer,
                                     block.cid().clone(),
                                     block.data().len(),
@@ -258,6 +287,13 @@ mod tests {
                 extensions: Default::default(),
             },
         );
+        if let Ok(ResponseEvent::Accepted(_peer, req)) =
+            manager.receiver.lock().unwrap().recv().await
+        {
+            assert_eq!(req.id, 1);
+        } else {
+            panic!("received unexpected event");
+        }
         if let Ok(ResponseEvent::Completed(_peer, msg)) =
             manager.receiver.lock().unwrap().recv().await
         {
@@ -267,6 +303,8 @@ mod tests {
                 msg.responses.get(&1).unwrap().status,
                 ResponseStatusCode::RequestCompletedFull
             );
+        } else {
+            panic!("received unexpected event");
         };
     }
 }

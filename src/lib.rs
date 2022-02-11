@@ -3,8 +3,9 @@ mod browser;
 
 use blockstore::types::BlockStore;
 use dag_service;
+use data_transfer::{DataTransfer, DataTransferEvent, DealParams};
 use graphsync::traversal::{RecursionLimit, Selector};
-use graphsync::{Config as GraphsyncConfig, Graphsync, GraphsyncEvent};
+use graphsync::{Config as GraphsyncConfig, Graphsync};
 use libipld::codec::Decode;
 use libipld::store::StoreParams;
 use libipld::Cid;
@@ -33,7 +34,7 @@ pub struct Node<B: 'static + BlockStore>
 where
     Ipld: Decode<<<B as BlockStore>::Params as StoreParams>::Codecs>,
 {
-    pub swarm: Swarm<Graphsync<B>>,
+    pub swarm: Swarm<DataTransfer<B>>,
     pub store: Arc<B>,
 }
 
@@ -58,7 +59,10 @@ where
         let store = Arc::new(config.blockstore);
         // temp behaviour to be replaced with graphsync
         // let behaviour = Ping::new(PingConfig::new().with_keep_alive(true));
-        let behaviour = Graphsync::new(GraphsyncConfig::default(), store.clone());
+        let behaviour = DataTransfer::new(
+            local_peer_id,
+            Graphsync::new(GraphsyncConfig::default(), store.clone()),
+        );
 
         let mut swarm = Swarm::new(transport, behaviour, local_peer_id);
 
@@ -94,14 +98,21 @@ where
             current: None,
         };
 
+        let params = DealParams {
+            selector: Some(selector.clone()),
+            ..Default::default()
+        };
+
         let start = Instant::now();
 
-        self.swarm.behaviour_mut().request(peer, cid, selector);
+        if let Err(e) = self.swarm.behaviour_mut().pull(peer, cid, selector, params) {
+            panic!("transfer failed {}", e);
+        }
 
         loop {
             let ev = self.swarm.next().await.unwrap();
             if let SwarmEvent::Behaviour(event) = ev {
-                if let GraphsyncEvent::Complete(_, Ok(())) = event {
+                if let DataTransferEvent::Completed(_, Ok(())) = event {
                     let elapsed = start.elapsed();
                     println!("transfer took {:?}", elapsed);
                     break;

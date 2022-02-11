@@ -9,7 +9,6 @@ use libipld::codec::Decode;
 use libipld::store::StoreParams;
 use libipld::Cid;
 use libipld::Ipld;
-
 use libp2p::futures::StreamExt;
 use libp2p::swarm::{Swarm, SwarmEvent};
 use libp2p::wasm_ext;
@@ -19,10 +18,12 @@ use libp2p::{
     Transport,
 };
 use rand::prelude::*;
+use std::fs::File;
+use std::io::Read;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use warp::{http, Filter}; // 0.3.5
 
-#[cfg(not(target_os = "unknown"))]
 use libp2p::{dns, tcp, websocket};
 
 #[cfg(not(target_os = "unknown"))]
@@ -117,7 +118,6 @@ where
         println!("added data {:?}", root);
     }
 }
-
 /// Builds the transport stack that LibP2P will communicate over.
 pub fn build_transport(
     wasm_external_transport: Option<wasm_ext::ExtTransport>,
@@ -172,4 +172,63 @@ pub fn build_transport(
         .multiplex(mplex_config)
         .timeout(Duration::from_secs(20))
         .boxed()
+}
+
+#[derive(Debug)]
+pub struct Server<B: BlockStore>
+where
+    Ipld: Decode<<<B as BlockStore>::Params as StoreParams>::Codecs>,
+{
+    store: Arc<B>,
+}
+
+impl<B: BlockStore> Server<B>
+where
+    Ipld: Decode<<<B as BlockStore>::Params as StoreParams>::Codecs>,
+{
+    fn new(store: Arc<B>) -> Self {
+        Self { store: store }
+    }
+
+    fn start(self) {
+
+        let read_File = |s: String| {
+            self.read_file(&s);
+            warp::reply::with_status("Added file to the blockstore", http::StatusCode::CREATED)
+        };
+        let add_file = warp::post()
+            .and(warp::path("add"))
+            .and(warp::body::bytes())
+            .map(|bytes: warp::hyper::body::Bytes| {
+                return std::str::from_utf8(&bytes).unwrap().to_string();
+            })
+            .map(;
+    }
+
+    pub async fn read_file(self, path: &String)
+    where
+        Ipld: Decode<<<B as BlockStore>::Params as StoreParams>::Codecs>,
+    {
+        match File::open(&path) {
+            Ok(mut f) => {
+                let mut buffer = Vec::new();
+                // read the whole file
+                match f.read_to_end(&mut buffer) {
+                    Ok(size) => {
+                        let root = dag_service::add(self.store.clone(), &buffer).unwrap();
+                        println!(
+                            "added data from file with root {:?} and size {:?}",
+                            root, size
+                        );
+                    }
+                    Err(_) => {
+                        println!("could not load file into bytes")
+                    }
+                }
+            }
+            Err(_) => {
+                println!("file not found")
+            }
+        }
+    }
 }

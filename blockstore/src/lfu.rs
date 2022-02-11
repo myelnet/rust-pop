@@ -115,6 +115,10 @@ where
     /// Removes a value from the lfu and blockstore by key, if it exists.
     fn delete(&self, key: &Vec<u8>) -> Result<(), Error> {
         self.lookup.lock().unwrap().0.remove(key).map(|mut node| {
+            // SAFETY: We have unique access to self. At this point, we've
+            // removed the entry from the lookup map but haven't removed it from
+            // the frequency data structure, so we need to clean it up there
+            // before returning the value.
             remove_entry_pointer(
                 *unsafe { Box::from_raw(node.as_mut()) },
                 &mut self.freq_list.lock().unwrap(),
@@ -158,7 +162,6 @@ where
                             *self.len.lock().unwrap() += 1;
                         }
                     }
-
                 }
                 return Ok(());
             }

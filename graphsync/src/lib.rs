@@ -117,17 +117,14 @@ pub enum GraphsyncEvent {
 }
 
 pub type IncomingRequestHook =
-    Arc<dyn Fn(PeerId, &GraphsyncRequest) -> (bool, Extensions) + Send + Sync>;
+    Arc<dyn Fn(&PeerId, &GraphsyncRequest) -> (bool, Extensions) + Send + Sync>;
 
 /// requester, root, size
-pub type OutgoingBlockHook = Arc<dyn Fn(PeerId, Cid, usize) -> Extensions + Send + Sync>;
-
-pub type ResponseCompletedHook = Arc<dyn Fn(PeerId, Vec<RequestId>) + Send + Sync>;
+pub type OutgoingBlockHook = Arc<dyn Fn(&PeerId, &Cid, usize) -> Extensions + Send + Sync>;
 
 pub struct GraphsyncHooks {
     incoming_request: IncomingRequestHook,
     outgoing_block: OutgoingBlockHook,
-    response_completed: ResponseCompletedHook,
 }
 
 impl Default for GraphsyncHooks {
@@ -135,7 +132,6 @@ impl Default for GraphsyncHooks {
         Self {
             incoming_request: Arc::new(|_, _| (true, Extensions::default())),
             outgoing_block: Arc::new(|_, _, _| Extensions::default()),
-            response_completed: Arc::new(|_, _| ()),
         }
     }
 }
@@ -146,9 +142,6 @@ impl GraphsyncHooks {
     }
     pub fn register_outgoing_block(&mut self, f: OutgoingBlockHook) {
         self.outgoing_block = f
-    }
-    pub fn register_response_completed(&mut self, f: ResponseCompletedHook) {
-        self.response_completed = f
     }
 }
 
@@ -239,12 +232,6 @@ where
     }
     pub fn register_outgoing_block_hook(&mut self, hook: OutgoingBlockHook) {
         self.hooks.write().unwrap().register_outgoing_block(hook);
-    }
-    pub fn register_response_completed_hook(&mut self, hook: ResponseCompletedHook) {
-        self.hooks
-            .write()
-            .unwrap()
-            .register_response_completed(hook);
     }
 }
 

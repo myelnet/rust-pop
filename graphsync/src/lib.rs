@@ -1054,7 +1054,6 @@ mod tests {
         use dag_service::{add, cat};
         use rand::prelude::*;
 
-        // let bs = ;
         let peer1 = Peer::new(MemoryBlockStore::default());
         let mut peer2 = Peer::new(MemoryBlockStore::default());
         peer2.add_address(&peer1);

@@ -1,6 +1,6 @@
 use super::errors::Error;
 use address::Address;
-use crypto::Signature;
+use filecoin::crypto::Signature;
 use libipld::cid::multihash::{Code, MultihashDigest};
 use rand::rngs::OsRng;
 use secp256k1::{Message as SecpMessage, PublicKey as SecpPublic, SecretKey as SecpPrivate};

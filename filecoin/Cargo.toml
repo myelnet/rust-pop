@@ -22,10 +22,6 @@ serde_cbor = { package = "cs_serde_cbor", version = "0.12", features = [
   "tags",
 ] }
 surf = "2.2.0"
-crypto = { package = "forest_crypto", version = "0.5", features = [
-  "json",
-  "blst",
-] }
 fil_types = { optional = true, version = "0.2" }
 lazy_static = "1.4.0"
 derive_builder = "0.9"

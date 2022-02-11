@@ -2,12 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0, MIT
 
 use address::{Address, Protocol};
+use blake2b_simd::Params;
 use libsecp256k1::{recover, Message, RecoveryId, Signature as EcsdaSignature};
 use num_derive::FromPrimitive;
 use serde::{de, ser};
 use serde_repr::*;
 use std::borrow::Cow;
-use blake2b_simd::Params;
 
 /// Secp256k1 signature length in bytes.
 pub const SECP_SIG_LEN: usize = 65;
@@ -26,7 +26,7 @@ pub fn blake2b_256(ingest: &[u8]) -> [u8; 32] {
     ret
 }
 
-mod errors {
+pub mod errors {
 
     use address::Error as AddressError;
     // use encoding::Error as EncodingError;

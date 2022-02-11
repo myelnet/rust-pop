@@ -9,10 +9,10 @@ use std::iter::FromIterator;
 pub trait BlockStore: Send + Sync + Sized {
     type Params: StoreParams;
 
-    fn get(&mut self, cid: &Cid) -> Result<Block<Self::Params>, Box<dyn StdError + Send + Sync>>;
-    fn insert(&mut self, block: &Block<Self::Params>) -> Result<(), Box<dyn StdError>>;
+    fn get(&self, cid: &Cid) -> Result<Block<Self::Params>, Box<dyn StdError + Send + Sync>>;
+    fn insert(&self, block: &Block<Self::Params>) -> Result<(), Box<dyn StdError>>;
 
-    fn evict(&mut self, cid: &Cid) -> Result<(), Box<dyn StdError>>;
+    fn evict(&self, cid: &Cid) -> Result<(), Box<dyn StdError>>;
 
     fn contains(&self, cid: &Cid) -> Result<bool, Box<dyn StdError>>;
 }

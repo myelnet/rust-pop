@@ -37,7 +37,7 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::io::{self, Cursor};
 use std::marker::PhantomData;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc};
 use std::time::Duration;
 
 const MAX_CID_SIZE: usize = 4 * 10 + 64;
@@ -146,7 +146,7 @@ impl<S: 'static + BlockStore> Graphsync<S>
 where
     Ipld: Decode<<S::Params as StoreParams>::Codecs>,
 {
-    pub fn new(config: Config, store: Arc<Mutex<S>>) -> Self {
+    pub fn new(config: Config, store: Arc<S>) -> Self {
         let protocols = std::iter::once(GraphsyncProtocol);
         let mut rr_config = RequestResponseConfig::default();
         rr_config.set_connection_keep_alive(config.connection_keep_alive);
@@ -792,7 +792,7 @@ mod tests {
     {
         peer_id: PeerId,
         addr: Multiaddr,
-        store: Arc<Mutex<B>>,
+        store: Arc<B>,
         swarm: Swarm<Graphsync<B>>,
     }
 
@@ -802,7 +802,7 @@ mod tests {
     {
         fn new(bs: B) -> Self {
             let (peer_id, trans) = mk_transport();
-            let store = Arc::new(Mutex::new(bs));
+            let store = Arc::new(bs);
             let mut swarm = Swarm::new(
                 trans,
                 Graphsync::new(Config::default(), store.clone()),
@@ -879,11 +879,11 @@ mod tests {
 
         let leaf1 = ipld!({ "name": "leaf1", "size": 12 });
         let leaf1_block = Block::encode(DagCborCodec, Code::Sha2_256, &leaf1).unwrap();
-        store.lock().unwrap().insert(&leaf1_block).unwrap();
+        store.insert(&leaf1_block).unwrap();
 
         let leaf2 = ipld!({ "name": "leaf2", "size": 6 });
         let leaf2_block = Block::encode(DagCborCodec, Code::Sha2_256, &leaf2).unwrap();
-        store.lock().unwrap().insert(&leaf2_block).unwrap();
+        store.insert(&leaf2_block).unwrap();
 
         let parent = ipld!({
             "children": [leaf1_block.cid(), leaf2_block.cid()],
@@ -891,7 +891,7 @@ mod tests {
             "name": "parent",
         });
         let parent_block = Block::encode(DagCborCodec, Code::Sha2_256, &parent).unwrap();
-        store.lock().unwrap().insert(&parent_block).unwrap();
+        store.insert(&parent_block).unwrap();
 
         let selector = Selector::ExploreRecursive {
             limit: RecursionLimit::None,

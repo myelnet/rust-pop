@@ -89,20 +89,20 @@ impl DBStore for Db {
 impl BlockStore for Db {
     type Params = DefaultParams;
 
-    fn get(&mut self, cid: &Cid) -> Result<Block<Self::Params>, Box<dyn StdError + Send + Sync>> {
+    fn get(&self, cid: &Cid) -> Result<Block<Self::Params>, Box<dyn StdError + Send + Sync>> {
         let read_res = self.read(cid.to_bytes())?;
         match read_res {
             Some(bz) => Ok(Block::<Self::Params>::new(*cid, bz)?),
             None => Err(Box::new(Error::Other("Cid not in blockstore".to_string()))),
         }
     }
-    fn insert(&mut self, block: &Block<Self::Params>) -> Result<(), Box<dyn StdError>> {
+    fn insert(&self, block: &Block<Self::Params>) -> Result<(), Box<dyn StdError>> {
         let bytes = block.data();
         let cid = &block.cid().to_bytes();
         Ok(self.write(cid, bytes)?)
     }
 
-    fn evict(&mut self, cid: &Cid) -> Result<(), Box<dyn StdError>> {
+    fn evict(&self, cid: &Cid) -> Result<(), Box<dyn StdError>> {
         Ok(self.delete(cid.to_bytes())?)
     }
 
@@ -219,7 +219,7 @@ pub mod tests {
     #[test]
     fn test_db_recovers_block() {
         let path = DBPath::new("get_test");
-        let mut store = Db::open(path.as_ref()).unwrap();
+        let store = Db::open(path.as_ref()).unwrap();
 
         let leaf1 = ipld!({ "name": "leaf1", "size": 12 });
         let leaf1_block = Block::encode(DagCborCodec, Code::Sha2_256, &leaf1).unwrap();
@@ -239,7 +239,7 @@ pub mod tests {
     #[test]
     fn test_db_delete_block() {
         let path = DBPath::new("evict_test");
-        let mut store = Db::open(path.as_ref()).unwrap();
+        let store = Db::open(path.as_ref()).unwrap();
 
         let leaf1 = ipld!({ "name": "leaf1", "size": 12 });
         let leaf1_block = Block::encode(DagCborCodec, Code::Sha2_256, &leaf1).unwrap();

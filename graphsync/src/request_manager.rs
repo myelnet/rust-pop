@@ -34,7 +34,7 @@ pub enum RequestEvent {
 #[derive(Debug)]
 pub struct RequestManager<S: BlockStore> {
     id_counter: Arc<AtomicI32>,
-    store: Arc<Mutex<S>>,
+    store: Arc<S>,
     sender: Arc<Sender<RequestEvent>>,
     receiver: Arc<Mutex<Receiver<RequestEvent>>>,
     ongoing: Arc<Mutex<FnvHashMap<RequestId, Arc<Sender<Block<S::Params>>>>>>,
@@ -44,7 +44,7 @@ impl<S: BlockStore + 'static> RequestManager<S>
 where
     Ipld: Decode<<S::Params as StoreParams>::Codecs>,
 {
-    pub fn new(store: Arc<Mutex<S>>) -> Self {
+    pub fn new(store: Arc<S>) -> Self {
         let (s, r) = bounded(1000);
         Self {
             store,
@@ -148,7 +148,7 @@ mod tests {
 
     #[async_std::test]
     async fn test_start_request() {
-        let store = Arc::new(Mutex::new(MemoryBlockStore::default()));
+        let store = Arc::new(MemoryBlockStore::default());
 
         let leaf1 = ipld!({ "name": "leaf1", "size": 12 });
         let leaf1_block =

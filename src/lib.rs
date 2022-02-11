@@ -19,7 +19,7 @@ use libp2p::{
     Transport,
 };
 use rand::prelude::*;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 #[cfg(not(target_os = "unknown"))]
@@ -34,7 +34,7 @@ where
     Ipld: Decode<<<B as BlockStore>::Params as StoreParams>::Codecs>,
 {
     pub swarm: Swarm<Graphsync<B>>,
-    pub store: Arc<Mutex<B>>,
+    pub store: Arc<B>,
 }
 
 #[derive(Debug)]
@@ -55,7 +55,7 @@ where
 
         let transport = build_transport(config.wasm_external_transport, local_key.clone());
 
-        let store = Arc::new(Mutex::new(config.blockstore));
+        let store = Arc::new(config.blockstore);
         // temp behaviour to be replaced with graphsync
         // let behaviour = Ping::new(PingConfig::new().with_keep_alive(true));
         let behaviour = Graphsync::new(GraphsyncConfig::default(), store.clone());

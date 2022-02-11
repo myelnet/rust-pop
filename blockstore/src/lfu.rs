@@ -7,7 +7,7 @@ use std::error::Error as StdError;
 use std::num::NonZeroUsize;
 use std::ptr::NonNull;
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::lfu_freq_list::{remove_entry_pointer, FrequencyList, LfuEntry};
 use std::mem;
@@ -24,10 +24,10 @@ where
     B: DBStore,
 {
     db: B,
-    lookup: LookupMap,
-    freq_list: FrequencyList,
+    lookup: Mutex<LookupMap>,
+    freq_list: Mutex<FrequencyList>,
     capacity: Option<NonZeroUsize>,
-    len: usize,
+    len: Mutex<usize>,
 }
 
 unsafe impl<B: DBStore> Send for LfuBlockstore<B> {}
@@ -38,22 +38,22 @@ unsafe impl<B: DBStore> Sync for LfuBlockstore<B> {}
 /// all the keys for blocks that are equally popular (popularity being measured as the
 /// number of reads). When the node reaches a maximum disk capacity in bytes it pops out
 /// keys to delete until it is below that capacity. The removed keys are the eldest in the store
-/// + the least popular (i.e the lowest level node in the frequency linked list). For O(1)
+/// + the least popular (i.e the lowest level node in the frequency linked list).
+/// The evicted keys are then used to evict content from the blockstore. For O(1)
 /// in evicting elements from this list we maintain a lookup table which maps CIDS/Hashes to
-/// pointer elements in the linked list. The evicted keys are then used to evict content from the
-/// blockstore.
+/// pointer elements in the linked list.
 impl<B> LfuBlockstore<B>
 where
     B: DBStore,
 {
     #[must_use]
     pub fn new(capacity: usize, bs: B) -> Self {
-        let mut lfu = Self {
+        let lfu = Self {
             db: bs,
-            lookup: LookupMap(HashMap::new()),
-            freq_list: FrequencyList::new(),
+            lookup: Mutex::new(LookupMap(HashMap::new())),
+            freq_list: Mutex::new(FrequencyList::new()),
             capacity: NonZeroUsize::new(capacity),
-            len: 0,
+            len: Mutex::new(0),
         };
         lfu.sync().unwrap();
         lfu
@@ -66,7 +66,7 @@ where
     fn total_size(&self) -> Result<usize, Error> {
         self.db.total_size()
     }
-    fn write<V>(&mut self, key: Arc<Vec<u8>>, value: V) -> Result<(), Error>
+    fn write<V>(&self, key: Arc<Vec<u8>>, value: V) -> Result<(), Error>
     where
         V: AsRef<[u8]>,
     {
@@ -91,28 +91,32 @@ where
     }
 
     //
-    fn add_key_index(&mut self, key: Arc<Vec<u8>>) -> Result<(), Error> {
+    fn add_key_index(&self, key: Arc<Vec<u8>>) -> Result<(), Error> {
         // Since an entry has a reference to its key, we
         // have self-referential data. We can't construct the entry
         // before inserting it into the lookup table because the key may be
         // moved when inserting it (so the memory address may become invalid)
         // but we can't insert the entry without constructing the value first.
-        self.lookup.0.insert(Arc::clone(&key), NonNull::dangling());
-        let v = self.lookup.0.get_mut(&key).unwrap();
-        *v = self.freq_list.insert(key);
+        let mut lookup = self.lookup.lock().unwrap();
+        lookup
+            .0
+            .insert(Arc::clone(&key), NonNull::dangling());
+        let v = lookup.0.get_mut(&key).unwrap();
+        *v = self.freq_list.lock().unwrap().insert(key);
 
-        self.len += 1;
+        // let mut len =
+        *self.len.lock().unwrap() += 1;
 
         Ok(())
     }
 
     /// Removes a value from the lfu and blockstore by key, if it exists.
-    fn delete(&mut self, key: &Vec<u8>) -> Result<(), Error> {
-        self.lookup.0.remove(key).map(|mut node| {
+    fn delete(&self, key: &Vec<u8>) -> Result<(), Error> {
+        self.lookup.lock().unwrap().0.remove(key).map(|mut node| {
             remove_entry_pointer(
                 *unsafe { Box::from_raw(node.as_mut()) },
-                &mut self.freq_list,
-                &mut self.len,
+                &mut self.freq_list.lock().unwrap(),
+                &mut self.len.lock().unwrap(),
             )
         });
         self.db.delete(key).unwrap();
@@ -122,10 +126,10 @@ where
 
     /// Gets a value and incrementing the internal frequency counter of that
     /// value, if it exists.
-    fn read(&mut self, key: &Vec<u8>) -> Result<Option<Vec<u8>>, Error> {
-        match self.lookup.0.get(key) {
+    fn read(&self, key: &Vec<u8>) -> Result<Option<Vec<u8>>, Error> {
+        match self.lookup.lock().unwrap().0.get(key) {
             Some(entry) => {
-                self.freq_list.update(*entry);
+                self.freq_list.lock().unwrap().update(*entry);
                 return self.db.read(key);
             }
             None => Ok(None),
@@ -134,13 +138,20 @@ where
 
     /// If the blockstore already has elements allocated (eg. loading from disk) but the
     /// lookup table and freq list are booted from scratch this creates a new entry for each key
-    fn sync(&mut self) -> Result<(), Error> {
+    fn sync(&self) -> Result<(), Error> {
         for k in self.db.key_iterator::<Vec<Vec<u8>>>() {
             for j in k {
-                match self.lookup.0.get(&j) {
+                let mut lookup = self.lookup.lock().unwrap();
+                match lookup.0.get(&j) {
                     Some(_entry) => {}
                     None => {
-                        self.add_key_index(Arc::new(j)).unwrap();
+                        let arc_ref = Arc::new(j);
+                        lookup.0.insert(Arc::clone(&arc_ref), NonNull::dangling());
+                        let v = lookup.0.get_mut(&arc_ref).unwrap();
+                        *v = self.freq_list.lock().unwrap().insert(arc_ref);
+
+                        // let mut len =
+                        *self.len.lock().unwrap() += 1;
                     }
                 }
             }
@@ -151,8 +162,8 @@ where
     /// Evicts the least frequently used key and returns it. If the lfu is
     /// empty, then this returns None. If there are multiple items that have an
     /// equal access count, then the eldest key is evicted (LIFO).
-    pub fn pop_lfu(&mut self) -> Option<&Vec<u8>> {
-        self.freq_list.pop_lfu().map(|entry_ptr| {
+    pub fn pop_lfu(&self) -> Option<&Vec<u8>> {
+        self.freq_list.lock().unwrap().pop_lfu().map(|entry_ptr| {
             // SAFETY: This is fine since self is uniquely borrowed.
             let key = unsafe { entry_ptr.as_ref().key.as_ref() };
             self.db.delete(key).unwrap();
@@ -162,12 +173,12 @@ where
 
     /// Returns the frequencies that this lfu has. Linear time operation.
     pub fn frequencies(&self) -> Vec<usize> {
-        self.freq_list.frequencies()
+        self.freq_list.lock().unwrap().frequencies()
     }
 
     /// Returns the current number of items in the lfu. Constant time operation.
     pub fn len(&self) -> usize {
-        self.len
+        *self.len.lock().unwrap()
     }
 }
 
@@ -175,20 +186,20 @@ where
 impl<B: DBStore> BlockStore for LfuBlockstore<B> {
     type Params = DefaultParams;
 
-    fn get(&mut self, cid: &Cid) -> Result<Block<Self::Params>, Box<dyn StdError + Send + Sync>> {
+    fn get(&self, cid: &Cid) -> Result<Block<Self::Params>, Box<dyn StdError + Send + Sync>> {
         let read_res = self.read(&cid.to_bytes())?;
         match read_res {
             Some(bz) => Ok(Block::<Self::Params>::new(*cid, bz)?),
             None => Err(Box::new(Error::Other("Cid not in blockstore".to_string()))),
         }
     }
-    fn insert(&mut self, block: &Block<Self::Params>) -> Result<(), Box<dyn StdError>> {
+    fn insert(&self, block: &Block<Self::Params>) -> Result<(), Box<dyn StdError>> {
         let bytes = block.data();
         let cid = block.cid().to_bytes();
         Ok(self.write(Arc::new(cid), bytes)?)
     }
 
-    fn evict(&mut self, cid: &Cid) -> Result<(), Box<dyn StdError>> {
+    fn evict(&self, cid: &Cid) -> Result<(), Box<dyn StdError>> {
         Ok(self.delete(&cid.to_bytes())?)
     }
 
@@ -208,13 +219,13 @@ mod blockstore {
     use libipld::Block;
     use std::sync::Arc;
 
-    pub fn test_write<B: DBStore>(db: &mut LfuBlockstore<B>) {
+    pub fn test_write<B: DBStore>(db: &LfuBlockstore<B>) {
         let key = Arc::new([0x41u8, 0x41u8, 0x42u8].to_vec());
         let value = [1];
         db.write(key, value).unwrap();
     }
 
-    pub fn test_read<B: DBStore>(db: &mut LfuBlockstore<B>) {
+    pub fn test_read<B: DBStore>(db: &LfuBlockstore<B>) {
         let key = Arc::new([0x41u8, 0x41u8, 0x42u8].to_vec());
         let value = [1];
         db.write(key.clone(), value).unwrap();
@@ -222,7 +233,7 @@ mod blockstore {
         assert_eq!(value.as_ref(), res.as_slice());
     }
 
-    pub fn test_exists<B: DBStore>(db: &mut LfuBlockstore<B>) {
+    pub fn test_exists<B: DBStore>(db: &LfuBlockstore<B>) {
         let key = Arc::new([0x41u8, 0x41u8, 0x42u8].to_vec());
         let value = [1];
         db.write(key.clone(), value).unwrap();
@@ -236,7 +247,7 @@ mod blockstore {
         assert_eq!(res, false);
     }
 
-    pub fn test_delete<B: DBStore>(db: &mut LfuBlockstore<B>) {
+    pub fn test_delete<B: DBStore>(db: &LfuBlockstore<B>) {
         let key = Arc::new([0x41u8, 0x41u8, 0x42u8].to_vec());
         let value = [1];
         db.write(key.clone(), value).unwrap();
@@ -250,41 +261,41 @@ mod blockstore {
     #[test]
     fn mem_db_write() {
         let db = MemoryDB::default();
-        let mut lfu = LfuBlockstore::new(0, db);
-        test_write(&mut lfu);
+        let lfu = LfuBlockstore::new(0, db);
+        test_write(&lfu);
     }
 
     #[test]
     fn mem_db_read() {
         let db = MemoryDB::default();
-        let mut lfu = LfuBlockstore::new(0, db);
-        test_read(&mut lfu);
+        let lfu = LfuBlockstore::new(0, db);
+        test_read(&lfu);
     }
 
     #[test]
     fn mem_db_exists() {
         let db = MemoryDB::default();
-        let mut lfu = LfuBlockstore::new(0, db);
-        test_exists(&mut lfu);
+        let lfu = LfuBlockstore::new(0, db);
+        test_exists(&lfu);
     }
 
     #[test]
     fn mem_db_does_not_exist() {
         let db = MemoryDB::default();
-        let mut lfu = LfuBlockstore::new(0, db);
-        test_does_not_exist(&mut lfu);
+        let lfu = LfuBlockstore::new(0, db);
+        test_does_not_exist(&lfu);
     }
 
     #[test]
     fn mem_db_delete() {
         let db = MemoryDB::default();
-        let mut lfu = LfuBlockstore::new(0, db);
-        test_delete(&mut lfu);
+        let lfu = LfuBlockstore::new(0, db);
+        test_delete(&lfu);
     }
 
     #[test]
     fn test_mem_recovers_block() {
-        let mut store = LfuBlockstore::new(0, MemoryDB::default());
+        let store = LfuBlockstore::new(0, MemoryDB::default());
 
         let leaf1 = ipld!({ "name": "leaf1", "size": 12 });
         let leaf1_block = Block::encode(DagCborCodec, Code::Sha2_256, &leaf1).unwrap();
@@ -303,7 +314,7 @@ mod blockstore {
 
     #[test]
     fn test_mem_delete_block() {
-        let mut store = LfuBlockstore::new(0, MemoryDB::default());
+        let store = LfuBlockstore::new(0, MemoryDB::default());
 
         let leaf1 = ipld!({ "name": "leaf1", "size": 12 });
         let leaf1_block = Block::encode(DagCborCodec, Code::Sha2_256, &leaf1).unwrap();
@@ -332,7 +343,7 @@ mod read {
 
     #[test]
     fn empty() {
-        let mut lfu = LfuBlockstore::new(0, MemoryDB::default());
+        let lfu = LfuBlockstore::new(0, MemoryDB::default());
         for i in 0..100 {
             match lfu.read(&Vec::from([i as u8])).unwrap() {
                 Some(_value) => {
@@ -345,7 +356,7 @@ mod read {
 
     #[test]
     fn getting_is_ok_after_adding_other_value() {
-        let mut lfu = LfuBlockstore::new(0, MemoryDB::default());
+        let lfu = LfuBlockstore::new(0, MemoryDB::default());
         let key1 = Arc::new(Vec::from([1u8]));
         let v1 = Vec::from([2]);
         lfu.write(key1.clone(), &v1).unwrap();
@@ -358,7 +369,7 @@ mod read {
 
     #[test]
     fn bounded_alternating_values() {
-        let mut lfu = LfuBlockstore::new(0, MemoryDB::default());
+        let lfu = LfuBlockstore::new(0, MemoryDB::default());
         let key1 = Arc::new(Vec::from([1u8]));
         let v1 = Vec::from([1]);
         let key2 = Arc::new(Vec::from([2u8]));
@@ -383,7 +394,7 @@ mod write {
 
     #[test]
     fn insert_unbounded() {
-        let mut lfu = LfuBlockstore::new(0, MemoryDB::default());
+        let lfu = LfuBlockstore::new(0, MemoryDB::default());
 
         for i in 0..100 {
             let k = Arc::new(Vec::from([i as u8]));
@@ -401,7 +412,7 @@ mod write {
 
     #[test]
     fn reinsertion_of_same_key_resets_freq() {
-        let mut lfu = LfuBlockstore::new(0, MemoryDB::default());
+        let lfu = LfuBlockstore::new(0, MemoryDB::default());
         let k = Arc::new(Vec::from([1u8]));
         let v = Vec::from([1]);
         lfu.write(k.clone(), &v).unwrap();
@@ -412,7 +423,7 @@ mod write {
 
     #[test]
     fn insert_bounded() {
-        let mut lfu = LfuBlockstore::new(10, MemoryDB::default());
+        let lfu = LfuBlockstore::new(10, MemoryDB::default());
 
         for i in 0..100 {
             let k = Arc::new(Vec::from([i as u8]));
@@ -430,7 +441,7 @@ mod pop {
 
     #[test]
     fn pop() {
-        let mut lfu = LfuBlockstore::new(0, MemoryDB::default());
+        let lfu = LfuBlockstore::new(0, MemoryDB::default());
         for i in 0..100 {
             let k = Arc::new(Vec::from([i as u8]));
             let v = Vec::from([i + 100 as u8]);
@@ -439,7 +450,7 @@ mod pop {
 
         // evicts the oldest
         for i in 0..100 {
-            assert_eq!(lfu.lookup.0.len(), 100);
+            assert_eq!(lfu.lookup.lock().unwrap().0.len(), 100);
             let evicted_index = i;
             let k = Vec::from([evicted_index as u8]);
             assert_eq!(lfu.pop_lfu(), Some(&k));
@@ -448,7 +459,7 @@ mod pop {
 
     #[test]
     fn pop_empty() {
-        let mut lfu = LfuBlockstore::new(0, MemoryDB::default());
+        let lfu = LfuBlockstore::new(0, MemoryDB::default());
         assert_eq!(None, lfu.pop_lfu());
     }
 }
@@ -461,23 +472,23 @@ mod delete {
 
     #[test]
     fn delete_to_empty() {
-        let mut lfu = LfuBlockstore::new(0, MemoryDB::default());
+        let lfu = LfuBlockstore::new(0, MemoryDB::default());
         lfu.write(Arc::new(Vec::from([1u8])), Vec::from([2u8]))
             .unwrap();
         lfu.delete(&Vec::from([1u8])).unwrap();
         assert!(lfu.len() == 0);
-        assert_eq!(lfu.freq_list.len, 0);
+        assert_eq!(lfu.freq_list.lock().unwrap().len, 0);
     }
 
     #[test]
     fn delete_empty() {
-        let mut lfu = LfuBlockstore::new(0, MemoryDB::default());
+        let lfu = LfuBlockstore::new(0, MemoryDB::default());
         lfu.delete(&Vec::from([1u8])).unwrap();
     }
 
     #[test]
     fn delete_to_nonempty() {
-        let mut lfu = LfuBlockstore::new(0, MemoryDB::default());
+        let lfu = LfuBlockstore::new(0, MemoryDB::default());
         lfu.write(Arc::new(Vec::from([1u8])), Vec::from([2u8]))
             .unwrap();
         lfu.write(Arc::new(Vec::from([3u8])), Vec::from([4u8]))
@@ -491,12 +502,12 @@ mod delete {
 
         assert!(lfu.len() == 0);
 
-        assert_eq!(lfu.freq_list.len, 0);
+        assert_eq!(lfu.freq_list.lock().unwrap().len, 0);
     }
 
     #[test]
     fn delete_middle() {
-        let mut lfu = LfuBlockstore::new(0, MemoryDB::default());
+        let lfu = LfuBlockstore::new(0, MemoryDB::default());
         lfu.write(Arc::new(Vec::from([1u8])), Vec::from([2u8]))
             .unwrap();
         lfu.write(Arc::new(Vec::from([3u8])), Vec::from([4u8]))
@@ -528,7 +539,7 @@ mod delete {
 
     #[test]
     fn delete_end() {
-        let mut lfu = LfuBlockstore::new(0, MemoryDB::default());
+        let lfu = LfuBlockstore::new(0, MemoryDB::default());
         lfu.write(Arc::new(Vec::from([1u8])), Vec::from([2u8]))
             .unwrap();
         lfu.write(Arc::new(Vec::from([3u8])), Vec::from([4u8]))
@@ -560,7 +571,7 @@ mod delete {
 
     #[test]
     fn delete_start() {
-        let mut lfu = LfuBlockstore::new(0, MemoryDB::default());
+        let lfu = LfuBlockstore::new(0, MemoryDB::default());
         lfu.write(Arc::new(Vec::from([1u8])), Vec::from([2u8]))
             .unwrap();
         lfu.write(Arc::new(Vec::from([3u8])), Vec::from([4u8]))
@@ -592,7 +603,7 @@ mod delete {
 
     #[test]
     fn delete_connects_next_owner() {
-        let mut lfu = LfuBlockstore::new(0, MemoryDB::default());
+        let lfu = LfuBlockstore::new(0, MemoryDB::default());
         lfu.write(Arc::new(Vec::from([1u8])), Vec::from([1u8]))
             .unwrap();
         lfu.write(Arc::new(Vec::from([2u8])), Vec::from([2u8]))
@@ -611,45 +622,45 @@ mod bookkeeping {
 
     #[test]
     fn getting_one_element_has_constant_freq_list_size() {
-        let mut lfu = LfuBlockstore::new(0, MemoryDB::default());
+        let lfu = LfuBlockstore::new(0, MemoryDB::default());
         lfu.write(Arc::new(Vec::from([1u8])), Vec::from([2u8]))
             .unwrap();
-        assert_eq!(lfu.freq_list.len, 1);
+        assert_eq!(lfu.freq_list.lock().unwrap().len, 1);
 
         for _ in 0..100 {
             lfu.read(&Vec::from([1u8])).unwrap();
-            assert_eq!(lfu.freq_list.len, 1);
+            assert_eq!(lfu.freq_list.lock().unwrap().len, 1);
         }
     }
 
     #[test]
     fn freq_list_node_merges() {
-        let mut lfu = LfuBlockstore::new(0, MemoryDB::default());
+        let lfu = LfuBlockstore::new(0, MemoryDB::default());
         lfu.write(Arc::new(Vec::from([1u8])), Vec::from([2u8]))
             .unwrap();
         lfu.write(Arc::new(Vec::from([3u8])), Vec::from([4u8]))
             .unwrap();
-        assert_eq!(lfu.freq_list.len, 1);
+        assert_eq!(lfu.freq_list.lock().unwrap().len, 1);
         assert!(lfu.read(&Vec::from([1u8])).unwrap().is_some());
-        assert_eq!(lfu.freq_list.len, 2);
+        assert_eq!(lfu.freq_list.lock().unwrap().len, 2);
         assert!(lfu.read(&Vec::from([3u8])).unwrap().is_some());
-        assert_eq!(lfu.freq_list.len, 1);
+        assert_eq!(lfu.freq_list.lock().unwrap().len, 1);
     }
 
     #[test]
     fn freq_list_multi_items() {
-        let mut lfu = LfuBlockstore::new(0, MemoryDB::default());
+        let lfu = LfuBlockstore::new(0, MemoryDB::default());
         lfu.write(Arc::new(Vec::from([1u8])), Vec::from([2u8]))
             .unwrap();
         lfu.read(&Vec::from([1u8])).unwrap();
         lfu.read(&Vec::from([1u8])).unwrap();
         lfu.write(Arc::new(Vec::from([3u8])), Vec::from([4u8]))
             .unwrap();
-        assert_eq!(lfu.freq_list.len, 2);
+        assert_eq!(lfu.freq_list.lock().unwrap().len, 2);
         lfu.read(&Vec::from([3u8])).unwrap();
-        assert_eq!(lfu.freq_list.len, 2);
+        assert_eq!(lfu.freq_list.lock().unwrap().len, 2);
         lfu.read(&Vec::from([3u8])).unwrap();
-        assert_eq!(lfu.freq_list.len, 1);
+        assert_eq!(lfu.freq_list.lock().unwrap().len, 1);
     }
 }
 
@@ -671,9 +682,9 @@ mod sync {
         db.write(Vec::from([2u8]), Vec::from([3u8])).unwrap();
         db.write(Vec::from([3u8]), Vec::from([4u8])).unwrap();
 
-        let mut lfu = LfuBlockstore::new(0, db);
-        assert_eq!(lfu.len, 3);
-        assert_eq!(lfu.freq_list.len, 1);
+        let lfu = LfuBlockstore::new(0, db);
+        assert_eq!(lfu.len(), 3);
+        assert_eq!(lfu.freq_list.lock().unwrap().len, 1);
         assert!(lfu.read(&Vec::from([1u8])).unwrap().is_some());
         assert!(lfu.read(&Vec::from([2u8])).unwrap().is_some());
         assert!(lfu.read(&Vec::from([3u8])).unwrap().is_some());

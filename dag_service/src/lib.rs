@@ -1,10 +1,10 @@
 use blockstore::types::BlockStore;
 use libipld::{Block, Cid};
 use std::io::Write;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc};
 use unixfs_v1::file::{adder::FileAdder, visit::IdleFileVisit};
 
-pub fn add<S: BlockStore>(store: Arc<Mutex<S>>, data: &[u8]) -> Result<Option<Cid>, String> {
+pub fn add<S: BlockStore>(store: Arc<S>, data: &[u8]) -> Result<Option<Cid>, String> {
     let mut adder = FileAdder::default();
 
     let mut total = 0;
@@ -14,11 +14,7 @@ pub fn add<S: BlockStore>(store: Arc<Mutex<S>>, data: &[u8]) -> Result<Option<Ci
 
         for (cid, bytes) in blocks {
             let block = Block::<S::Params>::new_unchecked(cid, bytes);
-            store
-                .lock()
-                .unwrap()
-                .insert(&block)
-                .map_err(|e| e.to_string())?;
+            store.insert(&block).map_err(|e| e.to_string())?;
         }
     }
 
@@ -28,23 +24,15 @@ pub fn add<S: BlockStore>(store: Arc<Mutex<S>>, data: &[u8]) -> Result<Option<Ci
     for (cid, bytes) in blocks {
         root = Some(cid.clone());
         let block = Block::<S::Params>::new_unchecked(cid, bytes);
-        store
-            .lock()
-            .unwrap()
-            .insert(&block)
-            .map_err(|e| e.to_string())?;
+        store.insert(&block).map_err(|e| e.to_string())?;
     }
     Ok(root)
 }
 
-pub fn cat<S: BlockStore>(store: Arc<Mutex<S>>, root: Cid) -> Result<Vec<u8>, String> {
+pub fn cat<S: BlockStore>(store: Arc<S>, root: Cid) -> Result<Vec<u8>, String> {
     let mut buf = Vec::new();
 
-    let first = store
-        .lock()
-        .unwrap()
-        .get(&root)
-        .map_err(|e| e.to_string())?;
+    let first = store.get(&root).map_err(|e| e.to_string())?;
 
     let (content, _, _metadata, mut step) = IdleFileVisit::default()
         .start(first.data())
@@ -53,11 +41,7 @@ pub fn cat<S: BlockStore>(store: Arc<Mutex<S>>, root: Cid) -> Result<Vec<u8>, St
 
     while let Some(visit) = step {
         let (first, _) = visit.pending_links();
-        let block = store
-            .lock()
-            .unwrap()
-            .get(&first)
-            .map_err(|e| e.to_string())?;
+        let block = store.get(&first).map_err(|e| e.to_string())?;
 
         let (content, next_step) = visit
             .continue_walk(block.data(), &mut None)
@@ -82,7 +66,7 @@ mod tests {
         let mut data = vec![0u8; FILE_SIZE];
         rand::thread_rng().fill_bytes(&mut data);
 
-        let store = Arc::new(Mutex::new(MemoryDB::default()));
+        let store = Arc::new(MemoryDB::default());
 
         let root = add(store.clone(), &data).unwrap();
         let buf = cat(store, root.unwrap()).unwrap();

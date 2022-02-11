@@ -141,24 +141,29 @@ where
     /// If the blockstore already has elements allocated (eg. loading from disk) but the
     /// lookup table and freq list are booted from scratch this creates a new entry for each key
     fn sync(&self) -> Result<(), Error> {
-        for k in self.db.key_iterator::<Vec<Vec<u8>>>() {
-            for j in k {
-                let mut lookup = self.lookup.lock().unwrap();
-                match lookup.0.get(&j) {
-                    Some(_entry) => {}
-                    None => {
-                        let arc_ref = Arc::new(j);
-                        lookup.0.insert(Arc::clone(&arc_ref), NonNull::dangling());
-                        let v = lookup.0.get_mut(&arc_ref).unwrap();
-                        *v = self.freq_list.lock().unwrap().insert(arc_ref);
+        let key_res = self.db.key_iterator::<Vec<Vec<u8>>>();
+        match key_res {
+            Ok(iter) => {
+                for k in iter {
+                    let mut lookup = self.lookup.lock().unwrap();
+                    match lookup.0.get(&k) {
+                        Some(_entry) => {}
+                        None => {
+                            let arc_ref = Arc::new(k);
+                            lookup.0.insert(Arc::clone(&arc_ref), NonNull::dangling());
+                            let v = lookup.0.get_mut(&arc_ref).unwrap();
+                            *v = self.freq_list.lock().unwrap().insert(arc_ref);
 
-                        // let mut len =
-                        *self.len.lock().unwrap() += 1;
+                            // let mut len =
+                            *self.len.lock().unwrap() += 1;
+                        }
                     }
+
                 }
+                return Ok(());
             }
+            Err(_) => return Err(Error::Other("Could not read keys from DB".to_string())),
         }
-        Ok(())
     }
 
     /// Evicts the least frequently used key and returns it. If the lfu is
@@ -391,6 +396,7 @@ mod read {
 #[cfg(test)]
 mod write {
     use super::LfuBlockstore;
+    use crate::errors::Error;
     use crate::memory::MemoryDB;
     use std::sync::Arc;
 
@@ -426,11 +432,13 @@ mod write {
     #[test]
     fn insert_bounded() {
         let lfu = LfuBlockstore::new(10, MemoryDB::default()).unwrap();
+        let k = Arc::new(Vec::from([1u8]));
+        let v = Vec::from([1u8]);
 
-        for i in 0..100 {
-            let k = Arc::new(Vec::from([i as u8]));
-            let v = Vec::from([i + 100 as u8]);
-            lfu.write(k, v).unwrap();
+        // should throw error as it is too large
+        match lfu.write(k, v) {
+            Ok(_) => assert!(false),
+            Err(_) => assert!(true),
         }
     }
 }

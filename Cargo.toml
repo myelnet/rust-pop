@@ -36,7 +36,7 @@ async-std = { version = "1.6.2", features = ["attributes", "unstable"] }
 graphsync = { path = "./graphsync", default_features=false }
 dag_service = { path = "./dag_service", default_features=false }
 blockstore = { path = "./blockstore", default_features=false }
-
+data_transfer = { path = "./data_transfer", default_features=false }
 
 getrandom = { version = "0.2", features = ["js"] }
 

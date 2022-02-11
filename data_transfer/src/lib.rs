@@ -1,512 +1,334 @@
+mod fsm;
+mod network;
+
+pub use network::DealParams;
+
 use blockstore::types::BlockStore;
 use filecoin::{cid_helpers::CidCbor, types::Cbor};
-use futures::future::BoxFuture;
-use futures::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use fsm::{Channel, ChannelEvent};
 use graphsync::traversal::{RecursionLimit, Selector};
-use graphsync::Graphsync;
-use libipld::Cid;
-use libp2p::core::{
-    connection::ConnectionId, upgrade, ConnectedPoint, InboundUpgrade, Multiaddr, OutboundUpgrade,
-    PeerId, UpgradeInfo,
-};
+use graphsync::{Extensions, Graphsync, GraphsyncEvent, RequestId};
+use libipld::codec::Decode;
+use libipld::store::StoreParams;
+use libipld::{Cid, Ipld};
 use libp2p::swarm::{
-    IntoProtocolsHandler, NetworkBehaviour, NetworkBehaviourAction, NotifyHandler, OneShotHandler,
-    PollParameters, ProtocolsHandler,
+    NetworkBehaviour, NetworkBehaviourAction, NetworkBehaviourEventProcess, PollParameters,
 };
-use num_bigint::bigint_ser;
-use num_bigint::{BigInt, ToBigInt};
-use serde::{Deserialize, Serialize};
-use serde_repr::{Deserialize_repr, Serialize_repr};
-use serde_tuple::{Deserialize_tuple, Serialize_tuple};
-use smallvec::SmallVec;
+use libp2p::{Multiaddr, NetworkBehaviour, PeerId};
+use network::{
+    ChannelId, DataTransferNetwork, DealProposal, DealResponse, DealStatus, DtNetEvent,
+    MessageType, TransferMessage, TransferRequest, TransferResponse, EMPTY_QUEUE_SHRINK_THRESHOLD,
+    EXTENSION_KEY,
+};
+use num_bigint::ToBigInt;
 use std::{
     collections::{HashMap, VecDeque},
-    io, iter,
+    sync::Arc,
     task::{Context, Poll},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
-#[derive(Debug, PartialEq, Clone, Serialize_repr, Deserialize_repr)]
-#[repr(u64)]
-pub enum MessageType {
-    NewMessage = 0,
-    UpdateMessage,
-    CancelMessage,
-    CompleteMessage,
-    VoucherMessage,
-    VoucherResultMessage,
-    RestartMessage,
-    RestartExistingChannelRequestMessage,
+#[derive(Debug)]
+pub enum DataTransferEvent {
+    Progress(ChannelId),
+    Completed(ChannelId, Result<(), String>),
 }
 
-#[derive(Debug, PartialEq, Eq, Serialize_tuple, Deserialize_tuple, Clone, Hash)]
-pub struct ChannelId {
-    initiator: String,
-    responder: String,
-    id: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct TransferRequest {
-    #[serde(rename = "BCid")]
-    root: CidCbor,
-    #[serde(rename = "Type")]
-    mtype: MessageType,
-    #[serde(rename = "Paus")]
-    pause: bool,
-    #[serde(rename = "Part")]
-    partial: bool,
-    #[serde(rename = "Pull")]
-    pull: bool,
-    #[serde(rename = "Stor")]
-    selector: Selector,
-    #[serde(rename = "Vouch")]
-    voucher: DealProposal,
-    #[serde(rename = "VTyp")]
-    voucher_type: String,
-    #[serde(rename = "XferID")]
-    transfer_id: u64,
-    #[serde(rename = "RestartChannel")]
-    restart_channel: Option<ChannelId>,
-}
-
-impl Default for TransferRequest {
-    fn default() -> Self {
-        let cid = CidCbor::from(Cid::default());
-        let voucher = DealProposal {
-            payload_cid: cid.clone(),
-            id: 1,
-            params: Default::default(),
-        };
-        Self {
-            root: cid.clone(),
-            mtype: MessageType::NewMessage,
-            pause: false,
-            partial: false,
-            pull: true,
-            selector: Selector::ExploreRecursive {
-                limit: RecursionLimit::None,
-                sequence: Box::new(Selector::ExploreAll {
-                    next: Box::new(Selector::ExploreRecursiveEdge),
-                }),
-                current: None,
-            },
-            voucher,
-            voucher_type: DealProposal::voucher_type(),
-            transfer_id: 1,
-            restart_channel: None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct TransferResponse {
-    #[serde(rename = "Type")]
-    mtype: MessageType,
-    #[serde(rename = "Acpt")]
-    accepted: bool,
-    #[serde(rename = "Paus")]
-    paused: bool,
-    #[serde(rename = "XferID")]
-    transfer_id: u64,
-    #[serde(rename = "VRes")]
-    voucher: DealResponse,
-    #[serde(rename = "VTyp")]
-    voucher_type: String,
-}
-
-impl Default for TransferResponse {
-    fn default() -> Self {
-        let zero: isize = 0;
-        let voucher = DealResponse {
-            id: 1,
-            status: DealStatus::Accepted,
-            message: "".to_string(),
-            payment_owed: zero.to_bigint().unwrap(),
-        };
-        Self {
-            mtype: MessageType::NewMessage,
-            accepted: true,
-            paused: false,
-            transfer_id: 1,
-            voucher,
-            voucher_type: DealResponse::voucher_type(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "PascalCase")]
-pub struct TransferMessage {
-    #[serde(default = "not_req")]
-    is_rq: bool,
-    request: Option<TransferRequest>,
-    response: Option<TransferResponse>,
-}
-
-impl Cbor for TransferMessage {}
-
-fn not_req() -> bool {
-    false
-}
-
-impl From<()> for TransferMessage {
-    fn from(_: ()) -> Self {
-        Default::default()
-    }
-}
-
-#[derive(Debug, PartialEq, Clone, Serialize_repr, Deserialize_repr)]
-#[repr(u64)]
-pub enum DealStatus {
-    New = 0,
-    Unsealing,
-    Unsealed,
-    WaitForAcceptance,
-    PaymentChannelCreating,
-    PaymentChannelAddingFunds,
-    Accepted,
-    FundsNeededUnseal,
-    Failing,
-    Rejected,
-    FundsNeeded,
-    SendFunds,
-    SendFundsLastPayment,
-    Ongoing,
-    FundsNeededLastPayment,
-    Completed,
-    DealNotFound,
-    Errored,
-    BlocksComplete,
-    Finalizing,
-    Completing,
-    CheckComplete,
-    CheckFunds,
-    InsufficientFunds,
-    PaymentChannelAllocatingLane,
-    Cancelling,
-    Cancelled,
-    WaitingForLastBlocks,
-    PaymentChannelAddingInitialFunds,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct DealProposal {
-    #[serde(rename = "PayloadCID")]
-    payload_cid: CidCbor,
-    #[serde(rename = "ID")]
-    id: u64,
-    #[serde(rename = "Params")]
-    params: DealParams,
-}
-
-impl DealProposal {
-    pub fn voucher_type() -> String {
-        "RetrievalDealProposal/1".to_string()
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "PascalCase")]
-pub struct DealParams {
-    selector: Option<Selector>,
-    #[serde(rename = "PieceCID")]
-    piece_cid: Option<CidCbor>,
-    #[serde(with = "bigint_ser")]
-    price_per_byte: BigInt,
-    payment_interval: u64, // when to request payment
-    payment_interval_increase: u64,
-    #[serde(with = "bigint_ser")]
-    unseal_price: BigInt,
-}
-
-impl Default for DealParams {
-    fn default() -> Self {
-        let zero: isize = 0;
-        Self {
-            selector: None,
-            piece_cid: None,
-            price_per_byte: zero.to_bigint().unwrap(),
-            payment_interval: 100000,
-            payment_interval_increase: 1000,
-            unseal_price: zero.to_bigint().unwrap(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct DealResponse {
-    #[serde(rename = "ID")]
-    id: u64,
-    #[serde(rename = "Status")]
-    status: DealStatus,
-    #[serde(rename = "PaymentOwed")]
-    #[serde(with = "bigint_ser")]
-    payment_owed: BigInt,
-    #[serde(rename = "Message")]
-    message: String,
-}
-
-impl DealResponse {
-    pub fn voucher_type() -> String {
-        "RetrievalDealResponse/1".to_string()
-    }
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct TransferProtocol;
-
-impl UpgradeInfo for TransferProtocol {
-    type Info = &'static [u8];
-    type InfoIter = iter::Once<Self::Info>;
-
-    fn protocol_info(&self) -> Self::InfoIter {
-        iter::once(b"/fil/datatransfer/1.2.0")
-    }
-}
-
-impl<TSocket> InboundUpgrade<TSocket> for TransferProtocol
+#[derive(NetworkBehaviour)]
+#[behaviour(
+    out_event = "DataTransferEvent",
+    poll_method = "poll",
+    event_process = true
+)]
+pub struct DataTransfer<S: BlockStore>
 where
-    TSocket: AsyncRead + AsyncWrite + Send + Unpin + 'static,
+    Ipld: Decode<<S::Params as StoreParams>::Codecs>,
 {
-    type Output = TransferMessage;
-    type Error = io::Error;
-    type Future = BoxFuture<'static, Result<Self::Output, Self::Error>>;
+    graphsync: Graphsync<S>,
+    network: DataTransferNetwork,
 
-    fn upgrade_inbound(self, mut socket: TSocket, _info: Self::Info) -> Self::Future {
-        Box::pin(async move {
-            let mut buf = Vec::new();
-            socket.read_to_end(&mut buf).await?;
-            let message = TransferMessage::unmarshal_cbor(&buf).map_err(|_| {
-                io::Error::new(io::ErrorKind::Other, "Failed to decode CBOR message")
-            })?;
-            socket.close().await?;
-            Ok(message)
-        })
-    }
+    #[behaviour(ignore)]
+    peer_id: PeerId,
+    #[behaviour(ignore)]
+    next_request_id: u64,
+    #[behaviour(ignore)]
+    pending_events: VecDeque<DataTransferEvent>,
+    #[behaviour(ignore)]
+    channels: HashMap<ChannelId, Channel>,
+    #[behaviour(ignore)]
+    channel_ids: HashMap<RequestId, ChannelId>,
 }
 
-impl UpgradeInfo for TransferMessage {
-    type Info = &'static [u8];
-    type InfoIter = iter::Once<Self::Info>;
-
-    fn protocol_info(&self) -> Self::InfoIter {
-        iter::once(b"/fil/datatransfer/1.2.0")
-    }
-}
-
-impl<TSocket> OutboundUpgrade<TSocket> for TransferMessage
+impl<S: 'static + BlockStore> DataTransfer<S>
 where
-    TSocket: AsyncRead + AsyncWrite + Send + Unpin + 'static,
+    Ipld: Decode<<S::Params as StoreParams>::Codecs>,
 {
-    type Output = ();
-    type Error = io::Error;
-    type Future = BoxFuture<'static, Result<Self::Output, Self::Error>>;
+    pub fn new(peer_id: PeerId, mut graphsync: Graphsync<S>) -> Self {
+        let now = SystemTime::now();
+        let now_unix = now.duration_since(UNIX_EPOCH).unwrap().as_millis() as u64;
 
-    fn upgrade_outbound(self, mut socket: TSocket, _info: Self::Info) -> Self::Future {
-        Box::pin(async move {
-            let mut buf = self
-                .marshal_cbor()
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
-            socket.write_all(&mut buf).await?;
-            socket.close().await?;
-            Ok(())
-        })
-    }
-}
-
-const EMPTY_QUEUE_SHRINK_THRESHOLD: usize = 100;
-
-pub struct DataTransferNetwork {
-    pending_events: VecDeque<
-        NetworkBehaviourAction<
-            TransferMessage,
-            OneShotHandler<TransferProtocol, TransferMessage, TransferMessage>,
-        >,
-    >,
-    connected: HashMap<PeerId, SmallVec<[Connection; 2]>>,
-    pending_outbound_requests: HashMap<PeerId, SmallVec<[TransferMessage; 10]>>,
-}
-
-impl DataTransferNetwork {
-    pub fn new() -> Self {
-        Self {
-            pending_events: VecDeque::new(),
-            connected: HashMap::new(),
-            pending_outbound_requests: HashMap::new(),
-        }
-    }
-
-    pub fn send_message(&mut self, peer: &PeerId, message: TransferMessage) {
-        if let Some(message) = self.try_send_message(peer, message) {
-            self.pending_outbound_requests
-                .entry(*peer)
-                .or_default()
-                .push(message);
-        }
-    }
-
-    fn try_send_message(
-        &mut self,
-        peer: &PeerId,
-        message: TransferMessage,
-    ) -> Option<TransferMessage> {
-        if let Some(connections) = self.connected.get_mut(peer) {
-            if connections.is_empty() {
-                return Some(message);
+        graphsync.register_incoming_request_hook(Arc::new(|_peer, gs_req| {
+            let mut extensions = HashMap::new();
+            if let Ok(rmsg) = TransferMessage::try_from(&gs_req.extensions) {
+                let req = rmsg
+                    .request
+                    .expect("Expected incoming request to have a request");
+                let vch = req.voucher.expect("Expected request to have a voucher");
+                let voucher = DealResponse {
+                    id: vch.id,
+                    status: DealStatus::Accepted,
+                    message: "".to_string(),
+                    payment_owed: (0 as isize).to_bigint().unwrap(),
+                };
+                let tmsg = TransferMessage {
+                    is_rq: false,
+                    request: None,
+                    response: Some(TransferResponse {
+                        mtype: MessageType::NewMessage,
+                        accepted: true,
+                        paused: false,
+                        transfer_id: req.transfer_id,
+                        voucher: Some(voucher),
+                        voucher_type: DealResponse::voucher_type(),
+                    }),
+                };
+                extensions.insert(EXTENSION_KEY.to_string(), tmsg.marshal_cbor().unwrap());
+                (true, extensions)
+            } else {
+                (false, extensions)
             }
-            self.pending_events
-                .push_back(NetworkBehaviourAction::NotifyHandler {
-                    peer_id: *peer,
-                    handler: NotifyHandler::One(connections[0].id),
-                    event: message,
-                });
-            None
-        } else {
-            Some(message)
+        }));
+        Self {
+            peer_id,
+            graphsync,
+            next_request_id: now_unix,
+            network: DataTransferNetwork::new(),
+            pending_events: VecDeque::default(),
+            channel_ids: HashMap::new(),
+            channels: HashMap::new(),
         }
     }
-}
 
-impl NetworkBehaviour for DataTransferNetwork {
-    type ProtocolsHandler = OneShotHandler<TransferProtocol, TransferMessage, TransferMessage>;
-
-    type OutEvent = TransferMessage;
-
-    fn new_handler(&mut self) -> Self::ProtocolsHandler {
-        OneShotHandler::default()
-    }
-
-    fn addresses_of_peer(&mut self, peer: &PeerId) -> Vec<Multiaddr> {
-        let mut addresses = Vec::new();
-        if let Some(connections) = self.connected.get(peer) {
-            addresses.extend(connections.iter().filter_map(|c| c.address.clone()));
-        }
-        addresses
-    }
-
-    fn inject_event(
+    pub fn pull(
         &mut self,
         peer_id: PeerId,
-        conn: ConnectionId,
-        event: <Self::ProtocolsHandler as ProtocolsHandler>::OutEvent,
-    ) {
-        self.pending_events
-            .push_back(NetworkBehaviourAction::GenerateEvent(event));
-    }
-
-    fn inject_address_change(
-        &mut self,
-        peer: &PeerId,
-        conn: &ConnectionId,
-        _old: &ConnectedPoint,
-        new: &ConnectedPoint,
-    ) {
-        let new_address = match new {
-            ConnectedPoint::Dialer { address, .. } => Some(address.clone()),
-            ConnectedPoint::Listener { .. } => None,
+        root: Cid,
+        selector: Selector,
+        params: DealParams,
+    ) -> Result<ChannelId, String> {
+        let cid = CidCbor::from(root.clone());
+        let request_id = self.next_request_id();
+        let voucher = DealProposal {
+            id: request_id,
+            payload_cid: cid.clone(),
+            params,
         };
-        let connections = self
-            .connected
-            .get_mut(peer)
-            .expect("Address change can only happen on an established connection.");
-
-        let connection = connections
-            .iter_mut()
-            .find(|c| &c.id == conn)
-            .expect("Address change can only happen on an established connection.");
-        connection.address = new_address;
-    }
-
-    fn inject_connection_established(
-        &mut self,
-        peer: &PeerId,
-        conn: &ConnectionId,
-        endpoint: &ConnectedPoint,
-        _errors: Option<&Vec<Multiaddr>>,
-    ) {
-        let address = match endpoint {
-            ConnectedPoint::Dialer { address, .. } => Some(address.clone()),
-            ConnectedPoint::Listener { .. } => None,
+        let message = TransferMessage {
+            is_rq: true,
+            request: Some(TransferRequest {
+                root: cid,
+                mtype: MessageType::NewMessage,
+                pause: false,
+                partial: false,
+                pull: true,
+                selector: selector.clone(),
+                voucher: Some(voucher),
+                voucher_type: DealProposal::voucher_type(),
+                transfer_id: request_id,
+                restart_channel: Default::default(),
+            }),
+            response: None,
         };
-        self.connected
-            .entry(*peer)
-            .or_default()
-            .push(Connection::new(*conn, address));
+        let buf = message.marshal_cbor().map_err(|e| e.to_string())?;
+        let mut extensions = HashMap::new();
+        extensions.insert(EXTENSION_KEY.to_string(), buf);
+        let rq_id = self.graphsync.request(peer_id, root, selector, extensions);
+        let ch_id = self.channel_id(request_id, peer_id);
+        self.channel_ids.insert(rq_id, ch_id.clone());
+        self.channels.insert(
+            ch_id.clone(),
+            Channel::New {
+                id: ch_id.clone(),
+                deal_id: request_id,
+            },
+        );
+        Ok(ch_id)
     }
 
-    fn inject_connection_closed(
-        &mut self,
-        peer_id: &PeerId,
-        conn: &ConnectionId,
-        _: &ConnectedPoint,
-        _: <Self::ProtocolsHandler as IntoProtocolsHandler>::Handler,
-    ) {
-        let connections = self
-            .connected
-            .get_mut(peer_id)
-            .expect("Expected some established connection to peer before closing.");
-
-        connections
-            .iter()
-            .position(|c| &c.id == conn)
-            .map(|p: usize| connections.remove(p))
-            .expect("Expected connection to be established before closing.");
-
-        if connections.is_empty() {
-            self.connected.remove(peer_id);
+    /// Constructs a channel id
+    fn channel_id(&self, id: u64, responder: PeerId) -> ChannelId {
+        ChannelId {
+            initiator: self.peer_id.to_base58(),
+            responder: responder.to_base58(),
+            id,
         }
     }
 
-    fn inject_connected(&mut self, peer: &PeerId) {
-        if let Some(pending) = self.pending_outbound_requests.remove(peer) {
-            for request in pending {
-                let msg = self.try_send_message(peer, request);
-                assert!(msg.is_none());
-            }
-        }
-    }
-
-    fn inject_disconnected(&mut self, peer: &PeerId) {
-        self.connected.remove(peer);
+    /// Returns the next request ID.
+    fn next_request_id(&mut self) -> u64 {
+        let request_id = self.next_request_id;
+        self.next_request_id += 1;
+        request_id
     }
 
     fn poll(
         &mut self,
-        _: &mut Context<'_>,
+        cx: &mut Context,
         _: &mut impl PollParameters,
-    ) -> Poll<NetworkBehaviourAction<Self::OutEvent, Self::ProtocolsHandler>> {
+    ) -> Poll<
+        NetworkBehaviourAction<
+            <Self as NetworkBehaviour>::OutEvent,
+            <Self as NetworkBehaviour>::ProtocolsHandler,
+        >,
+    > {
         if let Some(ev) = self.pending_events.pop_front() {
-            return Poll::Ready(ev);
+            return Poll::Ready(NetworkBehaviourAction::GenerateEvent(ev));
         } else if self.pending_events.capacity() > EMPTY_QUEUE_SHRINK_THRESHOLD {
             self.pending_events.shrink_to_fit();
         }
         Poll::Pending
     }
-}
 
-/// Internal information tracked for an established connection.
-struct Connection {
-    id: ConnectionId,
-    address: Option<Multiaddr>,
-}
+    fn get_channel_by_req_id(&mut self, req_id: RequestId) -> Option<(ChannelId, Channel)> {
+        let ch_id = self.channel_ids.get(&req_id)?;
+        let ch = self.channels.remove(&ch_id)?;
+        Some((ch_id.clone(), ch))
+    }
 
-impl Connection {
-    fn new(id: ConnectionId, address: Option<Multiaddr>) -> Self {
-        Self { id, address }
+    fn process_request(&mut self, peer: PeerId, request: TransferRequest) -> ChannelId {
+        let ch_id = self.channel_id(request.transfer_id, peer);
+        self.channels.insert(
+            ch_id.clone(),
+            Channel::New {
+                id: ch_id.clone(),
+                deal_id: request
+                    .voucher
+                    .expect("Expected request to contain voucher")
+                    .id,
+            },
+        );
+        ch_id
+    }
+
+    fn process_response(&mut self, peer: PeerId, response: TransferResponse) {
+        let ch_id = self.channel_id(response.transfer_id, peer);
+        if response.accepted {
+            if let Some(voucher) = response.voucher {
+                match voucher.status {
+                    DealStatus::Completed => {
+                        let ch = self
+                            .channels
+                            .remove(&ch_id)
+                            .expect("Expected channel to be created before response");
+                        let next_state = ch.transition(ChannelEvent::Completed);
+                        self.channels.insert(ch_id, next_state.clone());
+                        self.pending_events.push_back(next_state.into());
+                    }
+                    _ => {}
+                }
+            }
+        } else {
+            unimplemented!("TODO");
+        }
+    }
+
+    pub fn add_address(&mut self, peer_id: &PeerId, addr: Multiaddr) {
+        self.graphsync.add_address(peer_id, addr);
     }
 }
 
-#[derive(NetworkBehaviour)]
-struct DataTransferBehaviour<S: BlockStore> {
-    graphsync: Graphsync<S>,
-    network: DataTransferNetwork,
+impl<S: 'static + BlockStore> NetworkBehaviourEventProcess<GraphsyncEvent> for DataTransfer<S>
+where
+    Ipld: Decode<<S::Params as StoreParams>::Codecs>,
+{
+    fn inject_event(&mut self, event: GraphsyncEvent) {
+        match event {
+            GraphsyncEvent::RequestAccepted(peer, req) => {
+                if let Ok(msg) = TransferMessage::try_from(&req.extensions) {
+                    let ch_id = self.process_request(
+                        peer,
+                        msg.request
+                            .expect("Expected graphsync request to contain request"),
+                    );
+                    self.channel_ids.insert(req.id, ch_id);
+                }
+            }
+            GraphsyncEvent::ResponseCompleted(peer, req_ids) => {
+                for id in req_ids {
+                    let (ch_id, ch) = self.get_channel_by_req_id(id).expect(
+                        "Expected channel to be created before graphsync response is completed",
+                    );
+
+                    if let Channel::New { deal_id, .. } = ch {
+                        let voucher = DealResponse {
+                            id: deal_id,
+                            status: DealStatus::Completed,
+                            message: "Thanks for doing business with us".to_string(),
+                            payment_owed: (0 as isize).to_bigint().unwrap(),
+                        };
+                        let tmsg = TransferMessage {
+                            is_rq: false,
+                            request: None,
+                            response: Some(TransferResponse {
+                                mtype: MessageType::CompleteMessage,
+                                accepted: true,
+                                paused: false,
+                                transfer_id: ch_id.id,
+                                voucher: Some(voucher),
+                                voucher_type: DealResponse::voucher_type(),
+                            }),
+                        };
+                        self.network.send_message(&peer, tmsg);
+                    }
+                }
+            }
+            GraphsyncEvent::ResponseReceived(responses) => {
+                for res in responses.iter() {
+                    match TransferMessage::try_from(&res.extensions) {
+                        Ok(res) => println!("received response {:?}", res),
+                        Err(e) => {}
+                    };
+                }
+            }
+            GraphsyncEvent::Progress { req_id, link, size } => {
+                let (ch_id, ch) = self
+                    .get_channel_by_req_id(req_id)
+                    .expect("Expected channel to be created before graphsync progress");
+                let event = ChannelEvent::BlockReceived { size };
+                let next_state = ch.transition(event);
+                self.channels.insert(ch_id.clone(), next_state.clone());
+                self.pending_events.push_back(next_state.into());
+            }
+            GraphsyncEvent::Complete(req_id, result) => {
+                let (ch_id, ch) = self
+                    .get_channel_by_req_id(req_id)
+                    .expect("Expected channel to be created before graphsync complete");
+                let event = match result {
+                    Ok(()) => ChannelEvent::AllBlocksReceived,
+                    Err(e) => ChannelEvent::Failure {
+                        reason: e.to_string(),
+                    },
+                };
+                let next_state = ch.transition(event);
+                self.channels.insert(ch_id, next_state.clone());
+                self.pending_events.push_back(next_state.into());
+            }
+        }
+    }
 }
 
-impl<S: 'static + BlockStore> DataTransferBehaviour<S> {
-    pub fn new(graphsync: Graphsync<S>) -> Self {
-        Self {
-            graphsync,
-            network: DataTransferNetwork::new(),
+impl<S: 'static + BlockStore> NetworkBehaviourEventProcess<DtNetEvent> for DataTransfer<S>
+where
+    Ipld: Decode<<S::Params as StoreParams>::Codecs>,
+{
+    fn inject_event(&mut self, event: DtNetEvent) {
+        match event {
+            DtNetEvent::Request(peer_id, request) => {
+                self.process_request(peer_id, request);
+            }
+            DtNetEvent::Response(peer_id, response) => {
+                self.process_response(peer_id, response);
+            }
         }
     }
 }
@@ -514,10 +336,10 @@ impl<S: 'static + BlockStore> DataTransferBehaviour<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use async_std::net::{TcpListener, TcpStream};
     use async_std::task;
+    use blockstore::memory::MemoryDB as MemoryBlockStore;
+    use dag_service::{add, cat};
     use futures::prelude::*;
-    use hex;
     use libp2p::core::muxing::StreamMuxerBox;
     use libp2p::core::transport::Boxed;
     use libp2p::identity;
@@ -526,72 +348,8 @@ mod tests {
     use libp2p::tcp::TcpConfig;
     use libp2p::yamux::YamuxConfig;
     use libp2p::{PeerId, Swarm, Transport};
+    use rand::prelude::*;
     use std::time::Duration;
-
-    #[test]
-    fn it_decodes_request() {
-        let msg_data = hex::decode("a36449735271f56752657175657374aa6442436964d82a5827000171a0e402200a2439495cfb5eafbb79669f644ca2c5a3d31b28e96c424cde5dd0e540a7d9486454797065006450617573f46450617274f46450756c6cf56453746f72a16152a2616ca1646e6f6e65a0623a3ea16161a1613ea16140a065566f756368a36a5061796c6f6164434944d82a5827000171a0e402200a2439495cfb5eafbb79669f644ca2c5a3d31b28e96c424cde5dd0e540a7d9486249440166506172616d73a66853656c6563746f72a16152a2616ca1646e6f6e65a0623a3ea16161a1613ea16140a0685069656365434944f66c5072696365506572427974654200646f5061796d656e74496e74657276616c192710775061796d656e74496e74657276616c496e6372656173651903e86b556e7365616c50726963654064565479707752657472696576616c4465616c50726f706f73616c2f3166586665724944016e526573746172744368616e6e656c8360600068526573706f6e7365f6").unwrap();
-
-        let msg = TransferMessage::unmarshal_cbor(&msg_data).unwrap();
-
-        assert_eq!(msg.is_rq, true);
-
-        let request = msg.request.unwrap();
-
-        let cid = Cid::try_from("bafy2bzaceafciokjlt5v5l53pftj6zcmulc2huy3fduwyqsm3zo5bzkau7muq")
-            .unwrap();
-        // We can recover the CID
-        assert_eq!(request.root.to_cid().unwrap(), cid);
-    }
-
-    #[test]
-    fn it_decodes_completed() {
-        let msg_data = hex::decode("a36449735271f46752657175657374f668526573706f6e7365a66454797065036441637074f56450617573f4665866657249441b0000017b0bb0870d6456526573a4665374617475730f6249441b0000017b0bb0870d6b5061796d656e744f77656440674d6573736167656064565479707752657472696576616c4465616c526573706f6e73652f31").unwrap();
-
-        let msg = TransferMessage::unmarshal_cbor(&msg_data).unwrap();
-
-        assert_eq!(msg.is_rq, false);
-
-        let response = msg.response.unwrap();
-        assert_eq!(response.mtype, MessageType::CompleteMessage);
-        assert_eq!(response.voucher.status, DealStatus::Completed);
-    }
-
-    #[async_std::test]
-    async fn test_upgrade() {
-        use libp2p::core::upgrade;
-
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let listener_addr = listener.local_addr().unwrap();
-
-        let server = async move {
-            let incoming = listener.incoming().into_future().await.0.unwrap().unwrap();
-            upgrade::apply_inbound(incoming, TransferProtocol)
-                .await
-                .unwrap();
-        };
-
-        let client = async move {
-            let stream = TcpStream::connect(&listener_addr).await.unwrap();
-            upgrade::apply_outbound(
-                stream,
-                TransferMessage {
-                    is_rq: true,
-                    request: Some(TransferRequest {
-                        root: CidCbor::from(Cid::default()),
-                        mtype: MessageType::NewMessage,
-                        ..Default::default()
-                    }),
-                    response: None,
-                },
-                upgrade::Version::V1,
-            )
-            .await
-            .unwrap();
-        };
-
-        future::select(Box::pin(server), Box::pin(client)).await;
-    }
 
     fn mk_transport() -> (PeerId, Boxed<(PeerId, StreamMuxerBox)>) {
         let id_key = identity::Keypair::generate_ed25519();
@@ -614,13 +372,17 @@ mod tests {
     struct Peer {
         peer_id: PeerId,
         addr: Multiaddr,
-        swarm: Swarm<DataTransferNetwork>,
+        swarm: Swarm<DataTransfer<MemoryBlockStore>>,
+        store: Arc<MemoryBlockStore>,
     }
 
     impl Peer {
         fn new() -> Self {
             let (peer_id, trans) = mk_transport();
-            let mut swarm = Swarm::new(trans, DataTransferNetwork::new(), peer_id);
+            let bs = Arc::new(MemoryBlockStore::default());
+            let gs = Graphsync::new(Default::default(), bs.clone());
+            let dt = DataTransfer::new(peer_id, gs);
+            let mut swarm = Swarm::new(trans, dt, peer_id);
             Swarm::listen_on(&mut swarm, "/ip4/127.0.0.1/tcp/0".parse().unwrap()).unwrap();
             while swarm.next().now_or_never().is_some() {}
             let addr = Swarm::listeners(&swarm).next().unwrap().clone();
@@ -628,10 +390,17 @@ mod tests {
                 peer_id,
                 addr,
                 swarm,
+                store: bs,
             }
         }
 
-        fn swarm(&mut self) -> &mut Swarm<DataTransferNetwork> {
+        fn add_address(&mut self, peer: &Peer) {
+            self.swarm
+                .behaviour_mut()
+                .add_address(&peer.peer_id, peer.addr.clone());
+        }
+
+        fn swarm(&mut self) -> &mut Swarm<DataTransfer<MemoryBlockStore>> {
             &mut self.swarm
         }
 
@@ -646,7 +415,7 @@ mod tests {
             peer_id
         }
 
-        async fn next(&mut self) -> Option<TransferMessage> {
+        async fn next(&mut self) -> Option<DataTransferEvent> {
             loop {
                 let ev = self.swarm.next().await?;
                 if let SwarmEvent::Behaviour(event) = ev {
@@ -656,37 +425,52 @@ mod tests {
         }
     }
 
-    fn assert_complete_ok(event: Option<TransferMessage>, root: Cid) {
-        if let Some(msg) = event {
-            assert_eq!(msg.is_rq, true);
-            assert_eq!(msg.request.unwrap().root.to_cid().unwrap(), root);
-        } else {
-            panic!("{:?} is not a complete event", event);
-        }
-    }
-
     #[async_std::test]
-    async fn send_message() {
-        let mut peer1 = Peer::new();
+    async fn test_pull() {
+        let peer1 = Peer::new();
         let mut peer2 = Peer::new();
+        peer2.add_address(&peer1);
 
-        peer2.swarm().dial(peer1.addr.clone());
+        let store = peer1.store.clone();
 
-        let cid = Cid::default();
+        // generate 4MiB of random bytes
+        const FILE_SIZE: usize = 4 * 1024 * 1024;
+        let mut data = vec![0u8; FILE_SIZE];
+        rand::thread_rng().fill_bytes(&mut data);
 
-        peer2.swarm().behaviour_mut().send_message(
-            &peer1.peer_id,
-            TransferMessage {
-                is_rq: true,
-                request: Some(TransferRequest {
-                    root: CidCbor::from(cid.clone()),
-                    mtype: MessageType::NewMessage,
-                    ..Default::default()
-                }),
-                response: None,
-            },
-        );
-        peer2.spawn("peer2");
-        assert_complete_ok(peer1.next().await, cid);
+        let root = add(store.clone(), &data).unwrap();
+
+        let peer1 = peer1.spawn("peer1");
+
+        let selector = Selector::ExploreRecursive {
+            limit: RecursionLimit::None,
+            sequence: Box::new(Selector::ExploreAll {
+                next: Box::new(Selector::ExploreRecursiveEdge),
+            }),
+            current: None,
+        };
+
+        let cid = root.unwrap();
+
+        let id = peer2
+            .swarm()
+            .behaviour_mut()
+            .pull(peer1, cid, selector, DealParams::default())
+            .unwrap();
+
+        loop {
+            if let Some(event) = peer2.next().await {
+                match event {
+                    DataTransferEvent::Progress(chi) => {}
+                    DataTransferEvent::Completed(chid, Ok(())) => {
+                        assert_eq!(chid, id);
+                        break;
+                    }
+                    e => {
+                        panic!("unexpected event {:?}", e);
+                    }
+                }
+            }
+        }
     }
 }

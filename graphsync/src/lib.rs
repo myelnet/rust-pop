@@ -104,6 +104,8 @@ impl<P: StoreParams> MessageCodec for GraphsyncCodec<P> {
 
 #[derive(Debug)]
 pub enum GraphsyncEvent {
+    RequestAccepted(PeerId, GraphsyncRequest),
+    ResponseCompleted(PeerId, Vec<RequestId>),
     // We may receive more than one response at once
     ResponseReceived(Vec<GraphsyncResponse>),
     Progress {
@@ -114,14 +116,18 @@ pub enum GraphsyncEvent {
     Complete(RequestId, Result<(), EncodingError>),
 }
 
-type IncomingRequestHook =
+pub type IncomingRequestHook =
     Arc<dyn Fn(PeerId, &GraphsyncRequest) -> (bool, Extensions) + Send + Sync>;
 
-type OutgoingBlockHook = Arc<dyn Fn(PeerId, Cid, usize) -> Extensions + Send + Sync>;
+/// requester, root, size
+pub type OutgoingBlockHook = Arc<dyn Fn(PeerId, Cid, usize) -> Extensions + Send + Sync>;
+
+pub type ResponseCompletedHook = Arc<dyn Fn(PeerId, Vec<RequestId>) + Send + Sync>;
 
 pub struct GraphsyncHooks {
     incoming_request: IncomingRequestHook,
     outgoing_block: OutgoingBlockHook,
+    response_completed: ResponseCompletedHook,
 }
 
 impl Default for GraphsyncHooks {
@@ -129,6 +135,7 @@ impl Default for GraphsyncHooks {
         Self {
             incoming_request: Arc::new(|_, _| (true, Extensions::default())),
             outgoing_block: Arc::new(|_, _, _| Extensions::default()),
+            response_completed: Arc::new(|_, _| ()),
         }
     }
 }
@@ -139,6 +146,9 @@ impl GraphsyncHooks {
     }
     pub fn register_outgoing_block(&mut self, f: OutgoingBlockHook) {
         self.outgoing_block = f
+    }
+    pub fn register_response_completed(&mut self, f: ResponseCompletedHook) {
+        self.response_completed = f
     }
 }
 
@@ -224,11 +234,17 @@ where
     ) {
         println!("inbound failure {} {} {:?}", peer, request_id, error);
     }
-    fn register_incoming_request_hook(&mut self, hook: IncomingRequestHook) {
+    pub fn register_incoming_request_hook(&mut self, hook: IncomingRequestHook) {
         self.hooks.write().unwrap().register_incoming_request(hook);
     }
-    fn register_outgoing_block_hook(&mut self, hook: OutgoingBlockHook) {
+    pub fn register_outgoing_block_hook(&mut self, hook: OutgoingBlockHook) {
         self.hooks.write().unwrap().register_outgoing_block(hook);
+    }
+    pub fn register_response_completed_hook(&mut self, hook: ResponseCompletedHook) {
+        self.hooks
+            .write()
+            .unwrap()
+            .register_response_completed(hook);
     }
 }
 
@@ -332,12 +348,22 @@ where
             while let Poll::Ready(Some(event)) = self.response_manager.next(ctx) {
                 exit = false;
                 match event {
+                    ResponseEvent::Accepted(peer, req) => {
+                        return Poll::Ready(NetworkBehaviourAction::GenerateEvent(
+                            GraphsyncEvent::RequestAccepted(peer, req),
+                        ));
+                    }
                     ResponseEvent::Partial(peer, msg) => {
                         self.inner.send_response(&peer, msg);
                     }
                     ResponseEvent::Completed(peer, msg) => {
+                        let req_ids: Vec<RequestId> =
+                            msg.responses.iter().map(|(_, r)| r.id).collect();
                         self.inner.send_response(&peer, msg);
                         self.inner.finish_outbound(&peer);
+                        return Poll::Ready(NetworkBehaviourAction::GenerateEvent(
+                            GraphsyncEvent::ResponseCompleted(peer, req_ids),
+                        ));
                     }
                 }
             }
@@ -981,6 +1007,57 @@ mod tests {
             id,
             Cid::try_from("bafyreibwnmylvsglbfzglba6jvdz7b5w34p4ypecrbjrincneuskezhcq4").unwrap(),
             18,
+        );
+        assert_complete_ok(peer2.next().await, id);
+    }
+
+    #[async_std::test]
+    async fn test_request_entries() {
+        let peer1 = Peer::new(MemoryBlockStore::default());
+        let mut peer2 = Peer::new(MemoryBlockStore::default());
+        peer2.add_address(&peer1);
+
+        let store = peer1.store.clone();
+        let peer1 = peer1.spawn("peer1");
+
+        let leaf1 = ipld!({ "name": "leaf1", "size": 12 });
+        let leaf1_block = Block::encode(DagCborCodec, Code::Sha2_256, &leaf1).unwrap();
+        store.insert(&leaf1_block).unwrap();
+
+        let leaf2 = ipld!({ "name": "leaf2", "size": 6 });
+        let leaf2_block = Block::encode(DagCborCodec, Code::Sha2_256, &leaf2).unwrap();
+        store.insert(&leaf2_block).unwrap();
+
+        let parent = ipld!({
+            "children": [leaf1_block.cid(), leaf2_block.cid()],
+            "favouriteChild": leaf2_block.cid(),
+            "name": "parent",
+        });
+        let parent_block = Block::encode(DagCborCodec, Code::Sha2_256, &parent).unwrap();
+        store.insert(&parent_block).unwrap();
+
+        let selector = Selector::ExploreRecursive {
+            limit: RecursionLimit::Depth(1),
+            sequence: Box::new(Selector::ExploreAll {
+                next: Box::new(Selector::ExploreRecursiveEdge),
+            }),
+            current: None,
+        };
+
+        let id = peer2.swarm().behaviour_mut().request(
+            peer1,
+            parent_block.cid().clone(),
+            selector,
+            Extensions::default(),
+        );
+
+        assert_response_ok(peer2.next().await, id);
+
+        assert_progress_ok(
+            peer2.next().await,
+            id,
+            Cid::try_from("bafyreib6ba6oakwqzsg4vv6sogb7yysu5yqqe7dqth6z3nulqkyj7lom4a").unwrap(),
+            161,
         );
         assert_complete_ok(peer2.next().await, id);
     }

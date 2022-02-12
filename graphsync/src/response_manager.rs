@@ -1,4 +1,4 @@
-use super::traversal::{BlockCallbackLoader, Progress, Selector};
+use super::traversal::{BlockCallbackLoader, Progress};
 use super::{
     Extensions, GraphsyncHooks, GraphsyncMessage, GraphsyncRequest, GraphsyncResponse, Prefix,
     RequestId, ResponseStatusCode,
@@ -24,7 +24,9 @@ use async_std::task::spawn;
 #[cfg(target_os = "unknown")]
 use async_std::task::spawn_local as spawn;
 
-const MAX_BLOCK_SIZE: usize = 512 * 1024;
+// setting up slightly higher than 512kb so we can have up to 2 unixfs 256kb blocks
+const MAX_BLOCK_SIZE: usize = 513 * 1024;
+
 pub static METADATA_EXTENSION: &str = "graphsync/response-metadata";
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -77,15 +79,15 @@ impl<P: StoreParams> ResponseBuilder<P> {
             self.send(ResponseStatusCode::PartialResponse);
         }
         self.metadata.push(MetadataItem {
-            link: CidCbor::from(block.cid().clone()),
+            link: CidCbor::from(*block.cid()),
             block_present: true,
         });
         self.blocks.push_back(block);
-        self.size = self.size + block_size;
+        self.size += block_size;
     }
     pub fn missing_block(&mut self, cid: &Cid) {
         self.metadata.push(MetadataItem {
-            link: CidCbor::from(cid.clone()),
+            link: CidCbor::from(*cid),
             block_present: false,
         });
         self.partial = true;
@@ -247,7 +249,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::traversal::RecursionLimit;
+    use crate::traversal::{RecursionLimit, Selector};
     use blockstore::memory::MemoryDB as MemoryBlockStore;
     use libipld::cbor::DagCborCodec;
     use libipld::ipld;

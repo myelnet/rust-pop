@@ -78,7 +78,7 @@ impl<P: StoreParams> MessageCodec for GraphsyncCodec<P> {
         let packet = upgrade::read_length_prefixed(io, self.max_msg_size)
             .await
             .map_err(other)?;
-        if packet.len() == 0 {
+        if packet.is_empty() {
             return Err(io::Error::new(io::ErrorKind::Other, "End of output"));
         }
         let message = GraphsyncMessage::from_bytes(&packet)
@@ -169,7 +169,6 @@ impl Default for Config {
 }
 
 pub struct Graphsync<S: BlockStore> {
-    config: Config,
     inner: RequestResponse<GraphsyncCodec<S::Params>>,
     request_manager: RequestManager<S>,
     response_manager: ResponseManager<S>,
@@ -188,10 +187,9 @@ where
         let inner = RequestResponse::new(GraphsyncCodec::default(), protocols, rr_config);
         let hooks = Arc::new(RwLock::new(GraphsyncHooks::default()));
         Self {
-            config,
             inner,
             request_manager: RequestManager::new(store.clone()),
-            response_manager: ResponseManager::new(store.clone(), hooks.clone()),
+            response_manager: ResponseManager::new(store, hooks.clone()),
             hooks,
         }
     }
@@ -244,7 +242,7 @@ where
     type OutEvent = GraphsyncEvent;
 
     fn new_handler(&mut self) -> Self::ProtocolsHandler {
-        return self.inner.new_handler();
+        self.inner.new_handler()
     }
 
     fn addresses_of_peer(&mut self, peer_id: &PeerId) -> Vec<Multiaddr> {
@@ -408,7 +406,7 @@ where
                     RequestResponseEvent::Message { peer, message } => {
                         let msg = message.message;
                         if !msg.requests.is_empty() {
-                            for (_, req) in &msg.requests {
+                            for req in msg.requests.values() {
                                 self.response_manager.inject_request(peer, req);
                             }
                         }
@@ -460,21 +458,11 @@ pub struct GraphsyncResponse {
     pub extensions: Extensions,
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone, Default)]
 pub struct GraphsyncMessage {
     pub requests: FnvHashMap<RequestId, GraphsyncRequest>,
     pub responses: FnvHashMap<RequestId, GraphsyncResponse>,
     pub blocks: Vec<(Vec<u8>, Vec<u8>)>,
-}
-
-impl Default for GraphsyncMessage {
-    fn default() -> Self {
-        Self {
-            requests: Default::default(),
-            responses: Default::default(),
-            blocks: Default::default(),
-        }
-    }
 }
 
 impl GraphsyncMessage {
@@ -485,7 +473,7 @@ impl GraphsyncMessage {
     }
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, EncodingError> {
         let pbmsg = pb::Message::parse_from_bytes(bytes)?;
-        Ok(GraphsyncMessage::try_from(pbmsg)?)
+        GraphsyncMessage::try_from(pbmsg)
     }
 }
 
@@ -582,7 +570,7 @@ impl From<Request> for GraphsyncMessage {
                 extensions: Default::default(),
             },
         );
-        return msg;
+        msg
     }
 }
 
@@ -597,7 +585,7 @@ impl From<Response> for GraphsyncMessage {
                 extensions: res.extensions,
             },
         );
-        return msg;
+        msg
     }
 }
 

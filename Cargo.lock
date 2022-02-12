@@ -559,44 +559,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bls-signatures"
-version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3b44c36726a8b4cae930903a96f3193b496664ed7c28f74f1c1b3feae0e212c3"
-dependencies = [
- "blst",
- "blstrs",
- "fff",
- "groupy",
- "rand_core 0.5.1",
- "thiserror",
-]
-
-[[package]]
-name = "blst"
-version = "0.3.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dd7cb1b48c09ac759808ad27811ca44e27c037d309f837651fc80506bc19819f"
-dependencies = [
- "cc",
- "glob",
- "threadpool",
- "zeroize",
-]
-
-[[package]]
-name = "blstrs"
-version = "0.2.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ecf78c2e543a5fd41b41499fc242d603862b436dc2c167658e7f4870523781ac"
-dependencies = [
- "blst",
- "fff",
- "groupy",
- "rand_core 0.5.1",
-]
-
-[[package]]
 name = "bs58"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1438,18 +1400,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fff"
-version = "0.2.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2544d325b4870bd803d371a7df3c6845e84dcfcb6ebe7ffcae0eac6d5d676133"
-dependencies = [
- "byteorder",
- "cc",
- "lazy_static",
- "rand_core 0.5.1",
-]
-
-[[package]]
 name = "fil_clock"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1612,23 +1562,6 @@ dependencies = [
  "multibase 0.9.1",
  "multihash 0.13.2",
  "serde",
-]
-
-[[package]]
-name = "forest_crypto"
-version = "0.5.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ecfe12e10b7f6aa5643dcde74533d8192720ab7366ce473ff4043c71b5132c27"
-dependencies = [
- "base64 0.13.0",
- "bls-signatures",
- "forest_address",
- "forest_encoding",
- "libsecp256k1 0.6.0",
- "num-derive",
- "num-traits",
- "serde",
- "thiserror",
 ]
 
 [[package]]
@@ -1953,22 +1886,9 @@ dependencies = [
  "protobuf",
  "protoc-rust",
  "rand 0.7.3",
- "rayon",
  "serde",
  "serde_json",
  "smallvec",
- "thiserror",
-]
-
-[[package]]
-name = "groupy"
-version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2d38f1bec17d75a7c30b754cd74db6e7cb5927529021ced14fbd622411c04d8b"
-dependencies = [
- "fff",
- "rand 0.7.3",
- "rand_xorshift 0.2.0",
  "thiserror",
 ]
 
@@ -2117,9 +2037,14 @@ dependencies = [
  "async-trait",
  "cfg-if 1.0.0",
  "dashmap",
+ "futures",
  "http-types",
  "isahc",
+ "js-sys",
  "log",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
 ]
 
 [[package]]
@@ -4085,7 +4010,7 @@ dependencies = [
  "rand_jitter",
  "rand_os",
  "rand_pcg",
- "rand_xorshift 0.1.1",
+ "rand_xorshift",
  "winapi",
 ]
 
@@ -4256,15 +4181,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cbf7e9e623549b0e21f6e97cf8ecf247c1a8fd2e8a992ae265314300b2455d5c"
 dependencies = [
  "rand_core 0.3.1",
-]
-
-[[package]]
-name = "rand_xorshift"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "77d416b86801d23dde1aa643023b775c3a462efc0ed96443add11546cdf1dca8"
-dependencies = [
- "rand_core 0.5.1",
 ]
 
 [[package]]
@@ -5044,15 +4960,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "threadpool"
-version = "1.8.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d050e60b33d41c19108b32cea32164033a9013fe3b46cbd4457559bfbf77afaa"
-dependencies = [
- "num_cpus",
-]
-
-[[package]]
 name = "time"
 version = "0.1.43"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5407,8 +5314,8 @@ name = "wallet"
 version = "0.1.0"
 dependencies = [
  "base64 0.13.0",
+ "filecoin",
  "forest_address",
- "forest_crypto",
  "libc",
  "libipld",
  "libsecp256k1 0.3.5",

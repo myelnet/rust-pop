@@ -62,7 +62,7 @@ chrono = { version = "0.4", features = ["wasmbind"], optional = true }
 
 [features]
 default = ["native"]
-native = ["blockstore/native", "graphsync/native", "dag_service/native"]
+native = ["blockstore/native", "graphsync/native", "dag_service/native", "data_transfer/native"]
 browser = [
   "libp2p-wasm-ext",
   "wasm-bindgen",
@@ -76,5 +76,6 @@ browser = [
   "log",
   "blockstore/browser",
   "graphsync/browser",
+  "data_transfer/browser",
   "dag_service/browser"
 ]

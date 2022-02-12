@@ -6,7 +6,7 @@ use std::io::{BufReader, BufWriter, ErrorKind};
 use std::path::PathBuf;
 
 use super::errors::Error;
-use crypto::SignatureType;
+use filecoin::crypto::SignatureType;
 
 pub const KEYSTORE_NAME: &str = "keystore.json";
 pub const ENCRYPTED_KEYSTORE_NAME: &str = "keystore";

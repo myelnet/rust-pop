@@ -23,11 +23,6 @@ lazy_static = "1.4.0"
 filecoin = { path = "../filecoin" }
 wallet = { path = "../wallet" }
 base64 = { version = "0.13" }
-crypto = { package = "forest_crypto", version = "0.5", features = [
-  "json",
-  "blst",
-] }
-
 
 [dependencies.jsonrpc-v2]
 default-features = false

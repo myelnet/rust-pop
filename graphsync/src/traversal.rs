@@ -15,7 +15,7 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_cbor::{error::Error as CborError, from_slice, to_vec};
 use std::fmt;
 use std::io::Error as StdError;
-use std::sync::{Arc};
+use std::sync::Arc;
 use thiserror::Error;
 use Selector::*;
 
@@ -42,7 +42,7 @@ impl PathSegment {
     pub fn ipld_index<'a>(&self) -> IpldIndex<'a> {
         match self {
             PathSegment::String(string) => IpldIndex::Map(string.clone()),
-            PathSegment::Int(int) => IpldIndex::List(int.clone()),
+            PathSegment::Int(int) => IpldIndex::List(*int),
         }
     }
 }
@@ -195,12 +195,12 @@ impl Selector {
                         if depth < 2 {
                             return replace_recursive_edge(next, None);
                         }
-                        return Some(ExploreRecursive {
+                        Some(ExploreRecursive {
                             current: replace_recursive_edge(next, Some(*sequence.clone()))
                                 .map(Box::new),
                             sequence,
                             limit: RecursionLimit::Depth(depth - 1),
-                        });
+                        })
                     }
                     RecursionLimit::None => Some(ExploreRecursive {
                         current: replace_recursive_edge(next, Some(*sequence.clone()))
@@ -230,10 +230,7 @@ impl Selector {
 }
 
 fn has_recursive_edge(next_sel: &Selector) -> bool {
-    match next_sel {
-        ExploreRecursiveEdge { .. } => true,
-        _ => false,
-    }
+    matches!(next_sel, ExploreRecursiveEdge { .. })
 }
 
 fn replace_recursive_edge(next_sel: Selector, replace: Option<Selector>) -> Option<Selector> {

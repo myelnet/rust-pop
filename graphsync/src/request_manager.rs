@@ -69,7 +69,7 @@ where
             sender
                 .try_send(RequestEvent::Progress {
                     req_id: id,
-                    link: blk.cid().clone(),
+                    link: *blk.cid(),
                     size: blk.data().len(),
                 })
                 .map_err(|e| e.to_string())?;
@@ -102,15 +102,20 @@ where
         id
     }
     pub fn inject_response(&self, msg: GraphsyncMessage) {
-        for (prefix, data) in msg.blocks {
-            if let Ok(prefix) = Prefix::new_from_bytes(&prefix) {
-                if let Ok(cid) = prefix.to_cid(&data) {
-                    let block = Block::new_unchecked(cid, data);
-                    for (_, res) in msg.responses.iter() {
-                        if let Some(sender) = self.ongoing.lock().unwrap().get(&res.id) {
-                            sender.try_send(block.clone()).unwrap();
-                        }
-                    }
+        let blocks: Vec<Block<S::Params>> = msg
+            .blocks
+            .iter()
+            .map_while(|(prefix, data)| {
+                let prefix = Prefix::new_from_bytes(prefix).ok()?;
+                let cid = prefix.to_cid(data).ok()?;
+                Some(Block::new_unchecked(cid, data.to_vec()))
+            })
+            .collect();
+
+        for block in blocks.iter() {
+            for (_, res) in msg.responses.iter() {
+                if let Some(sender) = self.ongoing.lock().unwrap().get(&res.id) {
+                    sender.try_send(block.clone()).unwrap();
                 }
             }
         }

@@ -289,9 +289,8 @@ where
         SubstreamProtocol::new(proto, request_id).with_timeout(self.substream_timeout)
     }
 
-    fn inject_fully_negotiated_inbound(&mut self, sent: (), request_id: RequestId) {
+    fn inject_fully_negotiated_inbound(&mut self, _sent: (), _request_id: RequestId) {
         self.keep_alive = KeepAlive::Yes;
-        // self.inbound.push_back((request_id, sent));
     }
 
     fn inject_fully_negotiated_outbound(&mut self, _result: (), _request_id: RequestId) {}

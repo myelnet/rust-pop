@@ -31,7 +31,6 @@ crossbeam-channel = "0.5.2"
 rand = { version = "0.7", features = ["wasm-bindgen"] }
 blockstore = { path = "../blockstore", default_features=false }
 filecoin = { path = "../filecoin", default_features=false }
-rayon = "1.5.1"
 
 
 [build-dependencies]

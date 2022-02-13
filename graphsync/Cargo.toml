@@ -30,6 +30,7 @@ instant = "0.1.11"
 crossbeam-channel = "0.5.2"
 rand = { version = "0.7", features = ["wasm-bindgen"] }
 blockstore = { path = "../blockstore", default_features=false }
+filecoin = { path = "../filecoin", default_features=false }
 
 
 [build-dependencies]
@@ -38,6 +39,7 @@ protoc-rust = "2.25.2"
 [dev-dependencies]
 serde_json = "1.0"
 dag_service = { path = "../dag_service" }
+criterion = { version = "0.3", features = ["async_futures", "async_std"] }
 
 [features]
 default = ["native"]
@@ -45,3 +47,7 @@ native = ["blockstore/native"]
 browser = [
   "blockstore/browser"
 ]
+
+[[bench]]
+name = "e2e"
+harness = false

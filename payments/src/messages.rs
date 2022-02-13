@@ -154,14 +154,16 @@ mod tests {
 
         let new_priv_key = base64::decode("TaFDsadBYd34tSWmOejqj8VCrO9odoywML5u834aJ1E=").unwrap();
 
-        let key_info = wallet::KeyInfo::new(crypto::SignatureType::Secp256k1, new_priv_key);
+        let key_info =
+            wallet::KeyInfo::new(filecoin::crypto::SignatureType::Secp256k1, new_priv_key);
 
         let address = w.import(key_info).unwrap();
 
         let new_priv_key_2 =
             base64::decode("XLUdUamDdjHc34jTjZi0gnpCebstzdzeS2tVevUiw/Q=").unwrap();
 
-        let key_info_2 = wallet::KeyInfo::new(crypto::SignatureType::Secp256k1, new_priv_key_2);
+        let key_info_2 =
+            wallet::KeyInfo::new(filecoin::crypto::SignatureType::Secp256k1, new_priv_key_2);
 
         let address_2 = w.import(key_info_2).unwrap();
 

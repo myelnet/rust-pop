@@ -1,6 +1,6 @@
 use crate::cid_helpers::*;
+use crate::crypto::{errors::Error as CryptoError, Signature, Signer};
 use address::Address;
-use crypto::{signature::Signature, Error as CryptoError, Signer};
 use derive_builder::Builder;
 use libipld::multihash::Code;
 use libipld::Cid;
@@ -62,7 +62,7 @@ impl Serialized {
 
 lazy_static! {
     pub static ref INIT_ACTOR_ADDR: Address = Address::new_id(1);
-    pub static ref PAYCH_ACTOR_CODE_ID: PaychActorCodeId = PaychActorCodeId {
+    pub static ref PAYCH_ACTOR_CODE_ID: CidCbor = CidCbor {
         bytes: Vec::from([
             1u8, 85, 0, 20, 102, 105, 108, 47, 53, 47, 112, 97, 121, 109, 101, 110, 116, 99, 104,
             97, 110, 110, 101, 108,
@@ -119,7 +119,7 @@ impl Cbor for ConstructorParams {}
 
 #[derive(Serialize_tuple, Deserialize_tuple)]
 pub struct ExecParams {
-    pub code_cid: PaychActorCodeId,
+    pub code_cid: CidCbor,
     pub constructor_params: Serialized,
 }
 
@@ -613,7 +613,7 @@ impl Cbor for SignedMessage {}
 // #[cfg(feature = "json")]
 pub mod signed_json {
     use super::*;
-    use crypto::signature;
+    use crate::crypto::{Signature, SignatureType};
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
     /// Wrapper for serializing and deserializing a SignedMessage from JSON.
@@ -647,7 +647,7 @@ pub mod signed_json {
         struct SignedMessageSer<'a> {
             #[serde(with = "unsigned_json")]
             message: &'a UnsignedMessage,
-            #[serde(with = "signature::json")]
+            #[serde(with = "crate::crypto::json")]
             signature: &'a Signature,
             // #[serde(default, rename = "CID", with = "cid::json::opt")]
             // cid: Option<Cid>,
@@ -669,7 +669,7 @@ pub mod signed_json {
         struct SignedMessageDe {
             #[serde(with = "unsigned_json")]
             message: UnsignedMessage,
-            #[serde(with = "signature::json")]
+            #[serde(with = "crate::crypto::json")]
             signature: Signature,
         }
         let SignedMessageDe { message, signature } = Deserialize::deserialize(deserializer)?;

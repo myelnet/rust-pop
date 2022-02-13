@@ -1,0 +1,40 @@
+[package]
+name = "data_transfer"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[dependencies.libp2p]
+version = "0.42.0"
+default-features = true
+features = ["wasm-ext"]
+
+
+[dependencies]
+futures = "0.3.19"
+serde = { version = "1.0", features = ["derive"] }
+serde_cbor = { package = "cs_serde_cbor", version = "0.12", features = [
+  "tags",
+] }
+serde_repr = "0.1"
+serde_tuple = "0.5"
+serde_bytes = { package = "cs_serde_bytes", version = "0.12" }
+filecoin = { path = "../filecoin", default_features = false }
+graphsync = { path = "../graphsync", default_features = false }
+blockstore = { path = "../blockstore", default_features = false }
+num-bigint = { package = "forest_bigint", version = "0.1.1", features = [
+  "json",
+] }
+libipld = "0.12"
+smallvec = "1.8.0"
+
+[dev-dependencies]
+hex = "0.4.3"
+async-std = { version = "1.6.2", features = ["attributes", "unstable"]}
+rand = { version = "0.7", features = ["wasm-bindgen"] }
+dag_service = { path = "../dag_service" }
+
+[features]
+default = ["native"]
+native = ["filecoin/native", "graphsync/native", "blockstore/native"]
+browser = ["filecoin/browser", "graphsync/browser", "blockstore/browser"]

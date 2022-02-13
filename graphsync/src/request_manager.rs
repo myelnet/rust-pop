@@ -1,5 +1,5 @@
 use super::traversal::{AsyncLoader, Error, Progress, Selector};
-use super::{GraphsyncMessage, GraphsyncRequest, Prefix, RequestId};
+use super::{Extensions, GraphsyncMessage, GraphsyncRequest, Prefix, RequestId};
 use async_std::channel::{bounded, Receiver, Sender};
 use async_std::task::{Context, Poll};
 use blockstore::types::BlockStore;
@@ -54,7 +54,13 @@ where
             receiver: Arc::new(Mutex::new(r)),
         }
     }
-    pub fn start_request(&self, responder: PeerId, root: Cid, selector: Selector) -> RequestId {
+    pub fn start_request(
+        &self,
+        responder: PeerId,
+        root: Cid,
+        selector: Selector,
+        extensions: Extensions,
+    ) -> RequestId {
         let id = self.id_counter.fetch_add(1, Ordering::Relaxed);
         let store = self.store.clone();
         let sender = self.sender.clone();
@@ -63,7 +69,7 @@ where
             sender
                 .try_send(RequestEvent::Progress {
                     req_id: id,
-                    link: blk.cid().clone(),
+                    link: *blk.cid(),
                     size: blk.data().len(),
                 })
                 .map_err(|e| e.to_string())?;
@@ -87,7 +93,7 @@ where
                 id,
                 root,
                 selector: sel,
-                extensions: Default::default(),
+                extensions,
             },
         );
         self.sender
@@ -96,15 +102,20 @@ where
         id
     }
     pub fn inject_response(&self, msg: GraphsyncMessage) {
-        for (prefix, data) in msg.blocks {
-            if let Ok(prefix) = Prefix::new_from_bytes(&prefix) {
-                if let Ok(cid) = prefix.to_cid(&data) {
-                    let block = Block::new_unchecked(cid, data);
-                    for (_, res) in msg.responses.iter() {
-                        if let Some(sender) = self.ongoing.lock().unwrap().get(&res.id) {
-                            sender.try_send(block.clone()).unwrap();
-                        }
-                    }
+        let blocks: Vec<Block<S::Params>> = msg
+            .blocks
+            .iter()
+            .map_while(|(prefix, data)| {
+                let prefix = Prefix::new_from_bytes(prefix).ok()?;
+                let cid = prefix.to_cid(data).ok()?;
+                Some(Block::new_unchecked(cid, data.to_vec()))
+            })
+            .collect();
+
+        for block in blocks.iter() {
+            for (_, res) in msg.responses.iter() {
+                if let Some(sender) = self.ongoing.lock().unwrap().get(&res.id) {
+                    sender.try_send(block.clone()).unwrap();
                 }
             }
         }
@@ -183,7 +194,7 @@ mod tests {
         };
 
         // Start the request and traversal
-        manager.start_request(PeerId::random(), root, selector);
+        manager.start_request(PeerId::random(), root, selector, Extensions::default());
         // we should receive an outbound message to send over the network
         if let Ok(evt) = manager.receiver.lock().unwrap().recv().await {
             match evt {

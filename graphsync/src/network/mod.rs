@@ -292,7 +292,7 @@ where
                             println!("failed to send {:?}", e);
                         }
                     }
-                    return req_id.clone();
+                    return *req_id;
                 }
                 let (s, r) = bounded(1000);
                 let response = OutboundProtocol {
@@ -300,9 +300,9 @@ where
                     codec: self.codec.clone(),
                     protocols: self.outbound_protocols.clone(),
                     message,
-                    receiver: Some(r.clone()),
+                    receiver: Some(r),
                 };
-                conn.open = Some((request_id, s.clone()));
+                conn.open = Some((request_id, s));
                 if let Some(request) = self.try_send_request(peer, response) {
                     let handler = self.new_handler();
                     self.pending_events.push_back(NetworkBehaviourAction::Dial {
@@ -527,7 +527,7 @@ where
                     self.pending_events
                         .push_back(NetworkBehaviourAction::GenerateEvent(
                             RequestResponseEvent::OutboundFailure {
-                                peer: peer,
+                                peer,
                                 request_id: request.request_id,
                                 error: OutboundFailure::DialFailure,
                             },

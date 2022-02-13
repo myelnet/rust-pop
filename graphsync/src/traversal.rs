@@ -15,7 +15,7 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_cbor::{error::Error as CborError, from_slice, to_vec};
 use std::fmt;
 use std::io::Error as StdError;
-use std::sync::{Arc};
+use std::sync::Arc;
 use thiserror::Error;
 use Selector::*;
 
@@ -42,7 +42,7 @@ impl PathSegment {
     pub fn ipld_index<'a>(&self) -> IpldIndex<'a> {
         match self {
             PathSegment::String(string) => IpldIndex::Map(string.clone()),
-            PathSegment::Int(int) => IpldIndex::List(int.clone()),
+            PathSegment::Int(int) => IpldIndex::List(*int),
         }
     }
 }
@@ -195,12 +195,12 @@ impl Selector {
                         if depth < 2 {
                             return replace_recursive_edge(next, None);
                         }
-                        return Some(ExploreRecursive {
+                        Some(ExploreRecursive {
                             current: replace_recursive_edge(next, Some(*sequence.clone()))
                                 .map(Box::new),
                             sequence,
                             limit: RecursionLimit::Depth(depth - 1),
-                        });
+                        })
                     }
                     RecursionLimit::None => Some(ExploreRecursive {
                         current: replace_recursive_edge(next, Some(*sequence.clone()))
@@ -230,10 +230,7 @@ impl Selector {
 }
 
 fn has_recursive_edge(next_sel: &Selector) -> bool {
-    match next_sel {
-        ExploreRecursiveEdge { .. } => true,
-        _ => false,
-    }
+    matches!(next_sel, ExploreRecursiveEdge { .. })
 }
 
 fn replace_recursive_edge(next_sel: Selector, replace: Option<Selector>) -> Option<Selector> {
@@ -249,8 +246,8 @@ pub trait LinkLoader {
 }
 
 #[derive(Debug, Default)]
-pub struct Progress<L = ()> {
-    loader: Option<L>,
+pub struct Progress<L> {
+    loader: L,
     path: Path,
     last_block: Option<LastBlockInfo>,
 }
@@ -267,7 +264,7 @@ where
 {
     pub fn new(loader: L) -> Self {
         Self {
-            loader: Some(loader),
+            loader,
             path: Default::default(),
             last_block: None,
         }
@@ -283,19 +280,17 @@ where
         F: Fn(&Progress<L>, &Ipld) -> Result<(), String> + Sync,
     {
         if let Ipld::Link(cid) = node {
-            if let Some(loader) = &mut self.loader {
-                self.last_block = Some(LastBlockInfo {
-                    path: self.path.clone(),
-                    link: *cid as Cid,
-                });
-                let mut node = loader.load_link(cid).await.map_err(Error::Link)?;
-                while let Some(Ipld::Link(c)) = node {
-                    node = loader.load_link(&c).await.map_err(Error::Link)?;
-                }
+            self.last_block = Some(LastBlockInfo {
+                path: self.path.clone(),
+                link: *cid as Cid,
+            });
+            let mut node = self.loader.load_link(cid).await.map_err(Error::Link)?;
+            while let Some(Ipld::Link(c)) = node {
+                node = self.loader.load_link(&c).await.map_err(Error::Link)?;
+            }
 
-                if let Some(n) = node {
-                    return self.walk_adv(&n, selector, callback).await;
-                }
+            if let Some(n) = node {
+                return self.walk_adv(&n, selector, callback).await;
             }
 
             return Ok(());
@@ -401,8 +396,8 @@ impl From<ProtobufError> for Error {
     }
 }
 
-pub struct StoreLoader<S = ()> {
-    store: Option<S>,
+pub struct StoreLoader<S> {
+    store: S,
 }
 
 #[async_trait]
@@ -412,18 +407,15 @@ where
     Ipld: Decode<<<S as BlockStore>::Params as StoreParams>::Codecs>,
 {
     async fn load_link(&mut self, link: &Cid) -> Result<Option<Ipld>, String> {
-        if let Some(store) = &mut self.store {
-            let block = match store.get(link) {
-                Ok(block) => block,
-                Err(e) => return Err(e.to_string()),
-            };
-            let node = match block.ipld() {
-                Ok(node) => node,
-                Err(e) => return Err(e.to_string()),
-            };
-            return Ok(Some(node));
-        }
-        Err("MissingStore".to_string())
+        let block = match self.store.get(link) {
+            Ok(block) => block,
+            Err(_) => return Ok(None),
+        };
+        let node = match block.ipld() {
+            Ok(node) => node,
+            Err(e) => return Err(e.to_string()),
+        };
+        Ok(Some(node))
     }
 }
 
@@ -435,7 +427,7 @@ pub struct BlockCallbackLoader<S, F> {
 impl<S, F> BlockCallbackLoader<S, F>
 where
     S: BlockStore,
-    F: FnMut(Option<Block<S::Params>>) -> Result<(), String> + Send + Sync,
+    F: FnMut(&Cid, Option<Block<S::Params>>) -> Result<(), String> + Send + Sync,
 {
     pub fn new(store: Arc<S>, cb: F) -> Self {
         Self { store, cb }
@@ -446,19 +438,22 @@ where
 impl<S, F> LinkLoader for BlockCallbackLoader<S, F>
 where
     S: BlockStore,
-    F: FnMut(Option<Block<S::Params>>) -> Result<(), String> + Send + Sync,
+    F: FnMut(&Cid, Option<Block<S::Params>>) -> Result<(), String> + Send + Sync,
     Ipld: Decode<<S::Params as StoreParams>::Codecs>,
 {
     async fn load_link(&mut self, link: &Cid) -> Result<Option<Ipld>, String> {
         let block = match self.store.get(link) {
             Ok(block) => block,
-            Err(e) => return Err(e.to_string()),
+            Err(_) => {
+                (self.cb)(link, None)?;
+                return Ok(None);
+            }
         };
         let node = match block.ipld() {
             Ok(node) => node,
             Err(e) => return Err(e.to_string()),
         };
-        (self.cb)(Some(block))?;
+        (self.cb)(link, Some(block))?;
         Ok(Some(node))
     }
 }
@@ -586,6 +581,7 @@ mod tests {
     use libipld::cbor::DagCborCodec;
     use libipld::ipld;
     use libipld::multihash::Code;
+    use libipld::store::DefaultParams;
     use std::sync::{Arc, Mutex};
 
     struct ExpectVisit {
@@ -671,7 +667,7 @@ mod tests {
             },
         ];
 
-        let loader = StoreLoader { store: Some(store) };
+        let loader = StoreLoader { store };
 
         TestData {
             node: parent,
@@ -699,7 +695,7 @@ mod tests {
         };
 
         let mut progress = Progress {
-            loader: Some(loader),
+            loader,
             path: Path::default(),
             last_block: None,
         };
@@ -747,7 +743,7 @@ mod tests {
         let selector: Selector = serde_json::from_str(sel_data).unwrap();
 
         let mut progress = Progress {
-            loader: Some(loader),
+            loader,
             path: Path::default(),
             last_block: None,
         };
@@ -781,7 +777,7 @@ mod tests {
         let selector = Selector::unmarshal_cbor(&sel_data).unwrap();
 
         let mut progress = Progress {
-            loader: Some(loader),
+            loader,
             path: Path::default(),
             last_block: None,
         };
@@ -820,7 +816,7 @@ mod tests {
         };
 
         let mut progress = Progress {
-            loader: Some(loader),
+            loader,
             path: Path::default(),
             last_block: None,
         };
@@ -883,7 +879,7 @@ mod tests {
         join!(
             async move {
                 let mut progress = Progress {
-                    loader: Some(loader),
+                    loader,
                     path: Path::default(),
                     last_block: None,
                 };
@@ -908,5 +904,78 @@ mod tests {
 
         let current_idx = *index.lock().unwrap();
         assert_eq!(current_idx, 12)
+    }
+
+    #[async_std::test]
+    async fn traverse_missing_blocks() {
+        let store = MemoryBlockStore::default();
+
+        let leaf1 = ipld!({ "name": "leaf1", "size": 12 });
+        let leaf1_block = Block::encode(DagCborCodec, Code::Sha2_256, &leaf1).unwrap();
+        store.insert(&leaf1_block).unwrap();
+
+        // leaf2 is not present in the blockstore
+        let leaf2 = ipld!({ "name": "leaf2", "size": 6 });
+        let leaf2_block =
+            Block::<DefaultParams>::encode(DagCborCodec, Code::Sha2_256, &leaf2).unwrap();
+
+        let parent = ipld!({
+            "children": [leaf1_block.cid(), leaf2_block.cid()],
+            "favouriteChild": leaf2_block.cid(),
+            "name": "parent",
+        });
+        let parent_block = Block::encode(DagCborCodec, Code::Sha2_256, &parent).unwrap();
+        store.insert(&parent_block).unwrap();
+
+        let expect: [ExpectVisit; 6] = [
+            ExpectVisit {
+                path: Path::from(""),
+            },
+            ExpectVisit {
+                path: Path::from("children"),
+            },
+            ExpectVisit {
+                path: Path::from("children/0"),
+            },
+            ExpectVisit {
+                path: Path::from("children/0/name"),
+            },
+            ExpectVisit {
+                path: Path::from("children/0/size"),
+            },
+            ExpectVisit {
+                path: Path::from("name"),
+            },
+        ];
+        let loader = StoreLoader { store };
+
+        let selector = Selector::ExploreRecursive {
+            limit: RecursionLimit::None,
+            sequence: Box::new(Selector::ExploreAll {
+                next: Box::new(Selector::ExploreRecursiveEdge),
+            }),
+            current: None,
+        };
+
+        let mut progress = Progress {
+            loader,
+            path: Path::default(),
+            last_block: None,
+        };
+
+        let index = Arc::new(Mutex::new(0));
+        progress
+            .walk_adv(&parent, selector, &|prog, _ipld| -> Result<(), String> {
+                let mut idx = index.lock().unwrap();
+                let exp = &expect[*idx];
+                assert_eq!(prog.path, exp.path);
+                *idx += 1;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let current_idx = *index.lock().unwrap();
+        assert_eq!(current_idx, 6)
     }
 }

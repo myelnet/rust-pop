@@ -37,7 +37,7 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::io::{self, Cursor};
 use std::marker::PhantomData;
-use std::sync::{Arc};
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 const MAX_CID_SIZE: usize = 4 * 10 + 64;
@@ -78,7 +78,7 @@ impl<P: StoreParams> MessageCodec for GraphsyncCodec<P> {
         let packet = upgrade::read_length_prefixed(io, self.max_msg_size)
             .await
             .map_err(other)?;
-        if packet.len() == 0 {
+        if packet.is_empty() {
             return Err(io::Error::new(io::ErrorKind::Other, "End of output"));
         }
         let message = GraphsyncMessage::from_bytes(&packet)
@@ -104,12 +104,45 @@ impl<P: StoreParams> MessageCodec for GraphsyncCodec<P> {
 
 #[derive(Debug)]
 pub enum GraphsyncEvent {
+    RequestAccepted(PeerId, GraphsyncRequest),
+    ResponseCompleted(PeerId, Vec<RequestId>),
+    // We may receive more than one response at once
+    ResponseReceived(Vec<GraphsyncResponse>),
     Progress {
         req_id: RequestId,
         link: Cid,
         size: usize,
     },
     Complete(RequestId, Result<(), EncodingError>),
+}
+
+pub type IncomingRequestHook =
+    Arc<dyn Fn(&PeerId, &GraphsyncRequest) -> (bool, Extensions) + Send + Sync>;
+
+/// requester, root, size
+pub type OutgoingBlockHook = Arc<dyn Fn(&PeerId, &Cid, usize) -> Extensions + Send + Sync>;
+
+pub struct GraphsyncHooks {
+    incoming_request: IncomingRequestHook,
+    outgoing_block: OutgoingBlockHook,
+}
+
+impl Default for GraphsyncHooks {
+    fn default() -> Self {
+        Self {
+            incoming_request: Arc::new(|_, _| (true, Extensions::default())),
+            outgoing_block: Arc::new(|_, _, _| Extensions::default()),
+        }
+    }
+}
+
+impl GraphsyncHooks {
+    pub fn register_incoming_request(&mut self, f: IncomingRequestHook) {
+        self.incoming_request = f;
+    }
+    pub fn register_outgoing_block(&mut self, f: OutgoingBlockHook) {
+        self.outgoing_block = f
+    }
 }
 
 #[derive(Clone)]
@@ -136,10 +169,10 @@ impl Default for Config {
 }
 
 pub struct Graphsync<S: BlockStore> {
-    config: Config,
     inner: RequestResponse<GraphsyncCodec<S::Params>>,
     request_manager: RequestManager<S>,
     response_manager: ResponseManager<S>,
+    hooks: Arc<RwLock<GraphsyncHooks>>,
 }
 
 impl<S: 'static + BlockStore> Graphsync<S>
@@ -152,18 +185,26 @@ where
         rr_config.set_connection_keep_alive(config.connection_keep_alive);
         rr_config.set_request_timeout(config.request_timeout);
         let inner = RequestResponse::new(GraphsyncCodec::default(), protocols, rr_config);
+        let hooks = Arc::new(RwLock::new(GraphsyncHooks::default()));
         Self {
-            config,
             inner,
             request_manager: RequestManager::new(store.clone()),
-            response_manager: ResponseManager::new(store.clone()),
+            response_manager: ResponseManager::new(store, hooks.clone()),
+            hooks,
         }
     }
     pub fn add_address(&mut self, peer_id: &PeerId, addr: Multiaddr) {
         self.inner.add_address(peer_id, addr);
     }
-    pub fn request(&mut self, peer_id: PeerId, root: Cid, selector: Selector) -> RequestId {
-        self.request_manager.start_request(peer_id, root, selector)
+    pub fn request(
+        &mut self,
+        peer_id: PeerId,
+        root: Cid,
+        selector: Selector,
+        extensions: Extensions,
+    ) -> RequestId {
+        self.request_manager
+            .start_request(peer_id, root, selector, extensions)
     }
     fn inject_outbound_failure(
         &mut self,
@@ -184,6 +225,12 @@ where
     ) {
         println!("inbound failure {} {} {:?}", peer, request_id, error);
     }
+    pub fn register_incoming_request_hook(&mut self, hook: IncomingRequestHook) {
+        self.hooks.write().unwrap().register_incoming_request(hook);
+    }
+    pub fn register_outgoing_block_hook(&mut self, hook: OutgoingBlockHook) {
+        self.hooks.write().unwrap().register_outgoing_block(hook);
+    }
 }
 
 impl<S: 'static + BlockStore> NetworkBehaviour for Graphsync<S>
@@ -195,7 +242,7 @@ where
     type OutEvent = GraphsyncEvent;
 
     fn new_handler(&mut self) -> Self::ProtocolsHandler {
-        return self.inner.new_handler();
+        self.inner.new_handler()
     }
 
     fn addresses_of_peer(&mut self, peer_id: &PeerId) -> Vec<Multiaddr> {
@@ -286,12 +333,22 @@ where
             while let Poll::Ready(Some(event)) = self.response_manager.next(ctx) {
                 exit = false;
                 match event {
+                    ResponseEvent::Accepted(peer, req) => {
+                        return Poll::Ready(NetworkBehaviourAction::GenerateEvent(
+                            GraphsyncEvent::RequestAccepted(peer, req),
+                        ));
+                    }
                     ResponseEvent::Partial(peer, msg) => {
                         self.inner.send_response(&peer, msg);
                     }
                     ResponseEvent::Completed(peer, msg) => {
+                        let req_ids: Vec<RequestId> =
+                            msg.responses.iter().map(|(_, r)| r.id).collect();
                         self.inner.send_response(&peer, msg);
                         self.inner.finish_outbound(&peer);
+                        return Poll::Ready(NetworkBehaviourAction::GenerateEvent(
+                            GraphsyncEvent::ResponseCompleted(peer, req_ids),
+                        ));
                     }
                 }
             }
@@ -349,17 +406,17 @@ where
                     RequestResponseEvent::Message { peer, message } => {
                         let msg = message.message;
                         if !msg.requests.is_empty() {
-                            for (_, req) in msg.requests {
-                                self.response_manager.inject_request(
-                                    req.id,
-                                    peer,
-                                    req.root,
-                                    req.selector.clone(),
-                                );
-                                break;
+                            for req in msg.requests.values() {
+                                self.response_manager.inject_request(peer, req);
                             }
-                        } else {
+                        }
+                        if !msg.responses.is_empty() {
+                            let responses: Vec<GraphsyncResponse> =
+                                msg.responses.values().map(|res| res.clone()).collect();
                             self.request_manager.inject_response(msg);
+                            return Poll::Ready(NetworkBehaviourAction::GenerateEvent(
+                                GraphsyncEvent::ResponseReceived(responses),
+                            ));
                         }
                     }
                     RequestResponseEvent::OutboundFailure {
@@ -401,21 +458,11 @@ pub struct GraphsyncResponse {
     pub extensions: Extensions,
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone, Default)]
 pub struct GraphsyncMessage {
     pub requests: FnvHashMap<RequestId, GraphsyncRequest>,
     pub responses: FnvHashMap<RequestId, GraphsyncResponse>,
     pub blocks: Vec<(Vec<u8>, Vec<u8>)>,
-}
-
-impl Default for GraphsyncMessage {
-    fn default() -> Self {
-        Self {
-            requests: Default::default(),
-            responses: Default::default(),
-            blocks: Default::default(),
-        }
-    }
 }
 
 impl GraphsyncMessage {
@@ -426,7 +473,7 @@ impl GraphsyncMessage {
     }
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, EncodingError> {
         let pbmsg = pb::Message::parse_from_bytes(bytes)?;
-        Ok(GraphsyncMessage::try_from(pbmsg)?)
+        GraphsyncMessage::try_from(pbmsg)
     }
 }
 
@@ -523,7 +570,7 @@ impl From<Request> for GraphsyncMessage {
                 extensions: Default::default(),
             },
         );
-        return msg;
+        msg
     }
 }
 
@@ -538,7 +585,7 @@ impl From<Response> for GraphsyncMessage {
                 extensions: res.extensions,
             },
         );
-        return msg;
+        msg
     }
 }
 
@@ -850,13 +897,21 @@ mod tests {
         }
     }
 
+    fn assert_response_ok(event: Option<GraphsyncEvent>, id: RequestId) {
+        if let Some(GraphsyncEvent::ResponseReceived(responses)) = event {
+            assert_eq!(responses[0].id, id);
+        } else {
+            panic!("{:?} is not a response event", event);
+        }
+    }
+
     fn assert_progress_ok(event: Option<GraphsyncEvent>, id: RequestId, cid: Cid, size2: usize) {
         if let Some(GraphsyncEvent::Progress { req_id, link, size }) = event {
             assert_eq!(req_id, id);
             assert_eq!(link, cid);
             assert_eq!(size, size2);
         } else {
-            panic!("{:?} is not a complete event", event);
+            panic!("{:?} is not a progress event", event);
         }
     }
 
@@ -901,10 +956,14 @@ mod tests {
             current: None,
         };
 
-        let id = peer2
-            .swarm()
-            .behaviour_mut()
-            .request(peer1, parent_block.cid().clone(), selector);
+        let id = peer2.swarm().behaviour_mut().request(
+            peer1,
+            parent_block.cid().clone(),
+            selector,
+            Extensions::default(),
+        );
+
+        assert_response_ok(peer2.next().await, id);
 
         assert_progress_ok(
             peer2.next().await,
@@ -928,11 +987,61 @@ mod tests {
     }
 
     #[async_std::test]
+    async fn test_request_entries() {
+        let peer1 = Peer::new(MemoryBlockStore::default());
+        let mut peer2 = Peer::new(MemoryBlockStore::default());
+        peer2.add_address(&peer1);
+
+        let store = peer1.store.clone();
+        let peer1 = peer1.spawn("peer1");
+
+        let leaf1 = ipld!({ "name": "leaf1", "size": 12 });
+        let leaf1_block = Block::encode(DagCborCodec, Code::Sha2_256, &leaf1).unwrap();
+        store.insert(&leaf1_block).unwrap();
+
+        let leaf2 = ipld!({ "name": "leaf2", "size": 6 });
+        let leaf2_block = Block::encode(DagCborCodec, Code::Sha2_256, &leaf2).unwrap();
+        store.insert(&leaf2_block).unwrap();
+
+        let parent = ipld!({
+            "children": [leaf1_block.cid(), leaf2_block.cid()],
+            "favouriteChild": leaf2_block.cid(),
+            "name": "parent",
+        });
+        let parent_block = Block::encode(DagCborCodec, Code::Sha2_256, &parent).unwrap();
+        store.insert(&parent_block).unwrap();
+
+        let selector = Selector::ExploreRecursive {
+            limit: RecursionLimit::Depth(1),
+            sequence: Box::new(Selector::ExploreAll {
+                next: Box::new(Selector::ExploreRecursiveEdge),
+            }),
+            current: None,
+        };
+
+        let id = peer2.swarm().behaviour_mut().request(
+            peer1,
+            parent_block.cid().clone(),
+            selector,
+            Extensions::default(),
+        );
+
+        assert_response_ok(peer2.next().await, id);
+
+        assert_progress_ok(
+            peer2.next().await,
+            id,
+            Cid::try_from("bafyreib6ba6oakwqzsg4vv6sogb7yysu5yqqe7dqth6z3nulqkyj7lom4a").unwrap(),
+            161,
+        );
+        assert_complete_ok(peer2.next().await, id);
+    }
+
+    #[async_std::test]
     async fn test_unixfs_transfer() {
         use dag_service::{add, cat};
         use rand::prelude::*;
 
-        // let bs = ;
         let peer1 = Peer::new(MemoryBlockStore::default());
         let mut peer2 = Peer::new(MemoryBlockStore::default());
         peer2.add_address(&peer1);
@@ -958,9 +1067,13 @@ mod tests {
 
         let cid = root.unwrap();
 
-        let id = peer2.swarm().behaviour_mut().request(peer1, cid, selector);
+        let id = peer2
+            .swarm()
+            .behaviour_mut()
+            .request(peer1, cid, selector, Extensions::default());
 
-        for n in 1..=17 {
+        let mut n = 0;
+        loop {
             if let Some(event) = peer2.next().await {
                 match event {
                     GraphsyncEvent::Progress { req_id, size, .. } => {
@@ -971,13 +1084,20 @@ mod tests {
                         assert_eq!(req_id, id);
                         assert_eq!(size, exp_size);
                     }
+                    GraphsyncEvent::ResponseReceived(responses) => {}
+                    GraphsyncEvent::Complete(rid, Ok(())) => {
+                        assert_eq!(rid, id);
+                        break;
+                    }
                     _ => {
-                        panic!("{:?} is not a complete event", event);
+                        panic!("transfer failed {:?}", event);
                     }
                 }
+            } else {
+                break;
             }
+            n += 1;
         }
-        assert_complete_ok(peer2.next().await, id);
 
         let store = peer2.store.clone();
 

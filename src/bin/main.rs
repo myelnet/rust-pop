@@ -92,6 +92,8 @@ async fn start() -> Result<(), Box<dyn Error>> {
                 node.run_request(remote, peer_id, cid).await;
             }
         }
+    } else {
+        node.fill_random_data();
     }
 
     let arc_ref = Arc::clone(&bs);

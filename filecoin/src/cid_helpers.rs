@@ -11,16 +11,22 @@ const MULTIBASE_IDENTITY: u8 = 0;
 const CBOR_TAG_CID: u64 = 42;
 
 // Wrapper for correctly serializing the Paych Actor Bytes
-#[derive(PartialEq, Eq, Clone, Default, Hash, PartialOrd, Ord)]
-pub struct PaychActorCodeId {
+#[derive(PartialEq, Eq, Clone, Default, Hash, PartialOrd, Ord, Debug)]
+pub struct CidCbor {
     pub bytes: Vec<u8>,
 }
-impl PaychActorCodeId {
+impl CidCbor {
     pub fn bytes(&self) -> &Vec<u8> {
         return &self.bytes;
     }
+    pub fn to_cid(&self) -> Option<Cid> {
+        match Cid::try_from(self.bytes.clone()) {
+            Ok(cid) => Some(cid),
+            Err(_) => None,
+        }
+    }
 }
-impl Serialize for PaychActorCodeId {
+impl Serialize for CidCbor {
     fn serialize<S>(&self, s: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -36,7 +42,7 @@ impl Serialize for PaychActorCodeId {
     }
 }
 
-impl<'de> Deserialize<'de> for PaychActorCodeId {
+impl<'de> Deserialize<'de> for CidCbor {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
@@ -49,9 +55,17 @@ impl<'de> Deserialize<'de> for PaychActorCodeId {
                 if bz.first() == Some(&MULTIBASE_IDENTITY) {
                     bz.remove(0);
                 }
-                return Ok(PaychActorCodeId { bytes: bz });
+                return Ok(CidCbor { bytes: bz });
             }
             Some(_) => Err(serde::de::Error::custom("unexpected tag")),
+        }
+    }
+}
+
+impl From<Cid> for CidCbor {
+    fn from(cid: Cid) -> Self {
+        Self {
+            bytes: cid.to_bytes(),
         }
     }
 }

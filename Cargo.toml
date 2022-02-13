@@ -6,6 +6,7 @@ members = [
   "graphsync",
   "dag_service",
   "blockstore",
+  "data_transfer",
 ]
 
 [package]
@@ -35,7 +36,7 @@ async-std = { version = "1.6.2", features = ["attributes", "unstable"] }
 graphsync = { path = "./graphsync", default_features=false }
 dag_service = { path = "./dag_service", default_features=false }
 blockstore = { path = "./blockstore", default_features=false }
-
+data_transfer = { path = "./data_transfer", default_features=false }
 
 getrandom = { version = "0.2", features = ["js"] }
 
@@ -61,7 +62,7 @@ chrono = { version = "0.4", features = ["wasmbind"], optional = true }
 
 [features]
 default = ["native"]
-native = ["blockstore/native", "graphsync/native", "dag_service/native"]
+native = ["blockstore/native", "graphsync/native", "dag_service/native", "data_transfer/native"]
 browser = [
   "libp2p-wasm-ext",
   "wasm-bindgen",
@@ -75,5 +76,6 @@ browser = [
   "log",
   "blockstore/browser",
   "graphsync/browser",
+  "data_transfer/browser",
   "dag_service/browser"
 ]

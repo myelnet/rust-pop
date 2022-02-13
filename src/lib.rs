@@ -1,5 +1,7 @@
 #[cfg(feature = "browser")]
 mod browser;
+#[cfg(feature = "native")]
+mod server;
 
 use blockstore::types::BlockStore;
 use dag_service;
@@ -19,12 +21,10 @@ use libp2p::{
     Transport,
 };
 use rand::prelude::*;
-use std::fs::File;
-use std::io::Read;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use warp::{http, Filter}; // 0.3.5
 
+#[cfg(not(target_os = "unknown"))]
 use libp2p::{dns, tcp, websocket};
 
 #[cfg(not(target_os = "unknown"))]
@@ -79,6 +79,9 @@ where
     }
 
     pub async fn run(mut self) {
+        #[cfg(feature = "native")]
+        server::start_server(self.store.clone()).await;
+
         loop {
             match self.swarm.select_next_some().await {
                 SwarmEvent::NewListenAddr { address, .. } => println!("Listening on {:?}", address),
@@ -156,9 +159,6 @@ pub fn build_transport(
         )
     });
 
-    // let transport = libp2p::tcp::TcpConfig::new().nodelay(true);
-    // let transport = libp2p::websocket::WsConfig::new(transport.clone()).or_transport(transport);
-    // let transport = async_std::task::block_on(libp2p::dns::DnsConfig::system(transport)).unwrap();
     let auth_config = {
         let dh_keys = noise::Keypair::<noise::X25519Spec>::new()
             .into_authentic(&local_key)
@@ -183,63 +183,4 @@ pub fn build_transport(
         .multiplex(mplex_config)
         .timeout(Duration::from_secs(20))
         .boxed()
-}
-
-#[derive(Debug)]
-pub struct Server<B: BlockStore>
-where
-    Ipld: Decode<<<B as BlockStore>::Params as StoreParams>::Codecs>,
-{
-    store: Arc<B>,
-}
-
-impl<B: BlockStore> Server<B>
-where
-    Ipld: Decode<<<B as BlockStore>::Params as StoreParams>::Codecs>,
-{
-    fn new(store: Arc<B>) -> Self {
-        Self { store: store }
-    }
-
-    fn start(self) {
-
-        let read_File = |s: String| {
-            self.read_file(&s);
-            warp::reply::with_status("Added file to the blockstore", http::StatusCode::CREATED)
-        };
-        let add_file = warp::post()
-            .and(warp::path("add"))
-            .and(warp::body::bytes())
-            .map(|bytes: warp::hyper::body::Bytes| {
-                return std::str::from_utf8(&bytes).unwrap().to_string();
-            })
-            .map(;
-    }
-
-    pub async fn read_file(self, path: &String)
-    where
-        Ipld: Decode<<<B as BlockStore>::Params as StoreParams>::Codecs>,
-    {
-        match File::open(&path) {
-            Ok(mut f) => {
-                let mut buffer = Vec::new();
-                // read the whole file
-                match f.read_to_end(&mut buffer) {
-                    Ok(size) => {
-                        let root = dag_service::add(self.store.clone(), &buffer).unwrap();
-                        println!(
-                            "added data from file with root {:?} and size {:?}",
-                            root, size
-                        );
-                    }
-                    Err(_) => {
-                        println!("could not load file into bytes")
-                    }
-                }
-            }
-            Err(_) => {
-                println!("file not found")
-            }
-        }
-    }
 }

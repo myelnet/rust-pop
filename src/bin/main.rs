@@ -1,20 +1,12 @@
 use blockstore::db::Db as BlockstoreDB;
 use blockstore::lfu::LfuBlockstore;
-use blockstore::types::BlockStore;
 use clap::{App, Arg};
-use libipld::codec::Decode;
-use libipld::store::StoreParams;
 use libipld::Cid;
-use libipld::Ipld;
 use libp2p::{Multiaddr, PeerId};
 use pop::{Node, NodeConfig};
 use std::error::Error;
-use std::fs::File;
-use std::io::Read;
 use std::str::FromStr;
-use std::sync::{Arc, Mutex};
-use warp::{http, Filter}; // 0.3.5
-                                                    // #[tokio::main]
+// #[tokio::main]
 #[async_std::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     let app = App::new("PoP")
@@ -44,8 +36,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let matches = app.get_matches();
 
-    println!("{:?}", matches);
-
     match matches.subcommand_name() {
         Some("start") => start().await,
         Some("add") => {
@@ -66,7 +56,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 async fn add(path: String) -> Result<(), Box<dyn Error>> {
     let client = reqwest::Client::new();
     client
-        .post("http://127.0.0.1:2021/add")
+        .post("http://127.0.0.1:8000/add")
         .body(path)
         .send()
         .await?;
@@ -96,22 +86,7 @@ async fn start() -> Result<(), Box<dyn Error>> {
         node.fill_random_data();
     }
 
-    let arc_ref = Arc::clone(&bs);
-    let add_file = warp::post()
-        .and(warp::path("add"))
-        .and(warp::body::bytes())
-        .map(|bytes: warp::hyper::body::Bytes| {
-            return std::str::from_utf8(&bytes).unwrap().to_string();
-        })
-        .map(move |s: String| {
-            read_file(arc_ref.clone(), &s);
-            warp::reply::with_status("Added file to the blockstore", http::StatusCode::CREATED)
-        });
-    //
-    let server = warp::serve(add_file);
-    println!("MAde it hereeee");
-
-    futures::future::join(node.run(), server.run(([127, 0, 0, 1], 2021))).await;
+    node.run().await;
 
     Ok(())
 }

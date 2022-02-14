@@ -1,11 +1,12 @@
 use blockstore::db::Db as BlockstoreDB;
 use blockstore::lfu::LfuBlockstore;
 use clap::{App, Arg};
-use libipld::Cid;
-use libp2p::{Multiaddr, PeerId};
+// use libipld::Cid;
+// // use libp2p::{Multiaddr, PeerId};
 use pop::{Node, NodeConfig};
+use std::collections::HashMap;
 use std::error::Error;
-use std::str::FromStr;
+// use std::str::FromStr;
 
 #[async_std::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -34,6 +35,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 ),
         )
         .subcommand(
+            // TODO: implement get method on cli
             App::new("get")
                 .override_help("gets a file from a peer")
                 // .arg(
@@ -63,6 +65,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         .long("cid")
                         .required(true)
                         .help("path to save file to"),
+                )
+                .arg(
+                    Arg::new("path")
+                        .short('p')
+                        .takes_value(true)
+                        .long("path")
+                        .required(true)
+                        .help("path to save file to"),
                 ),
         );
 
@@ -71,25 +81,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
     match matches.subcommand_name() {
         Some("start") => start().await,
         Some("add") => {
+            let flags = matches.subcommand().unwrap().1;
             //  can safely unwrap subcommand because we have just checked its name
-            add(matches
-                .subcommand()
-                .unwrap()
-                .1
-                .values_of("file")
-                .unwrap()
-                .collect())
-            .await
+            add(flags.values_of("file").unwrap().collect()).await
         }
         Some("export") => {
+            let flags = matches.subcommand().unwrap().1;
             export(
-                matches
-                    .subcommand()
-                    .unwrap()
-                    .1
-                    .values_of("cid")
-                    .unwrap()
-                    .collect(),
+                flags.values_of("cid").unwrap().collect(),
+                flags.values_of("path").unwrap().collect(),
             )
             .await
         }
@@ -114,11 +114,12 @@ async fn add(path: String) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-async fn export(cid: String) -> Result<(), Box<dyn Error>> {
+async fn export(cid: String, path: String) -> Result<(), Box<dyn Error>> {
     let client = reqwest::Client::new();
+    let map = HashMap::from([("cid", cid), ("path", path)]);
     let resp = client
         .post("http://127.0.0.1:8000/export")
-        .body(cid)
+        .json(&map)
         .send()
         .await?;
     match resp.status() {

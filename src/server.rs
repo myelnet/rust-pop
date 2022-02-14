@@ -3,6 +3,7 @@ use dag_service;
 use libipld::codec::Decode;
 use libipld::store::StoreParams;
 use libipld::{Cid, Ipld};
+use std::collections::HashMap;
 use std::fs::File;
 use std::ops::Deref;
 use std::sync::Arc;
@@ -27,13 +28,16 @@ where
 
     let export_file = warp::post()
         .and(warp::path("export"))
-        .and(warp::body::bytes())
-        .map(|bytes: warp::hyper::body::Bytes| {
-            return Arc::new(std::str::from_utf8(&bytes).unwrap().to_string());
-        })
+        .and(warp::body::json())
         .and(store_filter.clone())
-        .and_then(|key: Arc<String>, store: Arc<B>| {
-            return export_file(key.clone(), store.clone());
+        .and_then(|simple_map: HashMap<String, String>, store: Arc<B>| {
+            //  can safely unwrap entries as if they are None the method will just return a failure
+            //  response to the requesting client
+            return export_file(
+                Arc::new(simple_map.get("cid").unwrap().to_string()),
+                Arc::new(simple_map.get("path").unwrap().to_string()),
+                store.clone(),
+            );
         });
 
     let routes = add_file.or(export_file);
@@ -59,7 +63,7 @@ where
                         http::StatusCode::CREATED,
                     ))
                 }
-                Err(e) => {
+                Err(_) => {
                     println!("failed to read buffer");
                     Err(warp::reject::not_found())
                 }
@@ -74,6 +78,7 @@ where
 
 pub async fn export_file<B: BlockStore>(
     key: Arc<String>,
+    path: Arc<String>,
     store: Arc<B>,
 ) -> Result<impl warp::Reply, warp::Rejection>
 where
@@ -81,17 +86,17 @@ where
 {
     match Cid::try_from((*key).deref()) {
         Ok(cid) => {
-            let file = File::create("foo.txt").unwrap();
+            let file = File::create((*path).deref()).unwrap();
             let res = dag_service::cat_to_write(store.clone(), cid, file);
             match res {
-                Ok(data) => {
+                Ok(_) => {
                     println!("loaded file {:?} from blockstore", cid.to_string());
                     Ok(warp::reply::with_status(
-                        "Added file to the blockstore",
+                        "read file from blockstore",
                         http::StatusCode::CREATED,
                     ))
                 }
-                Err(e) => {
+                Err(_) => {
                     println!("failed to read from blockstore");
                     Err(warp::reject::not_found())
                 }

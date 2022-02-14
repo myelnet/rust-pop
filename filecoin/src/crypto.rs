@@ -199,7 +199,7 @@ pub fn ecrecover(
 mod tests {
     use super::*;
     use libsecp256k1::{sign, PublicKey, SecretKey};
-    use rand::{Rng, SeedableRng};
+    use rand::SeedableRng;
     use rand_chacha::ChaCha8Rng;
 
     #[test]
@@ -282,7 +282,7 @@ pub mod json {
         #[serde(transparent)]
         pub struct SignatureTypeJson(#[serde(with = "self")] pub SignatureType);
 
-        pub fn serialize<S>(m: &SignatureType, serializer: S) -> Result<S::Ok, S::Error>
+        pub fn serialize<S>(_m: &SignatureType, serializer: S) -> Result<S::Ok, S::Error>
         where
             S: Serializer,
         {
@@ -294,7 +294,7 @@ pub mod json {
         where
             D: Deserializer<'de>,
         {
-            let json_enum: JsonHelperEnum = Deserialize::deserialize(deserializer)?;
+            let _json_enum: JsonHelperEnum = Deserialize::deserialize(deserializer)?;
 
             let signature_type = SignatureType::Secp256k1;
             Ok(signature_type)

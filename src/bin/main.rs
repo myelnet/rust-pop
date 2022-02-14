@@ -32,6 +32,38 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         .required(true)
                         .help("file to add to node blockstore"),
                 ),
+        )
+        .subcommand(
+            App::new("get")
+                .override_help("gets a file from a peer")
+                // .arg(
+                //     Arg::new("peer")
+                //         .short('p')
+                //         .takes_value(true)
+                //         .long("file")
+                //         .required(false)
+                //         .help("path to save file to"),
+                // )
+                .arg(
+                    Arg::new("path")
+                        .short('f')
+                        .takes_value(true)
+                        .long("file")
+                        .required(false)
+                        .help("path to save file to"),
+                ),
+        )
+        .subcommand(
+            App::new("export")
+                .override_help("gets a file from blockstore")
+                .arg(
+                    Arg::new("cid")
+                        .short('c')
+                        .takes_value(true)
+                        .long("cid")
+                        .required(true)
+                        .help("path to save file to"),
+                ),
         );
 
     let matches = app.get_matches();
@@ -47,6 +79,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 .values_of("file")
                 .unwrap()
                 .collect())
+            .await
+        }
+        Some("export") => {
+            export(
+                matches
+                    .subcommand()
+                    .unwrap()
+                    .1
+                    .values_of("cid")
+                    .unwrap()
+                    .collect(),
+            )
             .await
         }
         _ => unreachable!("parser should ensure only valid subcommand names are used"),
@@ -70,6 +114,23 @@ async fn add(path: String) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+async fn export(cid: String) -> Result<(), Box<dyn Error>> {
+    let client = reqwest::Client::new();
+    let resp = client
+        .post("http://127.0.0.1:8000/export")
+        .body(cid)
+        .send()
+        .await?;
+    match resp.status() {
+        reqwest::StatusCode::CREATED => println!("{:?}: success", resp.status()),
+        reqwest::StatusCode::NOT_FOUND => {
+            println!("{:?}: could not load file", resp.status());
+        }
+        s => println!("Received response status: {:?}", s),
+    };
+    Ok(())
+}
+
 async fn start() -> Result<(), Box<dyn Error>> {
     let bs = LfuBlockstore::new(0, BlockstoreDB::open("path")?)?;
     let config = NodeConfig {
@@ -78,20 +139,7 @@ async fn start() -> Result<(), Box<dyn Error>> {
         blockstore: bs,
     };
 
-    let mut node = Node::new(config);
-
-    if let Some(addr) = std::env::args().nth(2) {
-        let remote: Multiaddr = addr.parse()?;
-        if let Some(peer) = std::env::args().nth(3) {
-            let peer_id = PeerId::from_str(&peer)?;
-            if let Some(key) = std::env::args().nth(4) {
-                let cid = Cid::try_from(key)?;
-                node.run_request(remote, peer_id, cid).await;
-            }
-        }
-    } else {
-        node.fill_random_data();
-    }
+    let node = Node::new(config);
 
     node.run().await;
 

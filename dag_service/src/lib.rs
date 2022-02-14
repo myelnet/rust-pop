@@ -1,6 +1,6 @@
 use blockstore::types::BlockStore;
 use libipld::{Block, Cid};
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::sync::Arc;
 use unixfs_v1::file::{adder::FileAdder, visit::IdleFileVisit};
 
@@ -88,6 +88,36 @@ pub fn cat<S: BlockStore>(store: Arc<S>, root: Cid) -> Result<Vec<u8>, String> {
     }
 
     Ok(buf)
+}
+
+pub fn cat_to_write<S: BlockStore, F: Write>(
+    store: Arc<S>,
+    root: Cid,
+    out: F,
+) -> Result<(), String> {
+    let mut buf = BufWriter::with_capacity(100000, out);
+
+    let first = store.get(&root).map_err(|e| e.to_string())?;
+
+    let (content, _, _metadata, mut step) = IdleFileVisit::default()
+        .start(first.data())
+        .map_err(|e| e.to_string())?;
+    Write::write_all(&mut buf, content).map_err(|e| e.to_string())?;
+
+    while let Some(visit) = step {
+        let (first, _) = visit.pending_links();
+        let block = store.get(&first).map_err(|e| e.to_string())?;
+
+        let (content, next_step) = visit
+            .continue_walk(block.data(), &mut None)
+            .map_err(|e| e.to_string())?;
+        Write::write_all(&mut buf, content).map_err(|e| e.to_string())?;
+        step = next_step;
+    }
+
+    buf.flush().unwrap();
+
+    Ok(())
 }
 
 #[cfg(test)]

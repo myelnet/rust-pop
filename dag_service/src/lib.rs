@@ -1,6 +1,6 @@
 use blockstore::types::BlockStore;
 use libipld::{Block, Cid};
-use std::io::{BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::sync::Arc;
 use unixfs_v1::file::{adder::FileAdder, visit::IdleFileVisit};
 
@@ -34,38 +34,36 @@ pub fn add_from_read<S: BlockStore, F: Read>(
     data: &mut F,
 ) -> Result<Option<Cid>, String> {
     let mut adder = FileAdder::default();
-    // use buf reader for speed / efficiency
-    let mut buf = BufReader::new(data);
+    // use BufReader for speed / efficiency and 100KiB buffer
+    let mut buf = BufReader::with_capacity(100000, data);
 
     loop {
-        // 100 KiB buffer (can't get much larger without overflowing)
-        let mut buffer = [0; 100000 as usize];
-        let res = buf.read(&mut buffer[..]);
-        match res {
-            Ok(n) => {
-                //  if reached EOF break
-                if n == 0 {
-                    break;
-                };
-                let (blocks, _) = adder.push(&buffer);
-                for (cid, bytes) in blocks {
-                    let block = Block::<S::Params>::new_unchecked(cid, bytes);
-                    store.insert(&block).map_err(|e| e.to_string())?;
-                }
+        match buf.fill_buf().unwrap() {
+            chunk if chunk.is_empty() => {
+                break;
             }
-            Err(_) => return Err("failed to read file to completion".to_string()),
+            chunk => {
+                let mut total = 0;
+                while total < chunk.len() {
+                    let (blocks, consumed) = adder.push(&chunk[total..]);
+                    total += consumed;
+                    for (cid, bytes) in blocks {
+                        let block = Block::<S::Params>::new_unchecked(cid, bytes);
+                        store.insert(&block).map_err(|e| e.to_string())?;
+                    }
+                }
+                buf.consume(total);
+            }
         }
     }
-
     let blocks = adder.finish();
-
     let mut root: Option<Cid> = None;
     for (cid, bytes) in blocks {
         root = Some(cid.clone());
         let block = Block::<S::Params>::new_unchecked(cid, bytes);
         store.insert(&block).map_err(|e| e.to_string())?;
     }
-    Ok(root)
+    return Ok(root);
 }
 
 pub fn cat<S: BlockStore>(store: Arc<S>, root: Cid) -> Result<Vec<u8>, String> {

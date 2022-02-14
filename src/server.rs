@@ -4,7 +4,6 @@ use libipld::codec::Decode;
 use libipld::store::StoreParams;
 use libipld::Ipld;
 use std::fs::File;
-use std::io::Read;
 use std::ops::Deref;
 use std::sync::Arc;
 use warp::{http, Filter};
@@ -38,20 +37,17 @@ where
 {
     match File::open((*path).deref()) {
         Ok(mut f) => {
-            let mut buffer = Vec::new();
-            // read the whole file
-            match f.read_to_end(&mut buffer) {
-                Ok(_) => {
-                    let root = dag_service::add(store.clone(), &buffer).unwrap();
+            let res = dag_service::add_from_read(store.clone(), &mut f);
+            match res {
+                Ok(root) => {
                     println!("added file {:?} to blockstore", root.unwrap().to_string());
                     Ok(warp::reply::with_status(
                         "Added file to the blockstore",
                         http::StatusCode::CREATED,
                     ))
                 }
-
-                Err(_) => {
-                    println!("could not read bytes");
+                Err(e) => {
+                    println!("failed to read buffer");
                     Err(warp::reject::not_found())
                 }
             }

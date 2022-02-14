@@ -1,5 +1,7 @@
 #[cfg(feature = "browser")]
 mod browser;
+#[cfg(feature = "native")]
+mod server;
 
 use blockstore::types::BlockStore;
 use dag_service;
@@ -10,7 +12,6 @@ use libipld::codec::Decode;
 use libipld::store::StoreParams;
 use libipld::Cid;
 use libipld::Ipld;
-
 use libp2p::futures::StreamExt;
 use libp2p::swarm::{Swarm, SwarmEvent};
 use libp2p::wasm_ext;
@@ -23,10 +24,10 @@ use rand::prelude::*;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-#[cfg(not(target_os = "unknown"))]
+#[cfg(feature = "native")]
 use libp2p::{dns, tcp, websocket};
 
-#[cfg(not(target_os = "unknown"))]
+#[cfg(feature = "native")]
 use async_std::task;
 
 const DATA_SIZE: usize = 104857600;
@@ -68,7 +69,7 @@ where
 
         // Listen on all interfaces and whatever port the OS assigns.  Websockt can't receive incoming connections
         // on browser
-        #[cfg(not(target_os = "unknown"))]
+        #[cfg(feature = "native")]
         Swarm::listen_on(&mut swarm, config.listening_multiaddr).unwrap();
 
         Node {
@@ -78,6 +79,9 @@ where
     }
 
     pub async fn run(mut self) {
+        #[cfg(feature = "native")]
+        server::start_server(self.store.clone()).await;
+
         loop {
             match self.swarm.select_next_some().await {
                 SwarmEvent::NewListenAddr { address, .. } => println!("Listening on {:?}", address),
@@ -128,7 +132,6 @@ where
         println!("added data {:?}", root);
     }
 }
-
 /// Builds the transport stack that LibP2P will communicate over.
 pub fn build_transport(
     wasm_external_transport: Option<wasm_ext::ExtTransport>,
@@ -156,9 +159,6 @@ pub fn build_transport(
         )
     });
 
-    // let transport = libp2p::tcp::TcpConfig::new().nodelay(true);
-    // let transport = libp2p::websocket::WsConfig::new(transport.clone()).or_transport(transport);
-    // let transport = async_std::task::block_on(libp2p::dns::DnsConfig::system(transport)).unwrap();
     let auth_config = {
         let dh_keys = noise::Keypair::<noise::X25519Spec>::new()
             .into_authentic(&local_key)

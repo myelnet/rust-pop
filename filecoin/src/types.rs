@@ -613,7 +613,7 @@ impl Cbor for SignedMessage {}
 // #[cfg(feature = "json")]
 pub mod signed_json {
     use super::*;
-    use crate::crypto::{Signature, SignatureType};
+    use crate::crypto::{Signature};
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
     /// Wrapper for serializing and deserializing a SignedMessage from JSON.

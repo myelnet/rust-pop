@@ -1,7 +1,7 @@
 use blockstore::types::BlockStore;
 use libipld::{Block, Cid};
-use std::io::Write;
-use std::sync::{Arc};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::sync::Arc;
 use unixfs_v1::file::{adder::FileAdder, visit::IdleFileVisit};
 
 pub fn add<S: BlockStore>(store: Arc<S>, data: &[u8]) -> Result<Option<Cid>, String> {
@@ -27,6 +27,43 @@ pub fn add<S: BlockStore>(store: Arc<S>, data: &[u8]) -> Result<Option<Cid>, Str
         store.insert(&block).map_err(|e| e.to_string())?;
     }
     Ok(root)
+}
+
+pub fn add_from_read<S: BlockStore, F: Read>(
+    store: Arc<S>,
+    data: &mut F,
+) -> Result<Option<Cid>, String> {
+    let mut adder = FileAdder::default();
+    // use BufReader for speed / efficiency and 100KiB buffer
+    let mut buf = BufReader::with_capacity(100000, data);
+
+    loop {
+        match buf.fill_buf().unwrap() {
+            chunk if chunk.is_empty() => {
+                break;
+            }
+            chunk => {
+                let mut total = 0;
+                while total < chunk.len() {
+                    let (blocks, consumed) = adder.push(&chunk[total..]);
+                    total += consumed;
+                    for (cid, bytes) in blocks {
+                        let block = Block::<S::Params>::new_unchecked(cid, bytes);
+                        store.insert(&block).map_err(|e| e.to_string())?;
+                    }
+                }
+                buf.consume(total);
+            }
+        }
+    }
+    let blocks = adder.finish();
+    let mut root: Option<Cid> = None;
+    for (cid, bytes) in blocks {
+        root = Some(cid.clone());
+        let block = Block::<S::Params>::new_unchecked(cid, bytes);
+        store.insert(&block).map_err(|e| e.to_string())?;
+    }
+    return Ok(root);
 }
 
 pub fn cat<S: BlockStore>(store: Arc<S>, root: Cid) -> Result<Vec<u8>, String> {

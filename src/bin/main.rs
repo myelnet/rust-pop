@@ -55,11 +55,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
 async fn add(path: String) -> Result<(), Box<dyn Error>> {
     let client = reqwest::Client::new();
-    client
+    let resp = client
         .post("http://127.0.0.1:8000/add")
         .body(path)
         .send()
         .await?;
+    match resp.status() {
+        reqwest::StatusCode::CREATED => println!("{:?}: success", resp.status()),
+        reqwest::StatusCode::NOT_FOUND => {
+            println!("{:?}: could not load file", resp.status());
+        }
+        s => println!("Received response status: {:?}", s),
+    };
     Ok(())
 }
 

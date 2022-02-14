@@ -57,7 +57,6 @@ where
             }
         }
         Err(e) => {
-            println!("{:?}", e);
             println!("could not find file");
             Err(warp::reject::not_found())
         }

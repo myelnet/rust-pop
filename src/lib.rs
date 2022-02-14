@@ -24,10 +24,10 @@ use rand::prelude::*;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-#[cfg(not(target_os = "unknown"))]
+#[cfg(feature = "native")]
 use libp2p::{dns, tcp, websocket};
 
-#[cfg(not(target_os = "unknown"))]
+#[cfg(feature = "native")]
 use async_std::task;
 
 const DATA_SIZE: usize = 104857600;
@@ -69,7 +69,7 @@ where
 
         // Listen on all interfaces and whatever port the OS assigns.  Websockt can't receive incoming connections
         // on browser
-        #[cfg(not(target_os = "unknown"))]
+        #[cfg(feature = "native")]
         Swarm::listen_on(&mut swarm, config.listening_multiaddr).unwrap();
 
         Node {

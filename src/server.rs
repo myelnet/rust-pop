@@ -7,8 +7,7 @@ use std::fs::File;
 use std::io::Read;
 use std::ops::Deref;
 use std::sync::Arc;
-use warp::{http, Filter}; // 0.3.5
-                          // use
+use warp::{http, Filter};
 
 pub async fn start_server<B: 'static + BlockStore>(store: Arc<B>)
 where
@@ -44,7 +43,7 @@ where
             match f.read_to_end(&mut buffer) {
                 Ok(_) => {
                     let root = dag_service::add(store.clone(), &buffer).unwrap();
-                    println!("added file {:?} to blockstore", root.unwrap());
+                    println!("added file {:?} to blockstore", root.unwrap().to_string());
                     Ok(warp::reply::with_status(
                         "Added file to the blockstore",
                         http::StatusCode::CREATED,

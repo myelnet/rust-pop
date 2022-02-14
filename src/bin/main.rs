@@ -6,7 +6,7 @@ use libp2p::{Multiaddr, PeerId};
 use pop::{Node, NodeConfig};
 use std::error::Error;
 use std::str::FromStr;
-// #[tokio::main]
+
 #[async_std::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     let app = App::new("PoP")

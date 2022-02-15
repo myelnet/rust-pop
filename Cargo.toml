@@ -32,18 +32,20 @@ features = ["wasm-ext"]
 [dependencies]
 libipld = "0.12"
 rand = { version = "0.7", features = ["wasm-bindgen"] }
-async-std = { version = "1.6.2", features = ["attributes", "unstable", "tokio1"] }
-graphsync = { path = "./graphsync", default_features=false }
-dag_service = { path = "./dag_service", default_features=false }
-blockstore = { path = "./blockstore", default_features=false }
-data_transfer = { path = "./data_transfer", default_features=false }
+async-std = { version = "1.6.2", features = [
+  "attributes",
+  "unstable",
+] }
+graphsync = { path = "./graphsync", default_features = false }
+dag_service = { path = "./dag_service", default_features = false }
+blockstore = { path = "./blockstore", default_features = false }
+data_transfer = { path = "./data_transfer", default_features = false }
 
 
 #  cli related imports
 warp = { version = "0.3.2", optional = true }
 clap = { version = "3.0.14", optional = true }
-reqwest = { version= "0.11.9", optional = true, features = ["json"]}
-tokio = { version = "1.1.0", optional = true, features = ["full"] }
+reqwest = { version = "0.11.9", optional = true, features = ["json"] }
 
 getrandom = { version = "0.2", features = ["js"] }
 
@@ -69,7 +71,16 @@ chrono = { version = "0.4", features = ["wasmbind"], optional = true }
 
 [features]
 default = ["native"]
-native = ["blockstore/native", "graphsync/native", "dag_service/native", "data_transfer/native", "warp", "clap", "reqwest", "tokio"]
+native = [
+  "blockstore/native",
+  "graphsync/native",
+  "dag_service/native",
+  "data_transfer/native",
+  "warp",
+  "clap",
+  "reqwest",
+  "async-std/tokio1"
+]
 browser = [
   "libp2p-wasm-ext",
   "wasm-bindgen",
@@ -84,5 +95,5 @@ browser = [
   "blockstore/browser",
   "graphsync/browser",
   "data_transfer/browser",
-  "dag_service/browser"
+  "dag_service/browser",
 ]

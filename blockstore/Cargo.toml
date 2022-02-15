@@ -14,7 +14,7 @@ libipld = "0.12"
 num_cpus = "1.13"
 async-trait = "0.1"
 
-rocksdb = { version = "0.15.0", optional = true}
+rocksdb = { version = "0.15.0", optional = true }
 
 
 [features]

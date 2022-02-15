@@ -14,6 +14,8 @@ use libipld::store::StoreParams;
 use libipld::Cid;
 use libipld::Ipld;
 use libp2p::futures::StreamExt;
+#[cfg(feature = "browser")]
+use libp2p::swarm::SwarmBuilder;
 use libp2p::swarm::{Swarm, SwarmEvent};
 use libp2p::wasm_ext;
 use libp2p::{
@@ -21,12 +23,13 @@ use libp2p::{
     core::transport::OptionalTransport, identity, mplex, noise, yamux, Multiaddr, PeerId,
     Transport,
 };
+#[cfg(feature = "native")]
+use libp2p::{dns, tcp, websocket};
 use rand::prelude::*;
 use std::sync::Arc;
 use std::time::Duration;
-
-#[cfg(feature = "native")]
-use libp2p::{dns, tcp, websocket};
+#[cfg(feature = "browser")]
+use wasm_bindgen_futures;
 
 #[cfg(feature = "native")]
 use async_std::task;
@@ -66,7 +69,15 @@ where
             Graphsync::new(GraphsyncConfig::default(), store.clone()),
         );
 
+        #[cfg(feature = "native")]
         let mut swarm = Swarm::new(transport, behaviour, local_peer_id);
+
+        #[cfg(feature = "browser")]
+        let mut swarm = SwarmBuilder::new(transport, behaviour, local_peer_id)
+            .executor(Box::new(|fut| {
+                wasm_bindgen_futures::spawn_local(fut);
+            }))
+            .build();
 
         if let Some(maddr) = config.listening_multiaddr {
             Swarm::listen_on(&mut swarm, maddr).unwrap();

@@ -6,6 +6,7 @@ use libipld::{Cid, Ipld};
 use std::collections::HashMap;
 use std::fs::File;
 use std::sync::Arc;
+use tokio;
 use warp::{http, Filter};
 
 pub async fn start_server<B: 'static + BlockStore>(store: Arc<B>)
@@ -40,8 +41,8 @@ where
         });
 
     let routes = add_file.or(export_file);
-    // serve on port 8000
-    warp::serve(routes).run(([127, 0, 0, 1], 8000)).await;
+    // serve on port 3000
+    tokio::task::spawn(async move { warp::serve(routes).run(([127, 0, 0, 1], 3000)).await });
 }
 
 pub async fn read_file<B: BlockStore>(

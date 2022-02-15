@@ -100,7 +100,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 async fn add(path: String) -> Result<(), Box<dyn Error>> {
     let client = reqwest::Client::new();
     let resp = client
-        .post("http://127.0.0.1:8000/add")
+        .post("http://127.0.0.1:3000/add")
         .body(path)
         .send()
         .await?;
@@ -112,7 +112,7 @@ async fn export(cid: String, path: String) -> Result<(), Box<dyn Error>> {
     let client = reqwest::Client::new();
     let map = HashMap::from([("cid", cid), ("path", path)]);
     let resp = client
-        .post("http://127.0.0.1:8000/export")
+        .post("http://127.0.0.1:3000/export")
         .json(&map)
         .send()
         .await?;

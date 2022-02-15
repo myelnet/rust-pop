@@ -27,6 +27,7 @@ num-bigint = { package = "forest_bigint", version = "0.1.1", features = [
 ] }
 libipld = "0.12"
 smallvec = "1.8.0"
+instant = "0.1.12"
 
 [dev-dependencies]
 hex = "0.4.3"
@@ -37,4 +38,4 @@ dag_service = { path = "../dag_service" }
 [features]
 default = ["native"]
 native = ["filecoin/native", "graphsync/native", "blockstore/native"]
-browser = ["filecoin/browser", "graphsync/browser", "blockstore/browser"]
+browser = ["filecoin/browser", "graphsync/browser", "blockstore/browser", "instant/wasm-bindgen"]

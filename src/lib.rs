@@ -8,6 +8,7 @@ use dag_service;
 use data_transfer::{DataTransfer, DataTransferEvent, DealParams};
 use graphsync::traversal::{RecursionLimit, Selector};
 use graphsync::{Config as GraphsyncConfig, Graphsync};
+use instant::Instant;
 use libipld::codec::Decode;
 use libipld::store::StoreParams;
 use libipld::Cid;
@@ -22,7 +23,7 @@ use libp2p::{
 };
 use rand::prelude::*;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 #[cfg(feature = "native")]
 use libp2p::{dns, tcp, websocket};
@@ -41,7 +42,7 @@ where
 
 #[derive(Debug)]
 pub struct NodeConfig<B: 'static + BlockStore> {
-    pub listening_multiaddr: Multiaddr,
+    pub listening_multiaddr: Option<Multiaddr>,
     pub wasm_external_transport: Option<wasm_ext::ExtTransport>,
     pub blockstore: B,
 }
@@ -67,10 +68,9 @@ where
 
         let mut swarm = Swarm::new(transport, behaviour, local_peer_id);
 
-        // Listen on all interfaces and whatever port the OS assigns.  Websockt can't receive incoming connections
-        // on browser
-        #[cfg(feature = "native")]
-        Swarm::listen_on(&mut swarm, config.listening_multiaddr).unwrap();
+        if let Some(maddr) = config.listening_multiaddr {
+            Swarm::listen_on(&mut swarm, maddr).unwrap();
+        }
 
         Node {
             swarm,

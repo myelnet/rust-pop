@@ -23,6 +23,15 @@ if ("serviceWorker" in navigator) {
 function App() {
   const [root, setRoot] = useState("");
   const [maddr, setMaddr] = useState("");
+
+  function sendRequest() {
+    if (!root || !maddr) {
+      return;
+    }
+    fetch("/" + root + "?peer=" + maddr)
+      .then((res) => res.text())
+      .then((res) => console.log(res));
+  }
   return (
     <div className="app">
       <input
@@ -45,7 +54,9 @@ function App() {
         value={maddr}
         onChange={(e) => setMaddr(e.target.value)}
       />
-      <button className="btn">request</button>
+      <button className="btn" onClick={sendRequest}>
+        request
+      </button>
     </div>
   );
 }

@@ -26,7 +26,7 @@ fnv = "1.0.6"
 protobuf = "2.25.2"
 integer-encoding = { version = "3.0", default-features = false }
 smallvec = "1.8.0"
-instant = "0.1.11"
+instant = "0.1.12"
 crossbeam-channel = "0.5.2"
 rand = { version = "0.7", features = ["wasm-bindgen"] }
 blockstore = { path = "../blockstore", default_features = false }
@@ -44,7 +44,10 @@ criterion = { version = "0.3", features = ["async_futures", "async_std"] }
 [features]
 default = ["native"]
 native = ["blockstore/native"]
-browser = ["blockstore/browser"]
+browser = [
+  "blockstore/browser",
+  "instant/wasm-bindgen"
+]
 
 [[bench]]
 name = "e2e"

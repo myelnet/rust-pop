@@ -80,6 +80,7 @@ native = [
   "data_transfer/native",
   "warp",
   "clap",
+  "log",
   "reqwest",
   "async-std/tokio1"
 ]

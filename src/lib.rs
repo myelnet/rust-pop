@@ -124,13 +124,20 @@ where
             panic!("transfer failed {}", e);
         }
 
+        log::info!("==> Started transfer");
+
         loop {
             let ev = self.swarm.next().await.unwrap();
             if let SwarmEvent::Behaviour(event) = ev {
-                if let DataTransferEvent::Completed(_, Ok(())) = event {
-                    let elapsed = start.elapsed();
-                    println!("transfer took {:?}", elapsed);
-                    break;
+                match event {
+                    DataTransferEvent::Completed(_, Ok(())) => {
+                        let elapsed = start.elapsed();
+                        log::info!("transfer took {:?}", elapsed);
+                        break;
+                    }
+                    _ => {
+                        log::info!("{:?}", event);
+                    }
                 }
             }
         }

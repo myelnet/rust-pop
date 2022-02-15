@@ -104,10 +104,13 @@ impl<P: StoreParams> MessageCodec for GraphsyncCodec<P> {
 
 #[derive(Debug)]
 pub enum GraphsyncEvent {
+    // The local graphsync provider has accepted a new request
     RequestAccepted(PeerId, GraphsyncRequest),
+    // The local graphsync provider has completed serving a request
     ResponseCompleted(PeerId, Vec<RequestId>),
+    // The local graphsync client has received a response
     // We may receive more than one response at once
-    ResponseReceived(Vec<GraphsyncResponse>),
+    ResponseReceived(PeerId, Vec<GraphsyncResponse>),
     Progress {
         req_id: RequestId,
         link: Cid,
@@ -415,7 +418,7 @@ where
                                 msg.responses.values().map(|res| res.clone()).collect();
                             self.request_manager.inject_response(msg);
                             return Poll::Ready(NetworkBehaviourAction::GenerateEvent(
-                                GraphsyncEvent::ResponseReceived(responses),
+                                GraphsyncEvent::ResponseReceived(peer, responses),
                             ));
                         }
                     }
@@ -898,7 +901,7 @@ mod tests {
     }
 
     fn assert_response_ok(event: Option<GraphsyncEvent>, id: RequestId) {
-        if let Some(GraphsyncEvent::ResponseReceived(responses)) = event {
+        if let Some(GraphsyncEvent::ResponseReceived(_, responses)) = event {
             assert_eq!(responses[0].id, id);
         } else {
             panic!("{:?} is not a response event", event);
@@ -1084,7 +1087,7 @@ mod tests {
                         assert_eq!(req_id, id);
                         assert_eq!(size, exp_size);
                     }
-                    GraphsyncEvent::ResponseReceived(responses) => {}
+                    GraphsyncEvent::ResponseReceived(_, responses) => {}
                     GraphsyncEvent::Complete(rid, Ok(())) => {
                         assert_eq!(rid, id);
                         break;

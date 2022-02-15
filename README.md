@@ -17,7 +17,13 @@ rustup target add wasm32-unknown-unknown
 rustup target add wasm32-unknown-unknown --toolchain nightly
 
 # Build the browser pkg (linked in root/package.json)
-wasm-pack build --target bundler -- --features browser --no-default-features
+wasm-pack build --target web --out-dir web/src/wasm -- --features browser --no-default-features
+
+# Move the wasm file to the dev server public directory
+mv src/wasm/pop_bg.wasm public/pop_bg.wasm
+
+# Start the dev server (after running npm install)
+cd web && npm run start
 
 # Build the native service
 cargo build --bin bootnode
@@ -26,6 +32,7 @@ cargo build --bin bootnode
 target/debug/bootnode
 
 ```
+Open http://localhost:8000 in a new incognito window.
 
 #### M1 Mac
 

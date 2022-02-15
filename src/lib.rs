@@ -20,8 +20,7 @@ use libp2p::swarm::{Swarm, SwarmEvent};
 use libp2p::wasm_ext;
 use libp2p::{
     self, core, core::muxing::StreamMuxerBox, core::transport::Boxed,
-    core::transport::OptionalTransport, identity, mplex, noise, yamux, Multiaddr, PeerId,
-    Transport,
+    core::transport::OptionalTransport, identity, mplex, noise, Multiaddr, PeerId, Transport,
 };
 #[cfg(feature = "native")]
 use libp2p::{dns, tcp, websocket};
@@ -135,9 +134,7 @@ where
                         log::info!("transfer took {:?}", elapsed);
                         break;
                     }
-                    _ => {
-                        log::info!("{:?}", event);
-                    }
+                    _ => {}
                 }
             }
         }
@@ -185,15 +182,8 @@ pub fn build_transport(
         noise::NoiseConfig::xx(dh_keys).into_authenticated()
     };
 
-    let mplex_config = {
-        let mut mplex_config = mplex::MplexConfig::new();
-        mplex_config.set_max_buffer_size(usize::MAX);
-
-        let mut yamux_config = yamux::YamuxConfig::default();
-        yamux_config.set_max_buffer_size(16 * 1024 * 1024);
-        yamux_config.set_receive_window_size(16 * 1024 * 1024);
-        core::upgrade::SelectUpgrade::new(yamux_config, mplex_config)
-    };
+    let mut mplex_config = mplex::MplexConfig::new();
+    mplex_config.set_max_buffer_size(usize::MAX);
 
     transport
         .upgrade(core::upgrade::Version::V1)

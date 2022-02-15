@@ -8,7 +8,7 @@ edition = "2021"
 [dependencies]
 libipld = "0.12"
 unixfs-v1 = "0.2.1"
-blockstore = { path = "../blockstore", default_features=false }
+blockstore = { path = "../blockstore", default_features = false }
 
 
 [dev-dependencies]
@@ -17,6 +17,4 @@ rand = { version = "0.7", features = ["wasm-bindgen"] }
 [features]
 default = ["native"]
 native = ["blockstore/native"]
-browser = [
-  "blockstore/browser"
-]
+browser = ["blockstore/browser"]

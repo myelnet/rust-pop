@@ -104,13 +104,7 @@ async fn add(path: String) -> Result<(), Box<dyn Error>> {
         .body(path)
         .send()
         .await?;
-    match resp.status() {
-        reqwest::StatusCode::CREATED => println!("{:?}: success", resp.status()),
-        reqwest::StatusCode::NOT_FOUND => {
-            println!("{:?}: could not load file", resp.status());
-        }
-        s => println!("Received response status: {:?}", s),
-    };
+    println!("{:?}: {:?}", resp.status(), resp.text().await.unwrap());
     Ok(())
 }
 
@@ -122,13 +116,7 @@ async fn export(cid: String, path: String) -> Result<(), Box<dyn Error>> {
         .json(&map)
         .send()
         .await?;
-    match resp.status() {
-        reqwest::StatusCode::CREATED => println!("{:?}: success", resp.status()),
-        reqwest::StatusCode::NOT_FOUND => {
-            println!("{:?}: could not load file", resp.status());
-        }
-        s => println!("Received response status: {:?}", s),
-    };
+    println!("{:?}: {:?}", resp.status(), resp.text().await.unwrap());
     Ok(())
 }
 

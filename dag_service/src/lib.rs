@@ -115,10 +115,9 @@ pub fn cat_to_write<S: BlockStore, F: Write>(
         step = next_step;
     }
 
-    match buf.flush() {
-        Ok(_) => Ok(()),
-        Err(_) => Err("failed to flush buffer to output".to_string()),
-    }
+    buf.flush().map_err(|e| e.to_string())?;
+
+    Ok(())
 }
 
 #[cfg(test)]

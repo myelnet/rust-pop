@@ -6,6 +6,10 @@ pub enum Channel {
         id: ChannelId,
         deal_id: u64,
     },
+    Accepted {
+        id: ChannelId,
+        deal_id: u64,
+    },
     Ongoing {
         id: ChannelId,
         received: usize,
@@ -27,6 +31,7 @@ pub enum Channel {
 
 #[derive(Debug, Clone)]
 pub enum ChannelEvent {
+    Accepted,
     BlockReceived { size: usize },
     AllBlocksReceived,
     Failure { reason: String },
@@ -43,6 +48,16 @@ impl Channel {
             },
             (Channel::New { id, .. }, ChannelEvent::Failure { reason }) => {
                 Channel::Failed { id, reason }
+            }
+            (Channel::New { id, deal_id }, ChannelEvent::Accepted) => {
+                Channel::Accepted { id, deal_id }
+            }
+            (Channel::Accepted { id, .. }, ChannelEvent::BlockReceived { size }) => {
+                Channel::Ongoing {
+                    id,
+                    received: size,
+                    all_received: false,
+                }
             }
             (
                 Channel::Ongoing {
@@ -102,7 +117,8 @@ impl Channel {
 impl Into<DataTransferEvent> for Channel {
     fn into(self) -> DataTransferEvent {
         match self {
-            Self::New { id, .. } => DataTransferEvent::Progress(id),
+            Self::New { id, .. } => DataTransferEvent::Started(id),
+            Self::Accepted { id, .. } => DataTransferEvent::Accepted(id),
             Self::Ongoing {
                 id,
                 received,

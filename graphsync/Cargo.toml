@@ -43,9 +43,10 @@ criterion = { version = "0.3", features = ["async_futures", "async_std"] }
 
 [features]
 default = ["native"]
-native = ["blockstore/native"]
+native = ["blockstore/native", "filecoin/native"]
 browser = [
   "blockstore/browser",
+  "filecoin/browser",
   "instant/wasm-bindgen"
 ]
 

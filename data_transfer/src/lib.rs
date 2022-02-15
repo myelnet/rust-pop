@@ -30,6 +30,8 @@ use std::{
 
 #[derive(Debug)]
 pub enum DataTransferEvent {
+    Started(ChannelId),
+    Accepted(ChannelId),
     Progress(ChannelId),
     Completed(ChannelId, Result<(), String>),
 }
@@ -214,6 +216,15 @@ where
         if response.accepted {
             if let Some(voucher) = response.voucher {
                 match voucher.status {
+                    DealStatus::Accepted => {
+                        let ch = self
+                            .channels
+                            .remove(&ch_id)
+                            .expect("Expected channel to be created before accepted");
+                        let next_state = ch.transition(ChannelEvent::Accepted);
+                        self.channels.insert(ch_id, next_state.clone());
+                        self.pending_events.push_back(next_state.into());
+                    }
                     DealStatus::Completed => {
                         let ch = self
                             .channels
@@ -281,11 +292,17 @@ where
                     }
                 }
             }
-            GraphsyncEvent::ResponseReceived(responses) => {
+            GraphsyncEvent::ResponseReceived(peer, responses) => {
                 for res in responses.iter() {
                     match TransferMessage::try_from(&res.extensions) {
-                        Ok(res) => println!("received response {:?}", res),
-                        Err(e) => {}
+                        Ok(res) => {
+                            println!("received response {:?}", res);
+
+                            if let Some(response) = res.response {
+                                self.process_response(peer, response);
+                            }
+                        }
+                        Err(_) => {}
                     };
                 }
             }
@@ -460,6 +477,8 @@ mod tests {
         loop {
             if let Some(event) = peer2.next().await {
                 match event {
+                    DataTransferEvent::Started(_) => {}
+                    DataTransferEvent::Accepted(_) => {}
                     DataTransferEvent::Progress(chi) => {}
                     DataTransferEvent::Completed(chid, Ok(())) => {
                         assert_eq!(chid, id);

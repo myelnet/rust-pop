@@ -42,7 +42,7 @@ data_transfer = { path = "./data_transfer", default_features=false }
 #  cli related imports
 warp = { version = "0.3.2", optional = true }
 clap = { version = "3.0.14", optional = true }
-reqwest = { version= "0.11.9", optional = true }
+reqwest = { version= "0.11.9", optional = true, features = ["json"]}
 
 
 getrandom = { version = "0.2", features = ["js"] }

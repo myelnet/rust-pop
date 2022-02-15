@@ -8,6 +8,7 @@ use filecoin::{cid_helpers::CidCbor, types::Cbor};
 use fsm::{Channel, ChannelEvent};
 use graphsync::traversal::{RecursionLimit, Selector};
 use graphsync::{Extensions, Graphsync, GraphsyncEvent, RequestId};
+use instant;
 use libipld::codec::Decode;
 use libipld::store::StoreParams;
 use libipld::{Cid, Ipld};
@@ -25,7 +26,6 @@ use std::{
     collections::{HashMap, VecDeque},
     sync::Arc,
     task::{Context, Poll},
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 #[derive(Debug)]
@@ -64,8 +64,7 @@ where
     Ipld: Decode<<S::Params as StoreParams>::Codecs>,
 {
     pub fn new(peer_id: PeerId, mut graphsync: Graphsync<S>) -> Self {
-        let now = SystemTime::now();
-        let now_unix = now.duration_since(UNIX_EPOCH).unwrap().as_millis() as u64;
+        let now_unix = instant::now() as u64;
 
         graphsync.register_incoming_request_hook(Arc::new(|_peer, gs_req| {
             let mut extensions = HashMap::new();

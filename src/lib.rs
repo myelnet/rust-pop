@@ -8,11 +8,14 @@ use dag_service;
 use data_transfer::{DataTransfer, DataTransferEvent, DealParams};
 use graphsync::traversal::{RecursionLimit, Selector};
 use graphsync::{Config as GraphsyncConfig, Graphsync};
+use instant::Instant;
 use libipld::codec::Decode;
 use libipld::store::StoreParams;
 use libipld::Cid;
 use libipld::Ipld;
 use libp2p::futures::StreamExt;
+#[cfg(feature = "browser")]
+use libp2p::swarm::SwarmBuilder;
 use libp2p::swarm::{Swarm, SwarmEvent};
 use libp2p::wasm_ext;
 use libp2p::{
@@ -20,12 +23,13 @@ use libp2p::{
     core::transport::OptionalTransport, identity, mplex, noise, yamux, Multiaddr, PeerId,
     Transport,
 };
-use rand::prelude::*;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
-
 #[cfg(feature = "native")]
 use libp2p::{dns, tcp, websocket};
+use rand::prelude::*;
+use std::sync::Arc;
+use std::time::Duration;
+#[cfg(feature = "browser")]
+use wasm_bindgen_futures;
 
 #[cfg(feature = "native")]
 use async_std::task;
@@ -41,7 +45,7 @@ where
 
 #[derive(Debug)]
 pub struct NodeConfig<B: 'static + BlockStore> {
-    pub listening_multiaddr: Multiaddr,
+    pub listening_multiaddr: Option<Multiaddr>,
     pub wasm_external_transport: Option<wasm_ext::ExtTransport>,
     pub blockstore: B,
 }
@@ -65,12 +69,19 @@ where
             Graphsync::new(GraphsyncConfig::default(), store.clone()),
         );
 
+        #[cfg(feature = "native")]
         let mut swarm = Swarm::new(transport, behaviour, local_peer_id);
 
-        // Listen on all interfaces and whatever port the OS assigns.  Websockt can't receive incoming connections
-        // on browser
-        #[cfg(feature = "native")]
-        Swarm::listen_on(&mut swarm, config.listening_multiaddr).unwrap();
+        #[cfg(feature = "browser")]
+        let mut swarm = SwarmBuilder::new(transport, behaviour, local_peer_id)
+            .executor(Box::new(|fut| {
+                wasm_bindgen_futures::spawn_local(fut);
+            }))
+            .build();
+
+        if let Some(maddr) = config.listening_multiaddr {
+            Swarm::listen_on(&mut swarm, maddr).unwrap();
+        }
 
         Node {
             swarm,
@@ -113,13 +124,20 @@ where
             panic!("transfer failed {}", e);
         }
 
+        log::info!("==> Started transfer");
+
         loop {
             let ev = self.swarm.next().await.unwrap();
             if let SwarmEvent::Behaviour(event) = ev {
-                if let DataTransferEvent::Completed(_, Ok(())) = event {
-                    let elapsed = start.elapsed();
-                    println!("transfer took {:?}", elapsed);
-                    break;
+                match event {
+                    DataTransferEvent::Completed(_, Ok(())) => {
+                        let elapsed = start.elapsed();
+                        log::info!("transfer took {:?}", elapsed);
+                        break;
+                    }
+                    _ => {
+                        log::info!("{:?}", event);
+                    }
                 }
             }
         }

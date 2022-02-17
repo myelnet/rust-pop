@@ -1,6 +1,4 @@
-use super::{
-    DiscoveryResponse, RequestId, ResponseStatusCode, SerializablePeerTable,
-};
+use super::{DiscoveryResponse, RequestId, ResponseStatusCode, SerializablePeerTable};
 use serde_cbor::error::Error as CborError;
 use std::io::Error as StdError;
 use thiserror::Error;

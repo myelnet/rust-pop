@@ -1,9 +1,10 @@
+mod network;
 mod types;
 
 use async_trait::async_trait;
 use futures::io::{AsyncRead, AsyncWrite};
 use futures::task::{Context, Poll};
-use libp2p::request_response::{
+use network::{
     InboundFailure, OutboundFailure, ProtocolName, ProtocolSupport, RequestId as ReqResId,
     RequestResponse, RequestResponseCodec, RequestResponseConfig, RequestResponseEvent,
     RequestResponseMessage,
@@ -180,48 +181,34 @@ impl Default for Config {
     }
 }
 
+// need to reimplement RequestResponse because we need addresses to be a public field !
 pub struct PeerDiscovery {
     id_counter: Arc<AtomicI32>,
     inner: RequestResponse<DiscoveryCodec>,
-    // request_manager: RequestManager,
-    // response_manager: ResponseManager,
     hooks: Arc<RwLock<DiscoveryHooks>>,
-    addresses: PeerTable,
 }
 
 impl PeerDiscovery {
-    pub fn new(config: Config) -> Self {
+    pub fn new(config: Config, peer_table: Arc<RwLock<PeerTable>>) -> Self {
         let protocols = std::iter::once((PeerDiscoveryProtocol, ProtocolSupport::Full));
         let mut rr_config = RequestResponseConfig::default();
         rr_config.set_connection_keep_alive(config.connection_keep_alive);
         rr_config.set_request_timeout(config.request_timeout);
-        let inner = RequestResponse::new(DiscoveryCodec::default(), protocols, rr_config);
+        let inner =
+            RequestResponse::new(DiscoveryCodec::default(), protocols, rr_config, peer_table);
         let hooks = Arc::new(RwLock::new(DiscoveryHooks::default()));
         Self {
             id_counter: Arc::new(AtomicI32::new(1)),
             inner,
             hooks,
-            addresses: HashMap::new(),
         }
     }
     pub fn add_address(&mut self, peer: &PeerId, address: Multiaddr) {
-        self.addresses
-            .entry(*peer)
-            .or_default()
-            .push(address.clone());
         self.inner.add_address(peer, address);
     }
 
     /// Removes an address of a peer previously added via `add_address`.
     pub fn remove_address(&mut self, peer: &PeerId, address: &Multiaddr) {
-        let mut last = false;
-        if let Some(addresses) = self.addresses.get_mut(peer) {
-            addresses.retain(|a| a != address);
-            last = addresses.is_empty();
-        }
-        if last {
-            self.addresses.remove(peer);
-        }
         self.inner.remove_address(peer, address);
     }
 
@@ -393,19 +380,22 @@ impl NetworkBehaviour for PeerDiscovery {
                             channel,
                         } => {
                             let builder = ResponseBuilder::new(request.id);
-                            // validate request and add any extensions
+                            // validate request
                             let approved = (self.hooks.read().unwrap().incoming_request)(&peer);
                             if !approved {
                                 self.inner
                                     .send_response(channel, builder.rejected())
                                     .unwrap();
-                            } else if self.addresses.keys().len() == 0 {
+                            } else if self.inner.addresses.read().unwrap().keys().len() == 0 {
                                 self.inner
                                     .send_response(channel, builder.not_found())
                                     .unwrap();
                             } else {
                                 let new_addresses: HashMap<Vec<u8>, Vec<Vec<u8>>> = self
+                                    .inner
                                     .addresses
+                                    .read()
+                                    .unwrap()
                                     .iter()
                                     .map_while(|(peer, addresses)| {
                                         let mut addr_vec = Vec::new();
@@ -443,7 +433,7 @@ impl NetworkBehaviour for PeerDiscovery {
                                         })
                                         .collect();
                                     //  update our local peer table
-                                    self.addresses.extend(new_addresses);
+                                    self.inner.addresses.write().unwrap().extend(new_addresses);
                                 }
                                 None => {}
                             }
@@ -614,7 +604,12 @@ mod tests {
     impl Peer {
         fn new() -> Self {
             let (peer_id, trans) = mk_transport();
-            let mut swarm = Swarm::new(trans, PeerDiscovery::new(Config::default()), peer_id);
+            let peer_table = Arc::new(RwLock::new(HashMap::new()));
+            let mut swarm = Swarm::new(
+                trans,
+                PeerDiscovery::new(Config::default(), peer_table),
+                peer_id,
+            );
             Swarm::listen_on(&mut swarm, "/ip4/127.0.0.1/tcp/0".parse().unwrap()).unwrap();
             while swarm.next().now_or_never().is_some() {}
             let addr = Swarm::listeners(&swarm).next().unwrap().clone();
@@ -680,17 +675,17 @@ mod tests {
         //  print logs for peer 2
         let peer2id = peer2.spawn("peer2");
 
-        let id = peer3.swarm().behaviour_mut().request(peer2id);
-        let id = peer1.swarm().behaviour_mut().request(peer2id);
+        let id1 = peer3.swarm().behaviour_mut().request(peer2id);
+        let id2 = peer1.swarm().behaviour_mut().request(peer2id);
 
-        assert_response_ok(peer3.next().await, id);
-        assert_response_ok(peer1.next().await, id);
+        assert_response_ok(peer3.next().await, id1);
+        assert_response_ok(peer1.next().await, id2);
 
         // assert_complete_ok(peer2.next().await, id);
 
         assert_eq!(
-            peer3.swarm().behaviour().addresses,
-            peer1.swarm().behaviour().addresses
+            *peer3.swarm().behaviour().inner.addresses.read().unwrap(),
+            *peer1.swarm().behaviour().inner.addresses.read().unwrap()
         );
     }
 }

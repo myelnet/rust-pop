@@ -49,7 +49,3 @@ browser = [
   "filecoin/browser",
   "instant/wasm-bindgen"
 ]
-
-[[bench]]
-name = "e2e"
-harness = false

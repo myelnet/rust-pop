@@ -1,6 +1,8 @@
 use blockstore::types::BlockStore;
+use futures::prelude::*;
 use libipld::{Block, Cid};
 use std::io::{BufRead, BufReader, BufWriter, Read, Write};
+use std::marker::Unpin;
 use std::sync::Arc;
 use unixfs_v1::file::{adder::FileAdder, visit::IdleFileVisit};
 
@@ -64,6 +66,45 @@ pub fn add_from_read<S: BlockStore, F: Read>(
         store.insert(&block).map_err(|e| e.to_string())?;
     }
     return Ok(root);
+}
+
+pub async fn add_from_stream<S: BlockStore>(
+    store: Arc<S>,
+    stream: &mut (impl AsyncRead + Unpin),
+) -> Result<Cid, String> {
+    let mut adder = FileAdder::default();
+
+    loop {
+        let mut buf = Vec::new();
+        match stream.read(&mut buf).await.map_err(|e| e.to_string())? {
+            0 => {
+                break;
+            }
+            n => {
+                let mut total = 0;
+                while total < n {
+                    let (blocks, consumed) = adder.push(&buf[total..]);
+                    total += consumed;
+                    for (cid, bytes) in blocks {
+                        let block = Block::<S::Params>::new_unchecked(cid, bytes);
+                        store.insert(&block).map_err(|e| e.to_string())?;
+                    }
+                }
+            }
+        }
+    }
+    let blocks = adder.finish();
+    let mut root: Option<Cid> = None;
+    for (cid, bytes) in blocks {
+        root = Some(cid.clone());
+        let block = Block::<S::Params>::new_unchecked(cid, bytes);
+        store.insert(&block).map_err(|e| e.to_string())?;
+    }
+
+    match root {
+        Some(root) => Ok(root),
+        None => Err("Failed to dagify stream".to_string()),
+    }
 }
 
 pub fn cat<S: BlockStore>(store: Arc<S>, root: Cid) -> Result<Vec<u8>, String> {

@@ -75,7 +75,8 @@ futures-timer = { version = "3.0.1", features = [
   "wasm-bindgen",
 ], optional = true }
 chrono = { version = "0.4", features = ["wasmbind"], optional = true }
-
+unixfs-v1 = { version = "0.2.1", optional = true }
+gloo-file = { version = "0.2.1", optional = true }
 
 [features]
 default = ["native"]
@@ -102,7 +103,15 @@ browser = [
   "web-sys/Blob",
   "web-sys/ErrorEvent",
   "web-sys/MessageEvent",
+  "web-sys/Worker",
+  "web-sys/DedicatedWorkerGlobalScope",
+  "web-sys/Event",
+  "web-sys/File",
+  "web-sys/ReadableStream",
+  "web-sys/Blob",
   "js-sys",
+  "unixfs-v1",
+  "gloo-file",
   "parity-send-wrapper",
   # "rand",
   "instant/wasm-bindgen",

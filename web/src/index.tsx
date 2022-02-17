@@ -1,24 +1,24 @@
 import * as React from "react";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import * as ReactDOM from "react-dom";
 
-if ("serviceWorker" in navigator) {
-  // window.addEventListener("load", function() {
-  navigator.serviceWorker.register("sw.js").then(
-    function (registration) {
-      // Registration was successful
-      console.log(
-        "ServiceWorker registration successful with scope: ",
-        registration.scope
-      );
-    },
-    function (err) {
-      // registration failed :(
-      console.log("ServiceWorker registration failed: ", err);
-    }
-  );
-  // });
-}
+// if ("serviceWorker" in navigator) {
+//   // window.addEventListener("load", function() {
+//   navigator.serviceWorker.register("sw.js").then(
+//     function (registration) {
+//       // Registration was successful
+//       console.log(
+//         "ServiceWorker registration successful with scope: ",
+//         registration.scope
+//       );
+//     },
+//     function (err) {
+//       // registration failed :(
+//       console.log("ServiceWorker registration failed: ", err);
+//     }
+//   );
+//   // });
+// }
 
 function App() {
   const [root, setRoot] = useState("");
@@ -32,6 +32,25 @@ function App() {
       .then((res) => res.text())
       .then((res) => console.log(res));
   }
+  useEffect(() => {
+    // @ts-ignore
+    if (wasm_bindgen) {
+      console.log("starting wasm");
+      // @ts-ignore
+      wasm_bindgen("pop_bg.wasm")
+        .then(() => {
+          //@ts-ignore
+          const { DagService, WorkerPool } = wasm_bindgen;
+          const pool = new WorkerPool(1);
+          const dag = new DagService();
+          dag
+            .string_to_block("hellot world", pool)
+            .then(console.log)
+            .catch(console.error);
+        })
+        .catch(console.error);
+    }
+  }, []);
   return (
     <div className="app">
       <input

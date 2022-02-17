@@ -9,6 +9,7 @@ edition = "2021"
 libipld = "0.12"
 unixfs-v1 = "0.2.1"
 blockstore = { path = "../blockstore", default_features = false }
+futures = "0.3.19"
 
 
 [dev-dependencies]

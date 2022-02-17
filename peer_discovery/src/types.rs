@@ -7,8 +7,6 @@ pub enum Error {
     #[error("{0}")]
     Encoding(String),
     #[error("{0}")]
-    Other(&'static str),
-    #[error("{0}")]
     Custom(String),
 }
 

@@ -29,7 +29,7 @@ use std::error::Error;
 // use std::io;
 use futures::prelude::*;
 use smallvec::SmallVec;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 pub type RequestId = i32;
@@ -359,8 +359,9 @@ impl NetworkBehaviour for PeerDiscovery {
                     }
                     ResponseEvent::Completed(peer, chan, msg) => {
                         let id = msg.id.clone();
-                        let addresses = &self.addresses;
-                        self.inner.send_response(chan, msg);
+                        // can safely unwrap as we'll generate an error further down if the response
+                        // fails to go out
+                        self.inner.send_response(chan, msg).unwrap();
                         return Poll::Ready(NetworkBehaviourAction::GenerateEvent(
                             DiscoveryEvent::ResponseCompleted(peer, id),
                         ));

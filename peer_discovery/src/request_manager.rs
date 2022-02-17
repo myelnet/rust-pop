@@ -31,7 +31,6 @@ impl RequestManager {
     }
     pub fn start_request(&self, responder: PeerId) -> RequestId {
         let id = self.id_counter.fetch_add(1, Ordering::Relaxed);
-        let sender = self.sender.clone();
         // self.ongoing.lock().unwrap().insert(id, sender);
         let msg = DiscoveryRequest { id };
         self.sender

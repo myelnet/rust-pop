@@ -46,9 +46,7 @@ impl ResponseBuilder {
     pub fn completed(self, addresses: SerializablePeerTable) {
         self.send(ResponseStatusCode::RequestCompletedFull, Some(addresses));
     }
-    pub fn failed(self, _err: String) {
-        self.send(ResponseStatusCode::RequestFailedUnknown, None);
-    }
+
     pub fn not_found(self) {
         self.send(ResponseStatusCode::RequestFailedPeersNotFound, None);
     }

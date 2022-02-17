@@ -38,4 +38,9 @@ dag_service = { path = "../dag_service" }
 [features]
 default = ["native"]
 native = ["filecoin/native", "graphsync/native", "blockstore/native"]
-browser = ["filecoin/browser", "graphsync/browser", "blockstore/browser", "instant/wasm-bindgen"]
+browser = [
+  "filecoin/browser",
+  "graphsync/browser",
+  "blockstore/browser",
+  "instant/wasm-bindgen",
+]

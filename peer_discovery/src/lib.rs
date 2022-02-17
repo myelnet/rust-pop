@@ -1,5 +1,3 @@
-mod request_manager;
-mod response_manager;
 mod types;
 
 use async_trait::async_trait;
@@ -10,8 +8,7 @@ use libp2p::request_response::{
     RequestResponse, RequestResponseCodec, RequestResponseConfig, RequestResponseEvent,
     RequestResponseMessage,
 };
-use request_manager::{RequestEvent, RequestManager};
-use response_manager::{ResponseEvent, ResponseManager};
+use types::ResponseBuilder;
 // use futures::{future::BoxFuture, prelude::*, stream::FuturesUnordered};
 use libp2p::core::connection::{ConnectionId, ListenerId};
 use libp2p::core::{upgrade, ConnectedPoint, Multiaddr, PeerId};
@@ -29,7 +26,10 @@ use std::error::Error;
 // use std::io;
 use futures::prelude::*;
 use smallvec::SmallVec;
-use std::sync::{Arc, RwLock};
+use std::sync::{
+    atomic::{AtomicI32, Ordering},
+    Arc, RwLock,
+};
 use std::time::Duration;
 
 pub type RequestId = i32;
@@ -135,7 +135,6 @@ pub enum DiscoveryEvent {
     ResponseCompleted(PeerId, RequestId),
     // We may receive more than one response at once
     ResponseReceived(DiscoveryResponse),
-    Complete(RequestId),
 }
 
 pub type IncomingRequestHook = Arc<dyn Fn(&PeerId) -> bool + Send + Sync>;
@@ -182,9 +181,10 @@ impl Default for Config {
 }
 
 pub struct PeerDiscovery {
+    id_counter: Arc<AtomicI32>,
     inner: RequestResponse<DiscoveryCodec>,
-    request_manager: RequestManager,
-    response_manager: ResponseManager,
+    // request_manager: RequestManager,
+    // response_manager: ResponseManager,
     hooks: Arc<RwLock<DiscoveryHooks>>,
     addresses: PeerTable,
 }
@@ -198,9 +198,8 @@ impl PeerDiscovery {
         let inner = RequestResponse::new(DiscoveryCodec::default(), protocols, rr_config);
         let hooks = Arc::new(RwLock::new(DiscoveryHooks::default()));
         Self {
+            id_counter: Arc::new(AtomicI32::new(1)),
             inner,
-            request_manager: RequestManager::new(),
-            response_manager: ResponseManager::new(hooks.clone()),
             hooks,
             addresses: HashMap::new(),
         }
@@ -227,8 +226,11 @@ impl PeerDiscovery {
     }
 
     pub fn request(&mut self, peer_id: PeerId) -> RequestId {
-        self.request_manager.start_request(peer_id)
+        let id = self.id_counter.fetch_add(1, Ordering::Relaxed);
+        self.inner.send_request(&peer_id, DiscoveryRequest { id });
+        id
     }
+
     fn inject_outbound_failure(
         &mut self,
         peer: &PeerId,
@@ -349,33 +351,6 @@ impl NetworkBehaviour for PeerDiscovery {
         let mut exit = false;
         while !exit {
             exit = true;
-            while let Poll::Ready(Some(event)) = self.response_manager.next(ctx) {
-                exit = false;
-                match event {
-                    ResponseEvent::Accepted(peer, req) => {
-                        return Poll::Ready(NetworkBehaviourAction::GenerateEvent(
-                            DiscoveryEvent::RequestAccepted(peer, req),
-                        ));
-                    }
-                    ResponseEvent::Completed(peer, chan, msg) => {
-                        let id = msg.id.clone();
-                        // can safely unwrap as we'll generate an error further down if the response
-                        // fails to go out
-                        self.inner.send_response(chan, msg).unwrap();
-                        return Poll::Ready(NetworkBehaviourAction::GenerateEvent(
-                            DiscoveryEvent::ResponseCompleted(peer, id),
-                        ));
-                    }
-                }
-            }
-            while let Poll::Ready(Some(event)) = self.request_manager.next(ctx) {
-                exit = false;
-                match event {
-                    RequestEvent::NewRequest(responder, req) => {
-                        self.inner.send_request(&responder, req);
-                    }
-                }
-            }
             while let Poll::Ready(event) = self.inner.poll(ctx, pparams) {
                 exit = false;
                 let event = match event {
@@ -417,12 +392,36 @@ impl NetworkBehaviour for PeerDiscovery {
                             request,
                             channel,
                         } => {
-                            self.response_manager.inject_request(
-                                peer,
-                                &request,
-                                channel,
-                                self.addresses.clone(),
-                            );
+                            let builder = ResponseBuilder::new(request.id);
+                            // validate request and add any extensions
+                            let approved = (self.hooks.read().unwrap().incoming_request)(&peer);
+                            if !approved {
+                                self.inner
+                                    .send_response(channel, builder.rejected())
+                                    .unwrap();
+                            } else if self.addresses.keys().len() == 0 {
+                                self.inner
+                                    .send_response(channel, builder.not_found())
+                                    .unwrap();
+                            } else {
+                                let new_addresses: HashMap<Vec<u8>, Vec<Vec<u8>>> = self
+                                    .addresses
+                                    .iter()
+                                    .map_while(|(peer, addresses)| {
+                                        let mut addr_vec = Vec::new();
+                                        for addr in addresses {
+                                            addr_vec.push((*addr).to_vec())
+                                        }
+                                        Some((peer.to_bytes(), addr_vec))
+                                    })
+                                    .collect();
+                                self.inner
+                                    .send_response(channel, builder.completed(new_addresses))
+                                    .unwrap();
+                            }
+                            return Poll::Ready(NetworkBehaviourAction::GenerateEvent(
+                                DiscoveryEvent::ResponseCompleted(peer, request.id),
+                            ));
                         }
                         RequestResponseMessage::Response {
                             request_id: _,
@@ -540,4 +539,158 @@ impl ResponseStatusCode {
 
 fn other<E: std::error::Error + Send + Sync + 'static>(e: E) -> io::Error {
     io::Error::new(io::ErrorKind::Other, e)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_std::task;
+    use libp2p::core::muxing::StreamMuxerBox;
+    use libp2p::core::transport::Boxed;
+    use libp2p::identity;
+    use libp2p::noise::{Keypair, NoiseConfig, X25519Spec};
+    use libp2p::swarm::SwarmEvent;
+    use libp2p::tcp::TcpConfig;
+    use libp2p::yamux::YamuxConfig;
+    use libp2p::{Multiaddr, PeerId, Swarm, Transport};
+    use serde_cbor::{from_slice, to_vec};
+
+    #[test]
+    fn request_serialization() {
+        let req = DiscoveryRequest { id: 1 };
+
+        let msgc = req.clone();
+        let msg_encoded = to_vec(&req).unwrap();
+
+        let des_msg = from_slice(&msg_encoded).unwrap();
+
+        assert_eq!(msgc, des_msg)
+    }
+
+    #[test]
+    fn response_serialization() {
+        let multiaddr = Vec::from(["/ip4/127.0.0.1/tcp/0".as_bytes().to_vec()]);
+        let peer = "/ip4/127.0.0.1/tcp/0".as_bytes().to_vec();
+        let mut addresses = HashMap::new();
+        addresses.insert(peer, multiaddr);
+        let resp = DiscoveryResponse {
+            id: 1,
+            status: ResponseStatusCode::RequestAcknowledged,
+            addresses: Some(addresses),
+        };
+
+        let msgc = resp.clone();
+        let msg_encoded = to_vec(&resp).unwrap();
+
+        let des_msg = from_slice(&msg_encoded).unwrap();
+
+        assert_eq!(msgc, des_msg)
+    }
+
+    fn mk_transport() -> (PeerId, Boxed<(PeerId, StreamMuxerBox)>) {
+        let id_key = identity::Keypair::generate_ed25519();
+        let peer_id = id_key.public().to_peer_id();
+        let dh_key = Keypair::<X25519Spec>::new()
+            .into_authentic(&id_key)
+            .unwrap();
+        let noise = NoiseConfig::xx(dh_key).into_authenticated();
+
+        let transport = TcpConfig::new()
+            .nodelay(true)
+            .upgrade(libp2p::core::upgrade::Version::V1)
+            .authenticate(noise)
+            .multiplex(YamuxConfig::default())
+            .timeout(Duration::from_secs(20))
+            .boxed();
+        (peer_id, transport)
+    }
+
+    struct Peer {
+        peer_id: PeerId,
+        addr: Multiaddr,
+        swarm: Swarm<PeerDiscovery>,
+    }
+
+    impl Peer {
+        fn new() -> Self {
+            let (peer_id, trans) = mk_transport();
+            let mut swarm = Swarm::new(trans, PeerDiscovery::new(Config::default()), peer_id);
+            Swarm::listen_on(&mut swarm, "/ip4/127.0.0.1/tcp/0".parse().unwrap()).unwrap();
+            while swarm.next().now_or_never().is_some() {}
+            let addr = Swarm::listeners(&swarm).next().unwrap().clone();
+            Self {
+                peer_id,
+                addr,
+                swarm,
+            }
+        }
+
+        fn add_address(&mut self, peer: &Peer) {
+            self.swarm
+                .behaviour_mut()
+                .add_address(&peer.peer_id, peer.addr.clone());
+        }
+
+        fn swarm(&mut self) -> &mut Swarm<PeerDiscovery> {
+            &mut self.swarm
+        }
+
+        fn spawn(mut self, _name: &'static str) -> PeerId {
+            let peer_id = self.peer_id;
+            task::spawn(async move {
+                loop {
+                    let event = self.swarm.next().await;
+                    println!("event {:?}", event);
+                }
+            });
+            peer_id
+        }
+
+        async fn next(&mut self) -> Option<DiscoveryEvent> {
+            loop {
+                let ev = self.swarm.next().await?;
+                if let SwarmEvent::Behaviour(event) = ev {
+                    return Some(event);
+                }
+            }
+        }
+    }
+
+    fn assert_response_ok(event: Option<DiscoveryEvent>, id: RequestId) {
+        if let Some(DiscoveryEvent::ResponseReceived(responses)) = event {
+            assert_eq!(responses.id, id);
+        } else {
+            panic!("{:?} is not a response event", event);
+        }
+    }
+
+    #[async_std::test]
+    async fn test_request() {
+        let mut peer1 = Peer::new();
+        let mut peer2 = Peer::new();
+        let mut peer3 = Peer::new();
+        // peer 2 knows everyone
+        peer2.add_address(&peer1);
+        peer2.add_address(&peer3);
+        // peer 3 knows peer 2 only and itself
+        peer3.add_address(&peer2);
+        // peer 1 knows peer 2 only
+        peer1.add_address(&peer2);
+
+        //  print logs for peer 2
+        let peer2id = peer2.spawn("peer2");
+
+        let id = peer3.swarm().behaviour_mut().request(peer2id);
+        let id = peer1.swarm().behaviour_mut().request(peer2id);
+
+        assert_response_ok(peer3.next().await, id);
+        assert_response_ok(peer1.next().await, id);
+
+        // assert_complete_ok(peer2.next().await, id);
+
+        assert_eq!(
+            peer3.swarm().behaviour().addresses,
+            peer1.swarm().behaviour().addresses
+        );
+    }
 }

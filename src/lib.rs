@@ -17,22 +17,18 @@ use libp2p::futures::StreamExt;
 #[cfg(feature = "browser")]
 use libp2p::swarm::SwarmBuilder;
 use libp2p::swarm::{Swarm, SwarmEvent};
-use libp2p::wasm_ext;
-use libp2p::{
-    self, core, core::muxing::StreamMuxerBox, core::transport::Boxed,
-    core::transport::OptionalTransport, identity, mplex, noise, Multiaddr, PeerId, Transport,
-};
-#[cfg(feature = "native")]
-use libp2p::{dns, tcp, websocket};
+use libp2p::{self, identity, Multiaddr, PeerId};
 use rand::prelude::*;
 use routing::{Config as PeerDiscoveryConfig, PeerDiscovery};
 use std::sync::Arc;
-use std::time::Duration;
 #[cfg(feature = "browser")]
 use wasm_bindgen_futures;
 
+#[cfg(feature = "browser")]
+use browser::build_transport;
+
 #[cfg(feature = "native")]
-use async_std::task;
+use server::build_transport;
 
 const DATA_SIZE: usize = 104857600;
 pub struct Node<B: 'static + BlockStore>
@@ -46,7 +42,6 @@ where
 #[derive(Debug)]
 pub struct NodeConfig<B: 'static + BlockStore> {
     pub listening_multiaddr: Option<Multiaddr>,
-    pub wasm_external_transport: Option<wasm_ext::ExtTransport>,
     pub blockstore: B,
 }
 
@@ -59,7 +54,7 @@ where
         let local_peer_id = PeerId::from(local_key.public());
         println!("Local peer id: {:?}", local_peer_id);
 
-        let transport = build_transport(config.wasm_external_transport, local_key.clone());
+        let transport = build_transport(local_key.clone());
 
         let store = Arc::new(config.blockstore);
         // temp behaviour to be replaced with graphsync
@@ -149,49 +144,4 @@ where
         let root = dag_service::add(self.store.clone(), &data).unwrap();
         println!("added data {:?}", root);
     }
-}
-/// Builds the transport stack that LibP2P will communicate over.
-pub fn build_transport(
-    wasm_external_transport: Option<wasm_ext::ExtTransport>,
-    local_key: identity::Keypair,
-) -> Boxed<(PeerId, StreamMuxerBox)> {
-    // Can have no external transport if not compiling for wasm
-    let transport = if let Some(t) = wasm_external_transport {
-        OptionalTransport::some(t)
-    } else {
-        OptionalTransport::none()
-    };
-
-    // if not compiling for wasm
-    #[cfg(not(target_os = "unknown"))]
-    let transport = transport.or_transport({
-        let desktop_trans = tcp::TcpConfig::new().nodelay(true);
-        let desktop_trans =
-            websocket::WsConfig::new(desktop_trans.clone()).or_transport(desktop_trans);
-        OptionalTransport::some(
-            if let Ok(dns) = task::block_on(dns::DnsConfig::system(desktop_trans.clone())) {
-                dns.boxed()
-            } else {
-                desktop_trans.map_err(dns::DnsErr::Transport).boxed()
-            },
-        )
-    });
-
-    let auth_config = {
-        let dh_keys = noise::Keypair::<noise::X25519Spec>::new()
-            .into_authentic(&local_key)
-            .expect("Noise key generation failed");
-
-        noise::NoiseConfig::xx(dh_keys).into_authenticated()
-    };
-
-    let mut mplex_config = mplex::MplexConfig::new();
-    mplex_config.set_max_buffer_size(usize::MAX);
-
-    transport
-        .upgrade(core::upgrade::Version::V1)
-        .authenticate(auth_config)
-        .multiplex(mplex_config)
-        .timeout(Duration::from_secs(20))
-        .boxed()
 }

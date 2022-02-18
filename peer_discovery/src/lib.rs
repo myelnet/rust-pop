@@ -162,6 +162,7 @@ pub struct DiscoveryResponse {
 }
 // need to reimplement RequestResponse because we need addresses to be a public field !
 pub struct PeerDiscovery {
+    //  we implement our own id_counter (instead of libp2p's) to ensure the request / response messages are CBOR encodable
     id_counter: Arc<AtomicI32>,
     inner: RequestResponse<DiscoveryCodec>,
     peer_table: Arc<RwLock<PeerTable>>,
@@ -457,10 +458,7 @@ mod tests {
         let peer = "/ip4/127.0.0.1/tcp/0".as_bytes().to_vec();
         let mut addresses = HashMap::new();
         addresses.insert(peer, multiaddr);
-        let resp = DiscoveryResponse {
-            id: 1,
-            addresses: addresses,
-        };
+        let resp = DiscoveryResponse { id: 1, addresses };
 
         let msgc = resp.clone();
         let msg_encoded = to_vec(&resp).unwrap();

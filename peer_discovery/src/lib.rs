@@ -392,10 +392,20 @@ impl NetworkBehaviour for PeerDiscovery {
                                 .iter()
                                 .map_while(|(peer, addresses)| {
                                     let mut addr_vec = SmallVec::<[Multiaddr; 6]>::new();
-                                    for addr in addresses {
-                                        addr_vec.push(Multiaddr::try_from(addr.clone()).unwrap())
+                                    // check sent peer is valid
+                                    match PeerId::from_bytes(peer) {
+                                        Ok(p) => {
+                                            // check associated multiaddresses are valid
+                                            for addr in addresses {
+                                                match Multiaddr::try_from(addr.clone()) {
+                                                    Ok(a) => addr_vec.push(a),
+                                                    Err(_) => {}
+                                                }
+                                            }
+                                            Some((p, addr_vec))
+                                        }
+                                        Err(_) => None,
                                     }
-                                    Some((PeerId::from_bytes(peer).unwrap(), addr_vec))
                                 })
                                 .collect();
                             //  update our local peer table
@@ -499,7 +509,7 @@ mod tests {
 
     struct Peer {
         peer_id: PeerId,
-        addr: Multiaddr,
+        addr: Vec<Multiaddr>,
         swarm: Swarm<PeerDiscovery>,
     }
 
@@ -514,21 +524,22 @@ mod tests {
             );
             for i in 0..num_addreses {
                 Swarm::listen_on(&mut swarm, "/ip4/127.0.0.1/tcp/0".parse().unwrap()).unwrap();
+                println!("{:?}", i);
             }
             while swarm.next().now_or_never().is_some() {}
-            let addr = Swarm::listeners(&swarm).next().unwrap().clone();
+            let addresses = Swarm::listeners(&swarm).map(|addr| addr.clone()).collect();
             let peer = Self {
                 peer_id,
-                addr: addr.clone(),
+                addr: addresses,
                 swarm,
             };
             return peer;
         }
 
         fn add_address(&mut self, peer: &Peer) {
-            self.swarm
-                .behaviour_mut()
-                .add_address(&peer.peer_id, peer.addr.clone());
+            for addr in peer.addr.clone() {
+                self.swarm.behaviour_mut().add_address(&peer.peer_id, addr);
+            }
         }
 
         fn swarm(&mut self) -> &mut Swarm<PeerDiscovery> {
@@ -566,7 +577,7 @@ mod tests {
 
     #[async_std::test]
     async fn test_request() {
-        let mut peer1 = Peer::new(1);
+        let mut peer1 = Peer::new(7);
         let mut peer2 = Peer::new(1);
         let mut peer3 = Peer::new(3);
 

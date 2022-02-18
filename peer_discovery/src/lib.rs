@@ -1,5 +1,3 @@
-mod types;
-
 use async_trait::async_trait;
 use futures::io::{AsyncRead, AsyncWrite};
 use futures::task::{Context, Poll};
@@ -8,8 +6,6 @@ use libp2p::request_response::{
     RequestResponse, RequestResponseCodec, RequestResponseConfig, RequestResponseEvent,
     RequestResponseMessage,
 };
-use types::ResponseBuilder;
-// use futures::{future::BoxFuture, prelude::*, stream::FuturesUnordered};
 use libp2p::core::connection::{ConnectionId, ListenerId};
 use libp2p::core::{upgrade, ConnectedPoint, Multiaddr, PeerId};
 use libp2p::swarm::{
@@ -168,7 +164,7 @@ pub struct DiscoveryRequest {
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct DiscoveryResponse {
     pub id: RequestId,
-    pub addresses: Option<SerializablePeerTable>,
+    pub addresses: SerializablePeerTable,
 }
 // need to reimplement RequestResponse because we need addresses to be a public field !
 pub struct PeerDiscovery {
@@ -250,7 +246,7 @@ impl NetworkBehaviour for PeerDiscovery {
     fn new_handler(&mut self) -> Self::ProtocolsHandler {
         self.inner.new_handler()
     }
-    
+
     fn addresses_of_peer(&mut self, peer_id: &PeerId) -> Vec<Multiaddr> {
         self.inner.addresses_of_peer(peer_id)
     }
@@ -377,7 +373,6 @@ impl NetworkBehaviour for PeerDiscovery {
                             request,
                             channel,
                         } => {
-                            let builder = ResponseBuilder::new(request.id);
                             // validate request
                             let new_addresses: HashMap<Vec<u8>, Vec<Vec<u8>>> = self
                                 .peer_table
@@ -392,9 +387,12 @@ impl NetworkBehaviour for PeerDiscovery {
                                     Some((peer.to_bytes(), addr_vec))
                                 })
                                 .collect();
-                            self.inner
-                                .send_response(channel, builder.completed(new_addresses))
-                                .unwrap();
+
+                            let msg = DiscoveryResponse {
+                                id: request.id,
+                                addresses: new_addresses,
+                            };
+                            self.inner.send_response(channel, msg).unwrap();
 
                             return Poll::Ready(NetworkBehaviourAction::GenerateEvent(
                                 DiscoveryEvent::ResponseCompleted(peer, request.id),
@@ -405,25 +403,21 @@ impl NetworkBehaviour for PeerDiscovery {
                             response,
                         } => {
                             //  addresses only get returned on a successful response
-                            match response.clone().addresses {
-                                Some(addresses) => {
-                                    let new_addresses: PeerTable = addresses
-                                        .iter()
-                                        .map_while(|(peer, addresses)| {
-                                            let mut addr_vec = SmallVec::<[Multiaddr; 6]>::new();
-                                            for addr in addresses {
-                                                addr_vec.push(
-                                                    Multiaddr::try_from(addr.clone()).unwrap(),
-                                                )
-                                            }
-                                            Some((PeerId::from_bytes(peer).unwrap(), addr_vec))
-                                        })
-                                        .collect();
-                                    //  update our local peer table
-                                    self.peer_table.write().unwrap().extend(new_addresses);
-                                }
-                                None => {}
-                            }
+                            let new_addresses: PeerTable = response
+                                .clone()
+                                .addresses
+                                .iter()
+                                .map_while(|(peer, addresses)| {
+                                    let mut addr_vec = SmallVec::<[Multiaddr; 6]>::new();
+                                    for addr in addresses {
+                                        addr_vec.push(Multiaddr::try_from(addr.clone()).unwrap())
+                                    }
+                                    Some((PeerId::from_bytes(peer).unwrap(), addr_vec))
+                                })
+                                .collect();
+                            //  update our local peer table
+                            self.peer_table.write().unwrap().extend(new_addresses);
+
                             return Poll::Ready(NetworkBehaviourAction::GenerateEvent(
                                 DiscoveryEvent::ResponseReceived(response),
                             ));
@@ -488,7 +482,7 @@ mod tests {
         addresses.insert(peer, multiaddr);
         let resp = DiscoveryResponse {
             id: 1,
-            addresses: Some(addresses),
+            addresses: addresses,
         };
 
         let msgc = resp.clone();

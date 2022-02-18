@@ -164,10 +164,11 @@ pub struct PeerDiscovery {
     id_counter: Arc<AtomicI32>,
     inner: RequestResponse<DiscoveryCodec>,
     peer_table: Arc<RwLock<PeerTable>>,
+    peer_id: PeerId,
 }
 
 impl PeerDiscovery {
-    pub fn new(config: Config, peer_table: Arc<RwLock<PeerTable>>) -> Self {
+    pub fn new(config: Config, peer_table: Arc<RwLock<PeerTable>>, peer_id: PeerId) -> Self {
         let protocols = std::iter::once((PeerDiscoveryProtocol, ProtocolSupport::Full));
         let mut rr_config = RequestResponseConfig::default();
         rr_config.set_connection_keep_alive(config.connection_keep_alive);
@@ -177,11 +178,9 @@ impl PeerDiscovery {
             id_counter: Arc::new(AtomicI32::new(1)),
             inner,
             peer_table,
+            peer_id,
         }
     }
-    // pass in your own peer id and multi-addresses to initialize the table, such that when you share your peer table
-    // it shares your own addresses. Swarm init is required to get multiaddresses so this needs to happen after initializing a Node / Swarm.
-    // You can also make the node non-discoverable by not doing so.
     pub fn add_address(&mut self, peer: &PeerId, address: Multiaddr) {
         self.peer_table
             .write()
@@ -271,6 +270,13 @@ impl NetworkBehaviour for PeerDiscovery {
     }
 
     fn inject_new_listen_addr(&mut self, id: ListenerId, addr: &Multiaddr) {
+        // initialize table with self
+        self.peer_table
+            .write()
+            .unwrap()
+            .entry(self.peer_id)
+            .or_default()
+            .push(addr.clone());
         self.inner.inject_new_listen_addr(id, addr)
     }
 
@@ -500,19 +506,17 @@ mod tests {
             let peer_table = Arc::new(RwLock::new(HashMap::new()));
             let mut swarm = Swarm::new(
                 trans,
-                PeerDiscovery::new(Config::default(), peer_table),
+                PeerDiscovery::new(Config::default(), peer_table, peer_id),
                 peer_id,
             );
             Swarm::listen_on(&mut swarm, "/ip4/127.0.0.1/tcp/0".parse().unwrap()).unwrap();
             while swarm.next().now_or_never().is_some() {}
             let addr = Swarm::listeners(&swarm).next().unwrap().clone();
-            let mut peer = Self {
+            let peer = Self {
                 peer_id,
                 addr: addr.clone(),
                 swarm,
             };
-            // initialize peer table with own address to ensure those details are shared with others
-            peer.swarm.behaviour_mut().add_address(&peer_id, addr);
             return peer;
         }
 
@@ -560,6 +564,9 @@ mod tests {
         let mut peer1 = Peer::new();
         let mut peer2 = Peer::new();
         let mut peer3 = Peer::new();
+
+        println!("{:?}", peer3.swarm().behaviour().peer_table.read().unwrap());
+        println!("{:?}", peer1.swarm().behaviour().peer_table.read().unwrap());
 
         // peer 2 knows everyone
         peer2.add_address(&peer1);

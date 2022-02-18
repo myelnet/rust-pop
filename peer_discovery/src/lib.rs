@@ -368,9 +368,7 @@ impl NetworkBehaviour for PeerDiscovery {
                                     for addr in addresses {
                                         addr_vec.push((*addr).to_vec())
                                     }
-                                    // remove any potential duplicate data
-                                    addr_vec.sort();
-                                    addr_vec.dedup();
+
                                     Some((peer.to_bytes(), addr_vec))
                                 })
                                 .collect();
@@ -402,6 +400,9 @@ impl NetworkBehaviour for PeerDiscovery {
                                                     Err(_) => {}
                                                 }
                                             }
+                                            // remove any potential duplicate data
+                                            addr_vec.sort();
+                                            addr_vec.dedup();
                                             Some((p, addr_vec))
                                         }
                                         Err(_) => None,

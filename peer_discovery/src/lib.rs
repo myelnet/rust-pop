@@ -1,10 +1,9 @@
-mod network;
 mod types;
 
 use async_trait::async_trait;
 use futures::io::{AsyncRead, AsyncWrite};
 use futures::task::{Context, Poll};
-use network::{
+use libp2p::request_response::{
     InboundFailure, OutboundFailure, ProtocolName, ProtocolSupport, RequestId as ReqResId,
     RequestResponse, RequestResponseCodec, RequestResponseConfig, RequestResponseEvent,
     RequestResponseMessage,
@@ -71,7 +70,7 @@ impl RequestResponseCodec for DiscoveryCodec {
     {
         let packet = upgrade::read_length_prefixed(io, self.max_msg_size)
             .await
-            .map_err(other)?;
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
         if packet.is_empty() {
             return Err(io::Error::new(io::ErrorKind::Other, "End of output"));
         }
@@ -138,26 +137,6 @@ pub enum DiscoveryEvent {
     ResponseReceived(DiscoveryResponse),
 }
 
-pub type IncomingRequestHook = Arc<dyn Fn(&PeerId) -> bool + Send + Sync>;
-
-pub struct DiscoveryHooks {
-    incoming_request: IncomingRequestHook,
-}
-
-impl Default for DiscoveryHooks {
-    fn default() -> Self {
-        Self {
-            incoming_request: Arc::new(|_| true),
-        }
-    }
-}
-
-impl DiscoveryHooks {
-    pub fn register_incoming_request(&mut self, f: IncomingRequestHook) {
-        self.incoming_request = f;
-    }
-}
-
 #[derive(Clone)]
 pub struct Config {
     /// Timeout of a request.
@@ -181,11 +160,21 @@ impl Default for Config {
     }
 }
 
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
+pub struct DiscoveryRequest {
+    pub id: RequestId,
+}
+
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
+pub struct DiscoveryResponse {
+    pub id: RequestId,
+    pub addresses: Option<SerializablePeerTable>,
+}
 // need to reimplement RequestResponse because we need addresses to be a public field !
 pub struct PeerDiscovery {
     id_counter: Arc<AtomicI32>,
     inner: RequestResponse<DiscoveryCodec>,
-    hooks: Arc<RwLock<DiscoveryHooks>>,
+    peer_table: Arc<RwLock<PeerTable>>,
 }
 
 impl PeerDiscovery {
@@ -194,21 +183,33 @@ impl PeerDiscovery {
         let mut rr_config = RequestResponseConfig::default();
         rr_config.set_connection_keep_alive(config.connection_keep_alive);
         rr_config.set_request_timeout(config.request_timeout);
-        let inner =
-            RequestResponse::new(DiscoveryCodec::default(), protocols, rr_config, peer_table);
-        let hooks = Arc::new(RwLock::new(DiscoveryHooks::default()));
+        let inner = RequestResponse::new(DiscoveryCodec::default(), protocols, rr_config);
         Self {
             id_counter: Arc::new(AtomicI32::new(1)),
             inner,
-            hooks,
+            peer_table,
         }
     }
     pub fn add_address(&mut self, peer: &PeerId, address: Multiaddr) {
+        self.peer_table
+            .write()
+            .unwrap()
+            .entry(*peer)
+            .or_default()
+            .push(address.clone());
         self.inner.add_address(peer, address);
     }
 
     /// Removes an address of a peer previously added via `add_address`.
     pub fn remove_address(&mut self, peer: &PeerId, address: &Multiaddr) {
+        let mut last = false;
+        if let Some(addresses) = self.peer_table.write().unwrap().get_mut(peer) {
+            addresses.retain(|a| a != address);
+            last = addresses.is_empty();
+        }
+        if last {
+            self.peer_table.write().unwrap().remove(peer);
+        }
         self.inner.remove_address(peer, address);
     }
 
@@ -240,9 +241,6 @@ impl PeerDiscovery {
             peer, request_id, error
         );
     }
-    pub fn register_incoming_request_hook(&mut self, hook: IncomingRequestHook) {
-        self.hooks.write().unwrap().register_incoming_request(hook);
-    }
 }
 
 impl NetworkBehaviour for PeerDiscovery {
@@ -252,7 +250,7 @@ impl NetworkBehaviour for PeerDiscovery {
     fn new_handler(&mut self) -> Self::ProtocolsHandler {
         self.inner.new_handler()
     }
-
+    
     fn addresses_of_peer(&mut self, peer_id: &PeerId) -> Vec<Multiaddr> {
         self.inner.addresses_of_peer(peer_id)
     }
@@ -381,34 +379,23 @@ impl NetworkBehaviour for PeerDiscovery {
                         } => {
                             let builder = ResponseBuilder::new(request.id);
                             // validate request
-                            let approved = (self.hooks.read().unwrap().incoming_request)(&peer);
-                            if !approved {
-                                self.inner
-                                    .send_response(channel, builder.rejected())
-                                    .unwrap();
-                            } else if self.inner.addresses.read().unwrap().keys().len() == 0 {
-                                self.inner
-                                    .send_response(channel, builder.not_found())
-                                    .unwrap();
-                            } else {
-                                let new_addresses: HashMap<Vec<u8>, Vec<Vec<u8>>> = self
-                                    .inner
-                                    .addresses
-                                    .read()
-                                    .unwrap()
-                                    .iter()
-                                    .map_while(|(peer, addresses)| {
-                                        let mut addr_vec = Vec::new();
-                                        for addr in addresses {
-                                            addr_vec.push((*addr).to_vec())
-                                        }
-                                        Some((peer.to_bytes(), addr_vec))
-                                    })
-                                    .collect();
-                                self.inner
-                                    .send_response(channel, builder.completed(new_addresses))
-                                    .unwrap();
-                            }
+                            let new_addresses: HashMap<Vec<u8>, Vec<Vec<u8>>> = self
+                                .peer_table
+                                .read()
+                                .unwrap()
+                                .iter()
+                                .map_while(|(peer, addresses)| {
+                                    let mut addr_vec = Vec::new();
+                                    for addr in addresses {
+                                        addr_vec.push((*addr).to_vec())
+                                    }
+                                    Some((peer.to_bytes(), addr_vec))
+                                })
+                                .collect();
+                            self.inner
+                                .send_response(channel, builder.completed(new_addresses))
+                                .unwrap();
+
                             return Poll::Ready(NetworkBehaviourAction::GenerateEvent(
                                 DiscoveryEvent::ResponseCompleted(peer, request.id),
                             ));
@@ -433,7 +420,7 @@ impl NetworkBehaviour for PeerDiscovery {
                                         })
                                         .collect();
                                     //  update our local peer table
-                                    self.inner.addresses.write().unwrap().extend(new_addresses);
+                                    self.peer_table.write().unwrap().extend(new_addresses);
                                 }
                                 None => {}
                             }
@@ -465,70 +452,6 @@ impl NetworkBehaviour for PeerDiscovery {
         }
         Poll::Pending
     }
-}
-
-#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
-pub struct DiscoveryRequest {
-    pub id: RequestId,
-}
-
-#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
-pub struct DiscoveryResponse {
-    pub id: RequestId,
-    pub status: ResponseStatusCode,
-    pub addresses: Option<SerializablePeerTable>,
-}
-
-#[derive(PartialEq, Clone, Copy, Eq, Debug, Serialize, Deserialize)]
-pub enum ResponseStatusCode {
-    RequestAcknowledged,
-    PartialResponse,
-    RequestPaused,
-    RequestCompletedFull,
-    RequestRejected,
-    RequestFailedBusy,
-    RequestFailedUnknown,
-    RequestFailedLegal,
-    RequestFailedPeersNotFound,
-    RequestCancelled,
-    Other(i32),
-}
-
-impl ResponseStatusCode {
-    pub fn to_i32(self) -> i32 {
-        match self {
-            Self::RequestAcknowledged => 10,
-            Self::PartialResponse => 14,
-            Self::RequestPaused => 15,
-            Self::RequestCompletedFull => 20,
-            Self::RequestRejected => 30,
-            Self::RequestFailedBusy => 31,
-            Self::RequestFailedUnknown => 32,
-            Self::RequestFailedLegal => 33,
-            Self::RequestFailedPeersNotFound => 34,
-            Self::RequestCancelled => 35,
-            Self::Other(code) => code,
-        }
-    }
-    pub fn from_i32(code: i32) -> Self {
-        match code {
-            10 => Self::RequestAcknowledged,
-            14 => Self::PartialResponse,
-            15 => Self::RequestPaused,
-            20 => Self::RequestCompletedFull,
-            30 => Self::RequestRejected,
-            31 => Self::RequestFailedBusy,
-            32 => Self::RequestFailedUnknown,
-            33 => Self::RequestFailedLegal,
-            34 => Self::RequestFailedPeersNotFound,
-            35 => Self::RequestCancelled,
-            _ => Self::Other(code),
-        }
-    }
-}
-
-fn other<E: std::error::Error + Send + Sync + 'static>(e: E) -> io::Error {
-    io::Error::new(io::ErrorKind::Other, e)
 }
 
 #[cfg(test)]
@@ -565,7 +488,6 @@ mod tests {
         addresses.insert(peer, multiaddr);
         let resp = DiscoveryResponse {
             id: 1,
-            status: ResponseStatusCode::RequestAcknowledged,
             addresses: Some(addresses),
         };
 
@@ -681,11 +603,9 @@ mod tests {
         assert_response_ok(peer3.next().await, id1);
         assert_response_ok(peer1.next().await, id2);
 
-        // assert_complete_ok(peer2.next().await, id);
-
         assert_eq!(
-            *peer3.swarm().behaviour().inner.addresses.read().unwrap(),
-            *peer1.swarm().behaviour().inner.addresses.read().unwrap()
+            *peer3.swarm().behaviour().peer_table.read().unwrap(),
+            *peer1.swarm().behaviour().peer_table.read().unwrap()
         );
     }
 }

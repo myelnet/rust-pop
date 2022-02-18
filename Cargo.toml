@@ -42,7 +42,10 @@ blockstore = { path = "./blockstore", default_features = false }
 data_transfer = { path = "./data_transfer", default_features = false }
 serde = { version = "1.0", features = ["derive"] }
 instant = "0.1.12"
-
+futures = "0.3.19"
+futures-lite = "1.12.0"
+thiserror = "1.0"
+parity-send-wrapper = { version = "0.1.0", optional = true }
 
 #  cli related imports
 warp = { version = "0.3.2", optional = true }
@@ -59,6 +62,8 @@ libp2p-wasm-ext = { version = "0.31.0", features = [
 ], optional = true }
 console_error_panic_hook = { version = "0.1.6", optional = true }
 console_log = { version = "0.1.2", optional = true }
+web-sys = { version = "0.3.56", optional = true }
+js-sys = { version = "0.3.56", optional = true }
 
 # Side effects and Replacements
 clear_on_drop = { version = "0.2.3", features = ["no_cc"] }
@@ -91,6 +96,13 @@ browser = [
   "console_log",
   "console_error_panic_hook",
   "rand6",
+  "web-sys/WebSocket",
+  "web-sys/BinaryType",
+  "web-sys/Blob",
+  "web-sys/ErrorEvent",
+  "web-sys/MessageEvent",
+  "js-sys",
+  "parity-send-wrapper",
   # "rand",
   "instant/wasm-bindgen",
   "futures-timer",

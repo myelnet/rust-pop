@@ -270,7 +270,7 @@ impl NetworkBehaviour for PeerDiscovery {
     }
 
     fn inject_new_listen_addr(&mut self, id: ListenerId, addr: &Multiaddr) {
-        // initialize table with self
+        // include self in peer table for syncing
         self.peer_table
             .write()
             .unwrap()

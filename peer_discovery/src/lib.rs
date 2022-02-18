@@ -159,7 +159,6 @@ pub struct DiscoveryResponse {
     pub id: RequestId,
     pub addresses: SerializablePeerTable,
 }
-// need to reimplement RequestResponse because we need addresses to be a public field !
 pub struct PeerDiscovery {
     //  we implement our own id_counter (instead of libp2p's) to ensure the request / response messages are CBOR encodable
     id_counter: Arc<AtomicI32>,
@@ -181,7 +180,8 @@ impl PeerDiscovery {
         }
     }
     // pass in your own peer id and multi-addresses to initialize the table, such that when you share your peer table
-    // it shares your own addresses. Swarm init is required to get multiaddresses so this needs to happen after initializing a Node / Swarm
+    // it shares your own addresses. Swarm init is required to get multiaddresses so this needs to happen after initializing a Node / Swarm.
+    // You can also make the node non-discoverable by not doing so.
     pub fn add_address(&mut self, peer: &PeerId, address: Multiaddr) {
         self.peer_table
             .write()
@@ -560,6 +560,7 @@ mod tests {
         let mut peer1 = Peer::new();
         let mut peer2 = Peer::new();
         let mut peer3 = Peer::new();
+
         // peer 2 knows everyone
         peer2.add_address(&peer1);
         peer2.add_address(&peer3);

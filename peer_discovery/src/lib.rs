@@ -525,7 +525,6 @@ mod tests {
             );
             for i in 0..num_addreses {
                 Swarm::listen_on(&mut swarm, "/ip4/127.0.0.1/tcp/0".parse().unwrap()).unwrap();
-                println!("{:?}", i);
             }
             while swarm.next().now_or_never().is_some() {}
             let addresses = Swarm::listeners(&swarm).map(|addr| addr.clone()).collect();
@@ -582,6 +581,7 @@ mod tests {
         let mut peer2 = Peer::new(1);
         let mut peer3 = Peer::new(3);
 
+        
         println!("{:?}", peer3.swarm().behaviour().peer_table.read().unwrap());
         println!("{:?}", peer1.swarm().behaviour().peer_table.read().unwrap());
 
@@ -592,8 +592,6 @@ mod tests {
         peer3.add_address(&peer2);
         // peer 1 knows peer 2 only and itself
         peer1.add_address(&peer2);
-
-        println!("{:?}", peer2.swarm().behaviour().peer_table.read().unwrap());
 
         //  print logs for peer 2
         let peer2id = peer2.spawn("peer2");

@@ -23,7 +23,6 @@ hex = "0.4.3"
 fnv = "1.0.6"
 smallvec = "1.8.0"
 instant = "0.1.12"
-crossbeam-channel = "0.5.2"
 rand = { version = "0.7", features = ["wasm-bindgen"] }
 
 

@@ -3804,7 +3804,6 @@ dependencies = [
  "async-std",
  "async-trait",
  "criterion",
- "crossbeam-channel",
  "cs_serde_cbor",
  "dag_service",
  "fnv",

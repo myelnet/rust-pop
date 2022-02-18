@@ -205,8 +205,8 @@ impl PeerDiscovery {
     }
 
     // want this to be private as we want connections to trigger table swaps. There could be
-    //  a situation where call to the request function itself triggers a connection and then we have duplicate requests
-    // being made
+    //  a situation where call to the request function itself triggers a connection
+    // and then we have duplicate requests being made
     fn request(&mut self, peer_id: &PeerId) -> RequestId {
         let id = self.id_counter.fetch_add(1, Ordering::Relaxed);
         self.inner.send_request(&peer_id, DiscoveryRequest { id });
@@ -581,7 +581,6 @@ mod tests {
         let mut peer2 = Peer::new(1);
         let mut peer3 = Peer::new(3);
 
-        
         println!("{:?}", peer3.swarm().behaviour().peer_table.read().unwrap());
         println!("{:?}", peer1.swarm().behaviour().peer_table.read().unwrap());
 

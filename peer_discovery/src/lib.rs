@@ -6,9 +6,8 @@ use futures::task::{Context, Poll};
 use libp2p::core::connection::{ConnectionId, ListenerId};
 use libp2p::core::{upgrade, ConnectedPoint, Multiaddr, PeerId};
 use libp2p::request_response::{
-    InboundFailure, OutboundFailure, ProtocolName, ProtocolSupport, RequestId as ReqResId,
-    RequestResponse, RequestResponseCodec, RequestResponseConfig, RequestResponseEvent,
-    RequestResponseMessage,
+    ProtocolName, ProtocolSupport, RequestResponse, RequestResponseCodec, RequestResponseConfig,
+    RequestResponseEvent, RequestResponseMessage,
 };
 use libp2p::swarm::{
     DialError, IntoProtocolsHandler, NetworkBehaviour, NetworkBehaviourAction, PollParameters,
@@ -209,29 +208,6 @@ impl PeerDiscovery {
         self.inner.send_request(&peer_id, DiscoveryRequest { id });
         id
     }
-
-    fn inject_outbound_failure(
-        &mut self,
-        peer: &PeerId,
-        request_id: ReqResId,
-        error: &OutboundFailure,
-    ) {
-        println!(
-            "peer discovery outbound failure {} {} {:?}",
-            peer, request_id, error
-        );
-    }
-    fn inject_inbound_failure(
-        &mut self,
-        peer: &PeerId,
-        request_id: ReqResId,
-        error: &InboundFailure,
-    ) {
-        println!(
-            "inbound peer discovery failure {} {} {:?}",
-            peer, request_id, error
-        );
-    }
 }
 
 impl NetworkBehaviour for PeerDiscovery {
@@ -423,14 +399,20 @@ impl NetworkBehaviour for PeerDiscovery {
                         request_id,
                         error,
                     } => {
-                        self.inject_outbound_failure(&peer, request_id, &error);
+                        println!(
+                            "peer discovery outbound failure {} {} {:?}",
+                            peer, request_id, error
+                        );
                     }
                     RequestResponseEvent::InboundFailure {
                         peer,
                         request_id,
                         error,
                     } => {
-                        self.inject_inbound_failure(&peer, request_id, &error);
+                        println!(
+                            "peer discovery inbound failure {} {} {:?}",
+                            peer, request_id, error
+                        );
                     }
                     RequestResponseEvent::ResponseSent {
                         peer: _,

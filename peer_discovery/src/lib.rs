@@ -1,27 +1,24 @@
+use async_std::io;
 use async_trait::async_trait;
 use futures::io::{AsyncRead, AsyncWrite};
+use futures::prelude::*;
 use futures::task::{Context, Poll};
+use libp2p::core::connection::{ConnectionId, ListenerId};
+use libp2p::core::{upgrade, ConnectedPoint, Multiaddr, PeerId};
 use libp2p::request_response::{
     InboundFailure, OutboundFailure, ProtocolName, ProtocolSupport, RequestId as ReqResId,
     RequestResponse, RequestResponseCodec, RequestResponseConfig, RequestResponseEvent,
     RequestResponseMessage,
 };
-use libp2p::core::connection::{ConnectionId, ListenerId};
-use libp2p::core::{upgrade, ConnectedPoint, Multiaddr, PeerId};
 use libp2p::swarm::{
     DialError, IntoProtocolsHandler, NetworkBehaviour, NetworkBehaviourAction, PollParameters,
     ProtocolsHandler,
 };
-// use protobuf::Error as PBMessage;
-// use protobuf::Message as PBMessage;
-use async_std::io;
 use serde::{Deserialize, Serialize};
 use serde_cbor::{from_slice, to_vec};
+use smallvec::SmallVec;
 use std::collections::HashMap;
 use std::error::Error;
-// use std::io;
-use futures::prelude::*;
-use smallvec::SmallVec;
 use std::sync::{
     atomic::{AtomicI32, Ordering},
     Arc, RwLock,
@@ -127,9 +124,7 @@ impl RequestResponseCodec for DiscoveryCodec {
 
 #[derive(Debug)]
 pub enum DiscoveryEvent {
-    RequestAccepted(PeerId, DiscoveryRequest),
     ResponseCompleted(PeerId, RequestId),
-    // We may receive more than one response at once
     ResponseReceived(DiscoveryResponse),
 }
 

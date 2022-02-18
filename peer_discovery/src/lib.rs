@@ -277,6 +277,7 @@ impl NetworkBehaviour for PeerDiscovery {
             .entry(self.peer_id)
             .or_default()
             .push(addr.clone());
+
         self.inner.inject_new_listen_addr(id, addr)
     }
 
@@ -357,7 +358,6 @@ impl NetworkBehaviour for PeerDiscovery {
                             request,
                             channel,
                         } => {
-                            // validate request
                             let new_addresses: HashMap<Vec<u8>, Vec<Vec<u8>>> = self
                                 .peer_table
                                 .read()
@@ -368,6 +368,9 @@ impl NetworkBehaviour for PeerDiscovery {
                                     for addr in addresses {
                                         addr_vec.push((*addr).to_vec())
                                     }
+                                    // remove any potential duplicate data
+                                    addr_vec.sort();
+                                    addr_vec.dedup();
                                     Some((peer.to_bytes(), addr_vec))
                                 })
                                 .collect();
@@ -501,7 +504,7 @@ mod tests {
     }
 
     impl Peer {
-        fn new() -> Self {
+        fn new(num_addreses: usize) -> Self {
             let (peer_id, trans) = mk_transport();
             let peer_table = Arc::new(RwLock::new(HashMap::new()));
             let mut swarm = Swarm::new(
@@ -509,7 +512,9 @@ mod tests {
                 PeerDiscovery::new(Config::default(), peer_table, peer_id),
                 peer_id,
             );
-            Swarm::listen_on(&mut swarm, "/ip4/127.0.0.1/tcp/0".parse().unwrap()).unwrap();
+            for i in 0..num_addreses {
+                Swarm::listen_on(&mut swarm, "/ip4/127.0.0.1/tcp/0".parse().unwrap()).unwrap();
+            }
             while swarm.next().now_or_never().is_some() {}
             let addr = Swarm::listeners(&swarm).next().unwrap().clone();
             let peer = Self {
@@ -561,9 +566,9 @@ mod tests {
 
     #[async_std::test]
     async fn test_request() {
-        let mut peer1 = Peer::new();
-        let mut peer2 = Peer::new();
-        let mut peer3 = Peer::new();
+        let mut peer1 = Peer::new(1);
+        let mut peer2 = Peer::new(1);
+        let mut peer3 = Peer::new(3);
 
         println!("{:?}", peer3.swarm().behaviour().peer_table.read().unwrap());
         println!("{:?}", peer1.swarm().behaviour().peer_table.read().unwrap());
@@ -575,6 +580,8 @@ mod tests {
         peer3.add_address(&peer2);
         // peer 1 knows peer 2 only and itself
         peer1.add_address(&peer2);
+
+        println!("{:?}", peer2.swarm().behaviour().peer_table.read().unwrap());
 
         //  print logs for peer 2
         let peer2id = peer2.spawn("peer2");

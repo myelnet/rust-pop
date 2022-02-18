@@ -123,7 +123,6 @@ impl RequestResponseCodec for DiscoveryCodec {
 
 #[derive(Debug)]
 pub enum DiscoveryEvent {
-    ResponseCompleted(PeerId, RequestId),
     ResponseReceived(DiscoveryResponse),
 }
 
@@ -181,6 +180,8 @@ impl PeerDiscovery {
             peer_table,
         }
     }
+    // pass in your own peer id and multi-addresses to initialize the table, such that when you share your peer table
+    // it shares your own addresses. Swarm init is required to get multiaddresses so this needs to happen after initializing a Node / Swarm
     pub fn add_address(&mut self, peer: &PeerId, address: Multiaddr) {
         self.peer_table
             .write()
@@ -204,7 +205,10 @@ impl PeerDiscovery {
         self.inner.remove_address(peer, address);
     }
 
-    pub fn request(&mut self, peer_id: PeerId) -> RequestId {
+    // want this to be private as we want connections to trigger table swaps. There could be
+    //  a situation where call to the request function itself triggers a connection and then we have duplicate requests
+    // being made
+    fn request(&mut self, peer_id: &PeerId) -> RequestId {
         let id = self.id_counter.fetch_add(1, Ordering::Relaxed);
         self.inner.send_request(&peer_id, DiscoveryRequest { id });
         id
@@ -224,6 +228,8 @@ impl NetworkBehaviour for PeerDiscovery {
     }
 
     fn inject_connected(&mut self, peer_id: &PeerId) {
+        // when connecting immediately swap peer tables
+        self.request(peer_id);
         self.inner.inject_connected(peer_id)
     }
 
@@ -339,7 +345,7 @@ impl NetworkBehaviour for PeerDiscovery {
                     }
                 };
                 match event {
-                    RequestResponseEvent::Message { peer, message } => match message {
+                    RequestResponseEvent::Message { peer: _, message } => match message {
                         RequestResponseMessage::Request {
                             request_id: _,
                             request,
@@ -365,10 +371,6 @@ impl NetworkBehaviour for PeerDiscovery {
                                 addresses: new_addresses,
                             };
                             self.inner.send_response(channel, msg).unwrap();
-
-                            return Poll::Ready(NetworkBehaviourAction::GenerateEvent(
-                                DiscoveryEvent::ResponseCompleted(peer, request.id),
-                            ));
                         }
                         RequestResponseMessage::Response {
                             request_id: _,
@@ -504,11 +506,14 @@ mod tests {
             Swarm::listen_on(&mut swarm, "/ip4/127.0.0.1/tcp/0".parse().unwrap()).unwrap();
             while swarm.next().now_or_never().is_some() {}
             let addr = Swarm::listeners(&swarm).next().unwrap().clone();
-            Self {
+            let mut peer = Self {
                 peer_id,
-                addr,
+                addr: addr.clone(),
                 swarm,
-            }
+            };
+            // initialize peer table with own address to ensure those details are shared with others
+            peer.swarm.behaviour_mut().add_address(&peer_id, addr);
+            return peer;
         }
 
         fn add_address(&mut self, peer: &Peer) {
@@ -560,17 +565,20 @@ mod tests {
         peer2.add_address(&peer3);
         // peer 3 knows peer 2 only and itself
         peer3.add_address(&peer2);
-        // peer 1 knows peer 2 only
+        // peer 1 knows peer 2 only and itself
         peer1.add_address(&peer2);
 
         //  print logs for peer 2
         let peer2id = peer2.spawn("peer2");
 
-        let id1 = peer3.swarm().behaviour_mut().request(peer2id);
-        let id2 = peer1.swarm().behaviour_mut().request(peer2id);
+        peer3.swarm().dial(peer2id).unwrap();
+        peer1.swarm().dial(peer2id).unwrap();
 
-        assert_response_ok(peer3.next().await, id1);
-        assert_response_ok(peer1.next().await, id2);
+        assert_response_ok(peer3.next().await, 1);
+        assert_response_ok(peer1.next().await, 1);
+
+        println!("{:?}", peer3.swarm().behaviour().peer_table.read().unwrap());
+        println!("{:?}", peer1.swarm().behaviour().peer_table.read().unwrap());
 
         assert_eq!(
             *peer3.swarm().behaviour().peer_table.read().unwrap(),

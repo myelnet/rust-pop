@@ -164,21 +164,28 @@ pub struct PeerDiscovery {
     //  we implement our own id_counter (instead of libp2p's) to ensure the request / response messages are CBOR encodable
     id_counter: Arc<AtomicI32>,
     inner: RequestResponse<DiscoveryCodec>,
-    peer_table: Arc<RwLock<PeerTable>>,
+    pub peer_table: Arc<RwLock<PeerTable>>,
     peer_id: PeerId,
 }
 
 impl PeerDiscovery {
-    pub fn new(config: Config, peer_table: Arc<RwLock<PeerTable>>, peer_id: PeerId) -> Self {
+    pub fn new(
+        config: Config,
+        mut peer_table: Option<Arc<RwLock<PeerTable>>>,
+        peer_id: PeerId,
+    ) -> Self {
         let protocols = std::iter::once((PeerDiscoveryProtocol, ProtocolSupport::Full));
         let mut rr_config = RequestResponseConfig::default();
         rr_config.set_connection_keep_alive(config.connection_keep_alive);
         rr_config.set_request_timeout(config.request_timeout);
         let inner = RequestResponse::new(DiscoveryCodec::default(), protocols, rr_config);
+        if let None = peer_table {
+            peer_table = Some(Arc::new(RwLock::new(HashMap::new())))
+        }
         Self {
             id_counter: Arc::new(AtomicI32::new(1)),
             inner,
-            peer_table,
+            peer_table: peer_table.unwrap(),
             peer_id,
         }
     }
@@ -287,10 +294,12 @@ impl NetworkBehaviour for PeerDiscovery {
     }
 
     fn inject_new_external_addr(&mut self, addr: &Multiaddr) {
+        self.add_address(&self.peer_id.clone(), addr.clone());
         self.inner.inject_new_external_addr(addr)
     }
 
     fn inject_expired_external_addr(&mut self, addr: &Multiaddr) {
+        self.remove_address(&self.peer_id.clone(), addr);
         self.inner.inject_expired_external_addr(addr)
     }
 
@@ -514,10 +523,9 @@ mod tests {
     impl Peer {
         fn new(num_addreses: usize) -> Self {
             let (peer_id, trans) = mk_transport();
-            let peer_table = Arc::new(RwLock::new(HashMap::new()));
             let mut swarm = Swarm::new(
                 trans,
-                PeerDiscovery::new(Config::default(), peer_table, peer_id),
+                PeerDiscovery::new(Config::default(), None, peer_id),
                 peer_id,
             );
             for i in 0..num_addreses {

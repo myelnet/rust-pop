@@ -7,6 +7,7 @@ members = [
   "dag_service",
   "blockstore",
   "data_transfer",
+  "peer_discovery",
 ]
 
 [package]
@@ -32,10 +33,7 @@ features = ["wasm-ext"]
 [dependencies]
 libipld = "0.12"
 rand = { version = "0.7", features = ["wasm-bindgen"] }
-async-std = { version = "1.6.2", features = [
-  "attributes",
-  "unstable",
-] }
+async-std = { version = "1.6.2", features = ["attributes", "unstable"] }
 graphsync = { path = "./graphsync", default_features = false }
 dag_service = { path = "./dag_service", default_features = false }
 blockstore = { path = "./blockstore", default_features = false }
@@ -81,7 +79,7 @@ native = [
   "warp",
   "clap",
   "reqwest",
-  "async-std/tokio1"
+  "async-std/tokio1",
 ]
 browser = [
   "libp2p-wasm-ext",

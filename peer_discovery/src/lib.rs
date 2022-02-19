@@ -273,6 +273,13 @@ impl NetworkBehaviour for PeerDiscovery {
         handler: <Self::ProtocolsHandler as IntoProtocolsHandler>::Handler,
         error: &DialError,
     ) {
+        // remove from peer table
+        match peer_id {
+            Some(p) => {
+                self.peer_table.write().unwrap().remove(&p);
+            }
+            None => {}
+        }
         let req_res = handler;
         self.inner.inject_dial_failure(peer_id, req_res, error)
     }

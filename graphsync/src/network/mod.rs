@@ -204,7 +204,7 @@ where
     /// reachable addresses, if any.
     connected: HashMap<PeerId, SmallVec<[Connection<TCodec::Message>; 2]>>,
     /// Externally managed addresses via `add_address` and `remove_address`.
-    addresses: Arc<RwLock<PeerTable>>,
+    pub addresses: Arc<RwLock<PeerTable>>,
     /// Requests that have not yet been sent and are waiting for a connection
     /// to be established.
     pending_outbound_requests: HashMap<PeerId, SmallVec<[OutboundProtocol<TCodec>; 10]>>,

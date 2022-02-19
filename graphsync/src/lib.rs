@@ -172,7 +172,7 @@ impl Default for Config {
 }
 
 pub struct Graphsync<S: BlockStore> {
-    inner: RequestResponse<GraphsyncCodec<S::Params>>,
+    pub inner: RequestResponse<GraphsyncCodec<S::Params>>,
     request_manager: RequestManager<S>,
     response_manager: ResponseManager<S>,
     hooks: Arc<RwLock<GraphsyncHooks>>,

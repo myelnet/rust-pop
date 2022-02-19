@@ -121,12 +121,12 @@ impl Into<DataTransferEvent> for Channel {
             Self::Accepted { id, .. } => DataTransferEvent::Accepted(id),
             Self::Ongoing {
                 id,
-                received,
-                all_received,
+                received: _,
+                all_received: _,
             } => DataTransferEvent::Progress(id),
-            Self::PendingLastBlocks { id, received } => DataTransferEvent::Progress(id),
+            Self::PendingLastBlocks { id, received: _ } => DataTransferEvent::Progress(id),
             Self::Failed { id, reason } => DataTransferEvent::Completed(id, Err(reason)),
-            Self::Completed { id, received } => DataTransferEvent::Completed(id, Ok(())),
+            Self::Completed { id, received: _ } => DataTransferEvent::Completed(id, Ok(())),
         }
     }
 }

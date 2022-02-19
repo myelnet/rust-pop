@@ -171,8 +171,8 @@ pub struct PeerDiscovery {
 impl PeerDiscovery {
     pub fn new(
         config: Config,
-        mut peer_table: Option<Arc<RwLock<PeerTable>>>,
         peer_id: PeerId,
+        mut peer_table: Option<Arc<RwLock<PeerTable>>>,
     ) -> Self {
         let protocols = std::iter::once((PeerDiscoveryProtocol, ProtocolSupport::Full));
         let mut rr_config = RequestResponseConfig::default();
@@ -525,7 +525,7 @@ mod tests {
             let (peer_id, trans) = mk_transport();
             let mut swarm = Swarm::new(
                 trans,
-                PeerDiscovery::new(Config::default(), None, peer_id),
+                PeerDiscovery::new(Config::default(), peer_id, None),
                 peer_id,
             );
             for i in 0..num_addreses {

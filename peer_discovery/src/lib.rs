@@ -14,6 +14,8 @@ use libp2p::swarm::{
     ProtocolsHandler,
 };
 use serde::{Deserialize, Serialize};
+use serde_tuple::{Deserialize_tuple, Serialize_tuple};
+
 use serde_cbor::{from_slice, to_vec};
 use smallvec::SmallVec;
 use std::collections::HashMap;
@@ -149,12 +151,12 @@ impl Default for Config {
     }
 }
 
-#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Clone, Serialize_tuple, Deserialize_tuple)]
 pub struct DiscoveryRequest {
     pub id: RequestId,
 }
 
-#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Clone, Serialize_tuple, Deserialize_tuple)]
 pub struct DiscoveryResponse {
     pub id: RequestId,
     pub addresses: SerializablePeerTable,
@@ -314,136 +316,132 @@ impl NetworkBehaviour for PeerDiscovery {
         ctx: &mut Context,
         pparams: &mut impl PollParameters,
     ) -> Poll<NetworkBehaviourAction<Self::OutEvent, Self::ProtocolsHandler>> {
-        let mut exit = false;
-        while !exit {
-            exit = true;
-            while let Poll::Ready(event) = self.inner.poll(ctx, pparams) {
-                exit = false;
-                let event = match event {
-                    NetworkBehaviourAction::GenerateEvent(event) => event,
-                    NetworkBehaviourAction::Dial { opts, handler } => {
-                        return Poll::Ready(NetworkBehaviourAction::Dial { opts, handler });
-                    }
-                    NetworkBehaviourAction::NotifyHandler {
+        while let Poll::Ready(event) = self.inner.poll(ctx, pparams) {
+            let event = match event {
+                NetworkBehaviourAction::GenerateEvent(event) => event,
+                NetworkBehaviourAction::Dial { opts, handler } => {
+                    return Poll::Ready(NetworkBehaviourAction::Dial { opts, handler });
+                }
+                NetworkBehaviourAction::NotifyHandler {
+                    peer_id,
+                    handler,
+                    event,
+                } => {
+                    return Poll::Ready(NetworkBehaviourAction::NotifyHandler {
                         peer_id,
                         handler,
                         event,
-                    } => {
-                        return Poll::Ready(NetworkBehaviourAction::NotifyHandler {
-                            peer_id,
-                            handler,
-                            event,
-                        });
-                    }
-                    NetworkBehaviourAction::ReportObservedAddr { address, score } => {
-                        return Poll::Ready(NetworkBehaviourAction::ReportObservedAddr {
-                            address,
-                            score,
-                        });
-                    }
-                    NetworkBehaviourAction::CloseConnection {
+                    });
+                }
+                NetworkBehaviourAction::ReportObservedAddr { address, score } => {
+                    return Poll::Ready(NetworkBehaviourAction::ReportObservedAddr {
+                        address,
+                        score,
+                    });
+                }
+                NetworkBehaviourAction::CloseConnection {
+                    peer_id,
+                    connection,
+                } => {
+                    return Poll::Ready(NetworkBehaviourAction::CloseConnection {
                         peer_id,
                         connection,
-                    } => {
-                        return Poll::Ready(NetworkBehaviourAction::CloseConnection {
-                            peer_id,
-                            connection,
-                        });
-                    }
-                };
-                match event {
-                    RequestResponseEvent::Message { peer: _, message } => match message {
-                        RequestResponseMessage::Request {
-                            request_id: _,
-                            request,
-                            channel,
-                        } => {
-                            let new_addresses: HashMap<Vec<u8>, Vec<Vec<u8>>> = self
-                                .peer_table
-                                .read()
-                                .unwrap()
-                                .iter()
-                                .map_while(|(peer, addresses)| {
-                                    let mut addr_vec = Vec::new();
-                                    for addr in addresses {
-                                        addr_vec.push((*addr).to_vec())
-                                    }
-
-                                    Some((peer.to_bytes(), addr_vec))
-                                })
-                                .collect();
-
-                            let msg = DiscoveryResponse {
-                                id: request.id,
-                                addresses: new_addresses,
-                            };
-                            self.inner.send_response(channel, msg).unwrap();
-                        }
-                        RequestResponseMessage::Response {
-                            request_id: _,
-                            response,
-                        } => {
-                            //  addresses only get returned on a successful response
-                            let new_addresses: PeerTable = response
-                                .clone()
-                                .addresses
-                                .iter()
-                                .map_while(|(peer, addresses)| {
-                                    let mut addr_vec = SmallVec::<[Multiaddr; 6]>::new();
-                                    // check sent peer is valid
-                                    match PeerId::from_bytes(peer) {
-                                        Ok(p) => {
-                                            // check associated multiaddresses are valid
-                                            for addr in addresses {
-                                                match Multiaddr::try_from(addr.clone()) {
-                                                    Ok(a) => addr_vec.push(a),
-                                                    Err(_) => {}
-                                                }
-                                            }
-                                            // remove any potential duplicate data
-                                            addr_vec.sort();
-                                            addr_vec.dedup();
-                                            Some((p, addr_vec))
-                                        }
-                                        Err(_) => None,
-                                    }
-                                })
-                                .collect();
-                            //  update our local peer table
-                            self.peer_table.write().unwrap().extend(new_addresses);
-
-                            return Poll::Ready(NetworkBehaviourAction::GenerateEvent(
-                                DiscoveryEvent::ResponseReceived(response),
-                            ));
-                        }
-                    },
-                    RequestResponseEvent::OutboundFailure {
-                        peer,
-                        request_id,
-                        error,
-                    } => {
-                        println!(
-                            "peer discovery outbound failure {} {} {:?}",
-                            peer, request_id, error
-                        );
-                    }
-                    RequestResponseEvent::InboundFailure {
-                        peer,
-                        request_id,
-                        error,
-                    } => {
-                        println!(
-                            "peer discovery inbound failure {} {} {:?}",
-                            peer, request_id, error
-                        );
-                    }
-                    RequestResponseEvent::ResponseSent {
-                        peer: _,
-                        request_id: _,
-                    } => {}
+                    });
                 }
+            };
+            match event {
+                RequestResponseEvent::Message { peer: _, message } => match message {
+                    RequestResponseMessage::Request {
+                        request_id: _,
+                        request,
+                        channel,
+                    } => {
+                        let new_addresses: HashMap<Vec<u8>, Vec<Vec<u8>>> = self
+                            .peer_table
+                            .read()
+                            .unwrap()
+                            .iter()
+                            .map_while(|(peer, addresses)| {
+                                let mut addr_vec = Vec::new();
+                                for addr in addresses {
+                                    addr_vec.push((*addr).to_vec())
+                                }
+
+                                Some((peer.to_bytes(), addr_vec))
+                            })
+                            .collect();
+
+                        let msg = DiscoveryResponse {
+                            id: request.id,
+                            addresses: new_addresses,
+                        };
+                        self.inner.send_response(channel, msg).unwrap();
+                    }
+                    RequestResponseMessage::Response {
+                        request_id: _,
+                        response,
+                    } => {
+                        //  addresses only get returned on a successful response
+                        let new_addresses: PeerTable = response
+                            .clone()
+                            .addresses
+                            .iter()
+                            .map_while(|(peer, addresses)| {
+                                let mut addr_vec = SmallVec::<[Multiaddr; 6]>::new();
+                                // check sent peer is valid
+                                match PeerId::from_bytes(peer) {
+                                    Ok(p) => {
+                                        // check associated multiaddresses are valid
+                                        for addr in addresses {
+                                            match Multiaddr::try_from(addr.clone()) {
+                                                Ok(a) => addr_vec.push(a),
+                                                Err(_) => {}
+                                            }
+                                        }
+                                        // remove any potential duplicate data
+                                        addr_vec.sort();
+                                        addr_vec.dedup();
+                                        Some((p, addr_vec))
+                                    }
+                                    Err(_) => None,
+                                }
+                            })
+                            .collect();
+                        //  update our local peer table
+                        self.peer_table.write().unwrap().extend(new_addresses);
+
+                        return Poll::Ready(NetworkBehaviourAction::GenerateEvent(
+                            DiscoveryEvent::ResponseReceived(response),
+                        ));
+                    }
+                },
+                RequestResponseEvent::OutboundFailure {
+                    peer,
+                    request_id,
+                    error,
+                } => {
+                    println!(
+                        "peer discovery outbound failure {} {} {:?}",
+                        peer, request_id, error
+                    );
+                }
+                RequestResponseEvent::InboundFailure {
+                    peer,
+                    request_id,
+                    error,
+                } => {
+                    println!(
+                        "peer discovery inbound failure {} {} {:?}",
+                        peer, request_id, error
+                    );
+                }
+                RequestResponseEvent::ResponseSent {
+                    peer: _,
+                    request_id: _,
+                } => {}
             }
         }
+
         Poll::Pending
     }
 }
@@ -588,6 +586,8 @@ mod tests {
         peer2.add_address(&peer1);
         peer2.add_address(&peer3);
         // peer 3 knows peer 2 only and itself
+        peer3.add_address(&peer2);
+        peer3.add_address(&peer2);
         peer3.add_address(&peer2);
         // peer 1 knows peer 2 only and itself
         peer1.add_address(&peer2);

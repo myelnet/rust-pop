@@ -1,11 +1,19 @@
+use async_std::task;
 use blockstore::types::BlockStore;
 use dag_service;
 use libipld::codec::Decode;
 use libipld::store::StoreParams;
 use libipld::{Cid, Ipld};
+use libp2p::{
+    core,
+    core::muxing::StreamMuxerBox,
+    core::transport::{Boxed, OptionalTransport},
+    dns, identity, mplex, noise, tcp, websocket, PeerId, Transport,
+};
 use std::collections::HashMap;
 use std::fs::File;
 use std::sync::Arc;
+use std::time::Duration;
 use warp::{http, Filter};
 
 pub async fn start_server<B: 'static + BlockStore>(store: Arc<B>)
@@ -118,4 +126,36 @@ where
             ))
         }
     }
+}
+
+/// Builds the transport stack that LibP2P will communicate over.
+pub fn build_transport(local_key: identity::Keypair) -> Boxed<(PeerId, StreamMuxerBox)> {
+    let transport = tcp::TcpConfig::new().nodelay(true);
+    let transport = websocket::WsConfig::new(transport.clone()).or_transport(transport);
+    let transport = OptionalTransport::some(
+        if let Ok(dns) = task::block_on(dns::DnsConfig::system(transport.clone())) {
+            dns.boxed()
+        } else {
+            transport.clone().map_err(dns::DnsErr::Transport).boxed()
+        },
+    )
+    .or_transport(transport);
+
+    let auth_config = {
+        let dh_keys = noise::Keypair::<noise::X25519Spec>::new()
+            .into_authentic(&local_key)
+            .expect("Noise key generation failed");
+
+        noise::NoiseConfig::xx(dh_keys).into_authenticated()
+    };
+
+    let mut mplex_config = mplex::MplexConfig::new();
+    mplex_config.set_max_buffer_size(usize::MAX);
+
+    transport
+        .upgrade(core::upgrade::Version::V1)
+        .authenticate(auth_config)
+        .multiplex(mplex_config)
+        .timeout(Duration::from_secs(20))
+        .boxed()
 }

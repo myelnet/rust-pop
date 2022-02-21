@@ -124,7 +124,6 @@ async fn start() -> Result<(), Box<dyn Error>> {
     let bs = LfuBlockstore::new(0, BlockstoreDB::open("path")?)?;
     let config = NodeConfig {
         listening_multiaddr: Some("/ip4/0.0.0.0/tcp/0/ws".parse()?),
-        wasm_external_transport: None,
         blockstore: bs,
     };
 

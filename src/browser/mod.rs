@@ -14,8 +14,6 @@ use std::time::Duration;
 
 use wasm_bindgen::prelude::*;
 
-use libp2p_wasm_ext::{ffi, ExtTransport};
-
 // pub use console_error_panic_hook::set_once as set_console_error_panic_hook;
 pub use console_log::init_with_level as init_console_log;
 

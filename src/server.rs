@@ -8,7 +8,7 @@ use libp2p::{
     core,
     core::muxing::StreamMuxerBox,
     core::transport::{Boxed, OptionalTransport},
-    dns, identity, mplex, noise, tcp, websocket, PeerId,
+    dns, identity, mplex, noise, tcp, websocket, PeerId, Transport,
 };
 use std::collections::HashMap;
 use std::fs::File;
@@ -136,7 +136,7 @@ pub fn build_transport(local_key: identity::Keypair) -> Boxed<(PeerId, StreamMux
         if let Ok(dns) = task::block_on(dns::DnsConfig::system(transport.clone())) {
             dns.boxed()
         } else {
-            transport.map_err(dns::DnsErr::Transport).boxed()
+            transport.clone().map_err(dns::DnsErr::Transport).boxed()
         },
     )
     .or_transport(transport);

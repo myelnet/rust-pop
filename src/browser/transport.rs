@@ -66,7 +66,10 @@ impl WsTransport {
             if let Ok(abuf) = e.data().dyn_into::<js_sys::ArrayBuffer>() {
                 let array = js_sys::Uint8Array::new(&abuf);
                 if !xs.is_closed() {
-                    xs.start_send(array.to_vec()).unwrap();
+                    match xs.try_send(array.to_vec()) {
+                        Ok(_) => log::info!("success"),
+                        Err(e) => log::info!("{:}?", e)
+                    }
                 }
             }
         }) as Box<dyn FnMut(MessageEvent)>);
@@ -145,6 +148,7 @@ impl AsyncRead for Connection {
         loop {
             match mem::replace(&mut self.read_state, ConnectionReadState::Finished) {
                 ConnectionReadState::Finished => {
+                    log::info!("finished");
                     break Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()))
                 }
                 ConnectionReadState::PendingData(mut data) => {
@@ -176,11 +180,14 @@ impl AsyncRead for Connection {
                     } else {
                         log::info!("handling pending buffer");
                         if buf.len() <= data.len() {
+                            log::info!("less than");
                             buf.copy_from_slice(&data[..buf.len()]);
                             self.read_state =
                                 ConnectionReadState::PendingData(data.split_off(buf.len()));
-                            break Poll::Ready(Ok(buf.len()));
+                            continue;
+                            // break Poll::Ready(Ok(buf.len()));
                         } else {
+                            log::info!("more than");
                             let len = data.len();
                             buf[..len].copy_from_slice(&data);
                             self.read_state = ConnectionReadState::PendingData(Vec::new());

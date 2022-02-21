@@ -69,7 +69,7 @@ where
 
         let behaviour = DataTransfer::new(
             local_peer_id,
-            Graphsync::new(GraphsyncConfig::default(), store.clone(), peer_table.clone()),
+            Graphsync::new(GraphsyncConfig::default(), store.clone()),
             PeerDiscovery::new(PeerDiscoveryConfig::default(), local_peer_id, peer_table),
         );
 

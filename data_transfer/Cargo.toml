@@ -28,7 +28,7 @@ num-bigint = { package = "forest_bigint", version = "0.1.1", features = [
 libipld = "0.12"
 smallvec = "1.8.0"
 instant = "0.1.12"
-peer_discovery = { path = "../peer_discovery" }
+routing = { path = "../routing" }
 
 [dev-dependencies]
 hex = "0.4.3"

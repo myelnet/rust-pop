@@ -169,23 +169,17 @@ pub struct PeerDiscovery {
 }
 
 impl PeerDiscovery {
-    pub fn new(
-        config: Config,
-        peer_id: PeerId,
-        mut peer_table: Option<Arc<RwLock<PeerTable>>>,
-    ) -> Self {
+    pub fn new(config: Config, peer_id: PeerId) -> Self {
         let protocols = std::iter::once((PeerDiscoveryProtocol, ProtocolSupport::Full));
         let mut rr_config = RequestResponseConfig::default();
         rr_config.set_connection_keep_alive(config.connection_keep_alive);
         rr_config.set_request_timeout(config.request_timeout);
         let inner = RequestResponse::new(DiscoveryCodec::default(), protocols, rr_config);
-        if let None = peer_table {
-            peer_table = Some(Arc::new(RwLock::new(HashMap::new())))
-        }
+        let peer_table = Arc::new(RwLock::new(HashMap::new()));
         Self {
             id_counter: Arc::new(AtomicI32::new(1)),
             inner,
-            peer_table: peer_table.unwrap(),
+            peer_table,
             peer_id,
         }
     }
@@ -273,13 +267,6 @@ impl NetworkBehaviour for PeerDiscovery {
         handler: <Self::ProtocolsHandler as IntoProtocolsHandler>::Handler,
         error: &DialError,
     ) {
-        // remove from peer table
-        match peer_id {
-            Some(p) => {
-                self.peer_table.write().unwrap().remove(&p);
-            }
-            None => {}
-        }
         let req_res = handler;
         self.inner.inject_dial_failure(peer_id, req_res, error)
     }
@@ -301,12 +288,10 @@ impl NetworkBehaviour for PeerDiscovery {
     }
 
     fn inject_new_external_addr(&mut self, addr: &Multiaddr) {
-        self.add_address(&self.peer_id.clone(), addr.clone());
         self.inner.inject_new_external_addr(addr)
     }
 
     fn inject_expired_external_addr(&mut self, addr: &Multiaddr) {
-        self.remove_address(&self.peer_id.clone(), addr);
         self.inner.inject_expired_external_addr(addr)
     }
 
@@ -532,10 +517,10 @@ mod tests {
             let (peer_id, trans) = mk_transport();
             let mut swarm = Swarm::new(
                 trans,
-                PeerDiscovery::new(Config::default(), peer_id, None),
+                PeerDiscovery::new(Config::default(), peer_id),
                 peer_id,
             );
-            for i in 0..num_addreses {
+            for _i in 0..num_addreses {
                 Swarm::listen_on(&mut swarm, "/ip4/127.0.0.1/tcp/0".parse().unwrap()).unwrap();
             }
             while swarm.next().now_or_never().is_some() {}

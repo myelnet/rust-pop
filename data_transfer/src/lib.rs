@@ -22,7 +22,7 @@ use network::{
     EXTENSION_KEY,
 };
 use num_bigint::ToBigInt;
-use peer_discovery::{DiscoveryEvent, PeerDiscovery};
+use routing::{DiscoveryEvent, PeerDiscovery};
 use std::{
     collections::{HashMap, VecDeque},
     sync::Arc,
@@ -398,7 +398,6 @@ mod tests {
     use libp2p::yamux::YamuxConfig;
     use libp2p::{PeerId, Swarm, Transport};
     use rand::prelude::*;
-    use std::sync::RwLock;
     use std::time::Duration;
 
     fn mk_transport() -> (PeerId, Boxed<(PeerId, StreamMuxerBox)>) {
@@ -429,10 +428,9 @@ mod tests {
     impl Peer {
         fn new() -> Self {
             let (peer_id, trans) = mk_transport();
-            let peer_table = Some(Arc::new(RwLock::new(HashMap::new())));
             let bs = Arc::new(MemoryBlockStore::default());
             let gs = Graphsync::new(Default::default(), bs.clone());
-            let pd = PeerDiscovery::new(Default::default(), peer_id, peer_table);
+            let pd = PeerDiscovery::new(Default::default(), peer_id);
             let dt = DataTransfer::new(peer_id, gs, pd);
             let mut swarm = Swarm::new(trans, dt, peer_id);
             Swarm::listen_on(&mut swarm, "/ip4/127.0.0.1/tcp/0".parse().unwrap()).unwrap();

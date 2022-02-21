@@ -24,10 +24,9 @@ use libp2p::{
 };
 #[cfg(feature = "native")]
 use libp2p::{dns, tcp, websocket};
-use peer_discovery::{Config as PeerDiscoveryConfig, PeerDiscovery};
 use rand::prelude::*;
-use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use routing::{Config as PeerDiscoveryConfig, PeerDiscovery};
+use std::sync::Arc;
 use std::time::Duration;
 #[cfg(feature = "browser")]
 use wasm_bindgen_futures;
@@ -65,12 +64,11 @@ where
         let store = Arc::new(config.blockstore);
         // temp behaviour to be replaced with graphsync
         // let behaviour = Ping::new(PingConfig::new().with_keep_alive(true));
-        let peer_table = Some(Arc::new(RwLock::new(HashMap::new())));
 
         let behaviour = DataTransfer::new(
             local_peer_id,
             Graphsync::new(GraphsyncConfig::default(), store.clone()),
-            PeerDiscovery::new(PeerDiscoveryConfig::default(), local_peer_id, peer_table),
+            PeerDiscovery::new(PeerDiscoveryConfig::default(), local_peer_id),
         );
 
         #[cfg(feature = "native")]

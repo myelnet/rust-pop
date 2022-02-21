@@ -258,6 +258,10 @@ where
     pub fn add_address(&mut self, peer_id: &PeerId, addr: Multiaddr) {
         self.peer_discovery.add_address(peer_id, addr);
     }
+
+    fn addresses_of_peer(&mut self, peer_id: &PeerId) -> Vec<Multiaddr> {
+        self.peer_discovery.addresses_of_peer(peer_id)
+    }
 }
 
 impl<S: 'static + BlockStore> NetworkBehaviourEventProcess<GraphsyncEvent> for DataTransfer<S>
@@ -427,7 +431,7 @@ mod tests {
             let (peer_id, trans) = mk_transport();
             let peer_table = Some(Arc::new(RwLock::new(HashMap::new())));
             let bs = Arc::new(MemoryBlockStore::default());
-            let gs = Graphsync::new(Default::default(), bs.clone(), peer_table.clone());
+            let gs = Graphsync::new(Default::default(), bs.clone());
             let pd = PeerDiscovery::new(Default::default(), peer_id, peer_table);
             let dt = DataTransfer::new(peer_id, gs, pd);
             let mut swarm = Swarm::new(trans, dt, peer_id);
@@ -520,44 +524,6 @@ mod tests {
                 .read()
                 .unwrap(),
             *peer1
-                .swarm()
-                .behaviour()
-                .peer_discovery
-                .peer_table
-                .read()
-                .unwrap()
-        );
-
-        //  assert graphsync addresses have also synced
-        assert_eq!(
-            *peer3
-                .swarm()
-                .behaviour()
-                .graphsync
-                .inner
-                .addresses
-                .read()
-                .unwrap(),
-            *peer1
-                .swarm()
-                .behaviour()
-                .peer_discovery
-                .peer_table
-                .read()
-                .unwrap()
-        );
-
-        //  assert graphsync addresses have also synced
-        assert_eq!(
-            *peer1
-                .swarm()
-                .behaviour()
-                .graphsync
-                .inner
-                .addresses
-                .read()
-                .unwrap(),
-            *peer3
                 .swarm()
                 .behaviour()
                 .peer_discovery

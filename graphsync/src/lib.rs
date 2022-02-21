@@ -12,7 +12,7 @@ use futures::io::{AsyncRead, AsyncWrite};
 use futures::task::{Context, Poll};
 use graphsync_pb as pb;
 use network::{
-    InboundFailure, MessageCodec, OutboundFailure, PeerTable, ProtocolName, RequestId as ReqResId,
+    InboundFailure, MessageCodec, OutboundFailure, ProtocolName, RequestId as ReqResId,
     RequestResponse, RequestResponseConfig, RequestResponseEvent,
 };
 use request_manager::{RequestEvent, RequestManager};
@@ -172,7 +172,7 @@ impl Default for Config {
 }
 
 pub struct Graphsync<S: BlockStore> {
-    pub inner: RequestResponse<GraphsyncCodec<S::Params>>,
+    inner: RequestResponse<GraphsyncCodec<S::Params>>,
     request_manager: RequestManager<S>,
     response_manager: ResponseManager<S>,
     hooks: Arc<RwLock<GraphsyncHooks>>,
@@ -182,24 +182,12 @@ impl<S: 'static + BlockStore> Graphsync<S>
 where
     Ipld: Decode<<S::Params as StoreParams>::Codecs>,
 {
-    pub fn new(
-        config: Config,
-        store: Arc<S>,
-        mut peer_table: Option<Arc<RwLock<PeerTable>>>,
-    ) -> Self {
+    pub fn new(config: Config, store: Arc<S>) -> Self {
         let protocols = std::iter::once(GraphsyncProtocol);
         let mut rr_config = RequestResponseConfig::default();
         rr_config.set_connection_keep_alive(config.connection_keep_alive);
         rr_config.set_request_timeout(config.request_timeout);
-        if let None = peer_table {
-            peer_table = Some(Arc::new(RwLock::new(HashMap::new())))
-        }
-        let inner = RequestResponse::new(
-            GraphsyncCodec::default(),
-            protocols,
-            rr_config,
-            peer_table.unwrap(),
-        );
+        let inner = RequestResponse::new(GraphsyncCodec::default(), protocols, rr_config);
         let hooks = Arc::new(RwLock::new(GraphsyncHooks::default()));
         Self {
             inner,
@@ -867,7 +855,7 @@ mod tests {
             let store = Arc::new(bs);
             let mut swarm = Swarm::new(
                 trans,
-                Graphsync::new(Config::default(), store.clone(), None),
+                Graphsync::new(Config::default(), store.clone()),
                 peer_id,
             );
             Swarm::listen_on(&mut swarm, "/ip4/127.0.0.1/tcp/0".parse().unwrap()).unwrap();
@@ -1099,7 +1087,7 @@ mod tests {
                         assert_eq!(req_id, id);
                         assert_eq!(size, exp_size);
                     }
-                    GraphsyncEvent::ResponseReceived(_, responses) => {}
+                    GraphsyncEvent::ResponseReceived(_, _responses) => {}
                     GraphsyncEvent::Complete(rid, Ok(())) => {
                         assert_eq!(rid, id);
                         break;

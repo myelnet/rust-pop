@@ -15,11 +15,10 @@ use smallvec::SmallVec;
 use std::{
     collections::{HashMap, VecDeque},
     fmt,
-    sync::{atomic::AtomicU64, Arc, RwLock},
+    sync::{atomic::AtomicU64, Arc},
     task::{Context, Poll},
     time::Duration,
 };
-pub type PeerTable = HashMap<PeerId, SmallVec<[Multiaddr; 6]>>;
 
 /// An inbound request or response.
 #[derive(Debug)]
@@ -204,7 +203,7 @@ where
     /// reachable addresses, if any.
     connected: HashMap<PeerId, SmallVec<[Connection<TCodec::Message>; 2]>>,
     /// Externally managed addresses via `add_address` and `remove_address`.
-    pub addresses: Arc<RwLock<PeerTable>>,
+    addresses: HashMap<PeerId, SmallVec<[Multiaddr; 6]>>,
     /// Requests that have not yet been sent and are waiting for a connection
     /// to be established.
     pending_outbound_requests: HashMap<PeerId, SmallVec<[OutboundProtocol<TCodec>; 10]>>,
@@ -216,12 +215,7 @@ where
 {
     /// Creates a new `RequestResponse` behaviour for the given
     /// protocols, codec and configuration.
-    pub fn new<I>(
-        codec: TCodec,
-        protocols: I,
-        cfg: RequestResponseConfig,
-        addresses: Arc<RwLock<PeerTable>>,
-    ) -> Self
+    pub fn new<I>(codec: TCodec, protocols: I, cfg: RequestResponseConfig) -> Self
     where
         I: IntoIterator<Item = TCodec::Protocol>,
     {
@@ -241,7 +235,7 @@ where
             pending_events: VecDeque::new(),
             connected: HashMap::new(),
             pending_outbound_requests: HashMap::new(),
-            addresses,
+            addresses: HashMap::new(),
         }
     }
 
@@ -342,23 +336,18 @@ where
     ///
     /// Addresses added in this way are only removed by `remove_address`.
     pub fn add_address(&mut self, peer: &PeerId, address: Multiaddr) {
-        self.addresses
-            .write()
-            .unwrap()
-            .entry(*peer)
-            .or_default()
-            .push(address);
+        self.addresses.entry(*peer).or_default().push(address);
     }
 
     /// Removes an address of a peer previously added via `add_address`.
     pub fn remove_address(&mut self, peer: &PeerId, address: &Multiaddr) {
         let mut last = false;
-        if let Some(addresses) = self.addresses.write().unwrap().get_mut(peer) {
+        if let Some(addresses) = self.addresses.get_mut(peer) {
             addresses.retain(|a| a != address);
             last = addresses.is_empty();
         }
         if last {
-            self.addresses.write().unwrap().remove(peer);
+            self.addresses.remove(peer);
         }
     }
 
@@ -438,7 +427,7 @@ where
         if let Some(connections) = self.connected.get(peer) {
             addresses.extend(connections.iter().filter_map(|c| c.address.clone()))
         }
-        if let Some(more) = self.addresses.read().unwrap().get(peer) {
+        if let Some(more) = self.addresses.get(peer) {
             addresses.extend(more.into_iter().cloned());
         }
         addresses

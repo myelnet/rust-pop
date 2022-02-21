@@ -6,7 +6,7 @@ require("esbuild")
       servedir: "public",
     },
     {
-      entryPoints: ["src/index.tsx", "src/sw.ts"],
+      entryPoints: ["src/index.tsx"],
       outdir: "public",
       bundle: true,
     }

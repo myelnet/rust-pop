@@ -28,28 +28,41 @@ function App() {
     if (!root || !maddr) {
       return;
     }
-    fetch("/" + root + "?peer=" + maddr)
-      .then((res) => res.text())
-      .then((res) => console.log(res));
+    wasm_bindgen("pop_bg.wasm")
+      .then(() => {
+        console.log("wasm loaded");
+        //@ts-ignore
+        const { request_bg } = wasm_bindgen;
+        const parts = maddr.split("/p2p/");
+        request_bg({
+          logLevel: "info",
+          maddress: parts[0],
+          peerId: parts[1],
+          cid: root,
+        })
+          .then(() => console.log("success"))
+          .catch(console.error);
+      })
+      .catch(console.error);
   }
   useEffect(() => {
     // @ts-ignore
-    if (wasm_bindgen) {
-      console.log("starting wasm");
-      // @ts-ignore
-      wasm_bindgen("pop_bg.wasm")
-        .then(() => {
-          //@ts-ignore
-          const { DagService, WorkerPool } = wasm_bindgen;
-          const pool = new WorkerPool(1);
-          const dag = new DagService();
-          dag
-            .string_to_block("hellot world", pool)
-            .then(console.log)
-            .catch(console.error);
-        })
-        .catch(console.error);
-    }
+    // if (wasm_bindgen) {
+    //   console.log("starting wasm");
+    // @ts-ignore
+    // wasm_bindgen("pop_bg.wasm")
+    // .then(() => {
+    //@ts-ignore
+    // const { DagService, WorkerPool } = wasm_bindgen;
+    // const pool = new WorkerPool(1);
+    // const dag = new DagService();
+    // dag
+    //   .string_to_block("hellot world", pool)
+    //   .then(console.log)
+    //   .catch(console.error);
+    // })
+    // .catch(console.error);
+    // }
   }, []);
   return (
     <div className="app">

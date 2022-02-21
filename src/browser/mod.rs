@@ -65,6 +65,38 @@ pub async fn request(js_params: JsValue) -> Result<(), JsValue> {
     Ok(())
 }
 
+#[wasm_bindgen]
+pub fn request_bg(js_params: JsValue) -> Result<Promise, JsValue> {
+    let params: RequestParams = js_params.into_serde().map_err(js_err)?;
+
+    console_error_panic_hook::set_once();
+    init_console_log(log::Level::from_str(&params.log_level).unwrap()).unwrap();
+
+    let wparams = JsValue::from_serde(&params).unwrap();
+
+    let worker_handle = Worker::new("worker-main.js").unwrap();
+    let (s, r) = oneshot::channel();
+    let mut sender = Some(s);
+    let onmessage = Closure::wrap(Box::new(move |event: MessageEvent| {
+        log::info!("received worker message");
+        let sender = sender.take().unwrap();
+        drop(sender.send(0));
+    }) as Box<dyn FnMut(_)>);
+    worker_handle.set_onmessage(Some(onmessage.as_ref().unchecked_ref()));
+    onmessage.forget();
+
+    let _ = worker_handle.post_message(&wparams);
+    log::info!("posted message to worker");
+
+    let future = async move {
+        match r.await {
+            Ok(_) => Ok(JsValue::undefined()),
+            Err(_) => Err(JsValue::undefined()),
+        }
+    };
+    Ok(wasm_bindgen_futures::future_to_promise(future))
+}
+
 fn js_err<E: ToString + Send + Sync + 'static>(e: E) -> JsValue {
     JsValue::from_str(&e.to_string())
 }

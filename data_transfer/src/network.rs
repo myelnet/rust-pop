@@ -1,6 +1,6 @@
 use filecoin::{
     cid_helpers::CidCbor,
-    types::{Cbor, Serialized},
+    types::{Cbor},
 };
 use futures::future::BoxFuture;
 use futures::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -8,8 +8,8 @@ use graphsync::traversal::{RecursionLimit, Selector};
 use graphsync::Extensions;
 use libipld::Cid;
 use libp2p::core::{
-    connection::ConnectionId, upgrade, ConnectedPoint, InboundUpgrade, Multiaddr, OutboundUpgrade,
-    PeerId, UpgradeInfo,
+    connection::ConnectionId, ConnectedPoint, InboundUpgrade, Multiaddr, OutboundUpgrade, PeerId,
+    UpgradeInfo,
 };
 use libp2p::swarm::{
     IntoProtocolsHandler, NetworkBehaviour, NetworkBehaviourAction, NotifyHandler, OneShotHandler,
@@ -419,7 +419,7 @@ impl NetworkBehaviour for DataTransferNetwork {
     fn inject_event(
         &mut self,
         peer_id: PeerId,
-        conn: ConnectionId,
+        _: ConnectionId,
         event: <Self::ProtocolsHandler as ProtocolsHandler>::OutEvent,
     ) {
         // @FIXME: sometimes we seem to receive empty messages. It might be a bug from the handler.
@@ -707,7 +707,7 @@ mod tests {
         let mut peer1 = Peer::new();
         let mut peer2 = Peer::new();
 
-        peer2.swarm().dial(peer1.addr.clone());
+        peer2.swarm().dial(peer1.addr.clone()).unwrap();
 
         let cid = Cid::default();
 

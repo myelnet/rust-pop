@@ -164,17 +164,18 @@ pub struct PeerDiscovery {
     //  we implement our own id_counter (instead of libp2p's) to ensure the request / response messages are CBOR encodable
     id_counter: Arc<AtomicI32>,
     inner: RequestResponse<DiscoveryCodec>,
-    peer_table: Arc<RwLock<PeerTable>>,
+    pub peer_table: Arc<RwLock<PeerTable>>,
     peer_id: PeerId,
 }
 
 impl PeerDiscovery {
-    pub fn new(config: Config, peer_table: Arc<RwLock<PeerTable>>, peer_id: PeerId) -> Self {
+    pub fn new(config: Config, peer_id: PeerId) -> Self {
         let protocols = std::iter::once((PeerDiscoveryProtocol, ProtocolSupport::Full));
         let mut rr_config = RequestResponseConfig::default();
         rr_config.set_connection_keep_alive(config.connection_keep_alive);
         rr_config.set_request_timeout(config.request_timeout);
         let inner = RequestResponse::new(DiscoveryCodec::default(), protocols, rr_config);
+        let peer_table = Arc::new(RwLock::new(HashMap::new()));
         Self {
             id_counter: Arc::new(AtomicI32::new(1)),
             inner,
@@ -514,13 +515,12 @@ mod tests {
     impl Peer {
         fn new(num_addreses: usize) -> Self {
             let (peer_id, trans) = mk_transport();
-            let peer_table = Arc::new(RwLock::new(HashMap::new()));
             let mut swarm = Swarm::new(
                 trans,
-                PeerDiscovery::new(Config::default(), peer_table, peer_id),
+                PeerDiscovery::new(Config::default(), peer_id),
                 peer_id,
             );
-            for i in 0..num_addreses {
+            for _i in 0..num_addreses {
                 Swarm::listen_on(&mut swarm, "/ip4/127.0.0.1/tcp/0".parse().unwrap()).unwrap();
             }
             while swarm.next().now_or_never().is_some() {}

@@ -25,6 +25,7 @@ use libp2p::{
 #[cfg(feature = "native")]
 use libp2p::{dns, tcp, websocket};
 use rand::prelude::*;
+use routing::{Config as PeerDiscoveryConfig, PeerDiscovery};
 use std::sync::Arc;
 use std::time::Duration;
 #[cfg(feature = "browser")]
@@ -63,9 +64,11 @@ where
         let store = Arc::new(config.blockstore);
         // temp behaviour to be replaced with graphsync
         // let behaviour = Ping::new(PingConfig::new().with_keep_alive(true));
+
         let behaviour = DataTransfer::new(
             local_peer_id,
             Graphsync::new(GraphsyncConfig::default(), store.clone()),
+            PeerDiscovery::new(PeerDiscoveryConfig::default(), local_peer_id),
         );
 
         #[cfg(feature = "native")]

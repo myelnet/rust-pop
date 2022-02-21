@@ -6,8 +6,8 @@ pub use network::DealParams;
 use blockstore::types::BlockStore;
 use filecoin::{cid_helpers::CidCbor, types::Cbor};
 use fsm::{Channel, ChannelEvent};
-use graphsync::traversal::{RecursionLimit, Selector};
-use graphsync::{Extensions, Graphsync, GraphsyncEvent, RequestId};
+use graphsync::traversal::Selector;
+use graphsync::{Graphsync, GraphsyncEvent, RequestId};
 use instant;
 use libipld::codec::Decode;
 use libipld::store::StoreParams;
@@ -22,6 +22,7 @@ use network::{
     EXTENSION_KEY,
 };
 use num_bigint::ToBigInt;
+use routing::{DiscoveryEvent, PeerDiscovery};
 use std::{
     collections::{HashMap, VecDeque},
     sync::Arc,
@@ -34,6 +35,7 @@ pub enum DataTransferEvent {
     Accepted(ChannelId),
     Progress(ChannelId),
     Completed(ChannelId, Result<(), String>),
+    PeerTableUpdated,
 }
 
 #[derive(NetworkBehaviour)]
@@ -48,6 +50,7 @@ where
 {
     graphsync: Graphsync<S>,
     network: DataTransferNetwork,
+    peer_discovery: PeerDiscovery,
 
     #[behaviour(ignore)]
     peer_id: PeerId,
@@ -65,7 +68,11 @@ impl<S: 'static + BlockStore> DataTransfer<S>
 where
     Ipld: Decode<<S::Params as StoreParams>::Codecs>,
 {
-    pub fn new(peer_id: PeerId, mut graphsync: Graphsync<S>) -> Self {
+    pub fn new(
+        peer_id: PeerId,
+        mut graphsync: Graphsync<S>,
+        peer_discovery: PeerDiscovery,
+    ) -> Self {
         let now_unix = instant::now() as u64;
 
         graphsync.register_incoming_request_hook(Arc::new(|_peer, gs_req| {
@@ -102,6 +109,7 @@ where
         Self {
             peer_id,
             graphsync,
+            peer_discovery,
             next_request_id: now_unix,
             network: DataTransferNetwork::new(),
             pending_events: VecDeque::default(),
@@ -174,7 +182,7 @@ where
 
     fn poll(
         &mut self,
-        cx: &mut Context,
+        _: &mut Context,
         _: &mut impl PollParameters,
     ) -> Poll<
         NetworkBehaviourAction<
@@ -242,8 +250,17 @@ where
         }
     }
 
+    fn process_discovery_response(&mut self) {
+        self.pending_events
+            .push_back(DataTransferEvent::PeerTableUpdated);
+    }
+
     pub fn add_address(&mut self, peer_id: &PeerId, addr: Multiaddr) {
-        self.graphsync.add_address(peer_id, addr);
+        self.peer_discovery.add_address(peer_id, addr);
+    }
+
+    fn addresses_of_peer(&mut self, peer_id: &PeerId) -> Vec<Multiaddr> {
+        self.peer_discovery.addresses_of_peer(peer_id)
     }
 }
 
@@ -306,7 +323,11 @@ where
                     };
                 }
             }
-            GraphsyncEvent::Progress { req_id, link, size } => {
+            GraphsyncEvent::Progress {
+                req_id,
+                link: _,
+                size,
+            } => {
                 let (ch_id, ch) = self
                     .get_channel_by_req_id(req_id)
                     .expect("Expected channel to be created before graphsync progress");
@@ -349,13 +370,25 @@ where
     }
 }
 
+impl<S: 'static + BlockStore> NetworkBehaviourEventProcess<DiscoveryEvent> for DataTransfer<S>
+where
+    Ipld: Decode<<S::Params as StoreParams>::Codecs>,
+{
+    fn inject_event(&mut self, event: DiscoveryEvent) {
+        match event {
+            DiscoveryEvent::ResponseReceived(_) => self.process_discovery_response(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use async_std::task;
     use blockstore::memory::MemoryDB as MemoryBlockStore;
-    use dag_service::{add, cat};
+    use dag_service::add;
     use futures::prelude::*;
+    use graphsync::traversal::RecursionLimit;
     use libp2p::core::muxing::StreamMuxerBox;
     use libp2p::core::transport::Boxed;
     use libp2p::identity;
@@ -397,7 +430,8 @@ mod tests {
             let (peer_id, trans) = mk_transport();
             let bs = Arc::new(MemoryBlockStore::default());
             let gs = Graphsync::new(Default::default(), bs.clone());
-            let dt = DataTransfer::new(peer_id, gs);
+            let pd = PeerDiscovery::new(Default::default(), peer_id);
+            let dt = DataTransfer::new(peer_id, gs, pd);
             let mut swarm = Swarm::new(trans, dt, peer_id);
             Swarm::listen_on(&mut swarm, "/ip4/127.0.0.1/tcp/0".parse().unwrap()).unwrap();
             while swarm.next().now_or_never().is_some() {}
@@ -435,10 +469,66 @@ mod tests {
             loop {
                 let ev = self.swarm.next().await?;
                 if let SwarmEvent::Behaviour(event) = ev {
-                    return Some(event);
+                    match event {
+                        DataTransferEvent::PeerTableUpdated => {}
+                        _ => return Some(event),
+                    }
                 }
             }
         }
+
+        async fn next_discovery(&mut self) -> Option<DataTransferEvent> {
+            loop {
+                let ev = self.swarm.next().await?;
+                if let SwarmEvent::Behaviour(event) = ev {
+                    match event {
+                        DataTransferEvent::PeerTableUpdated => return Some(event),
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+
+    #[async_std::test]
+    async fn test_peer_discovery() {
+        let mut peer1 = Peer::new();
+        let mut peer2 = Peer::new();
+        let mut peer3 = Peer::new();
+
+        // peer 2 knows everyone
+        peer2.add_address(&peer1);
+        peer2.add_address(&peer3);
+        // peer 3 knows peer 2 only and itself
+        peer3.add_address(&peer2);
+        // peer 1 knows peer 2 only and itself
+        peer1.add_address(&peer2);
+
+        //  print logs for peer 2
+        let peer2id = peer2.spawn("peer2");
+
+        peer3.swarm().dial(peer2id).unwrap();
+        peer1.swarm().dial(peer2id).unwrap();
+
+        peer3.next_discovery().await;
+        peer1.next_discovery().await;
+
+        assert_eq!(
+            *peer3
+                .swarm()
+                .behaviour()
+                .peer_discovery
+                .peer_table
+                .read()
+                .unwrap(),
+            *peer1
+                .swarm()
+                .behaviour()
+                .peer_discovery
+                .peer_table
+                .read()
+                .unwrap()
+        );
     }
 
     #[async_std::test]
@@ -448,6 +538,7 @@ mod tests {
         peer2.add_address(&peer1);
 
         let store = peer1.store.clone();
+        let pid1 = peer1.spawn("peer1");
 
         // generate 4MiB of random bytes
         const FILE_SIZE: usize = 4 * 1024 * 1024;
@@ -455,8 +546,6 @@ mod tests {
         rand::thread_rng().fill_bytes(&mut data);
 
         let root = add(store.clone(), &data).unwrap();
-
-        let peer1 = peer1.spawn("peer1");
 
         let selector = Selector::ExploreRecursive {
             limit: RecursionLimit::None,
@@ -471,7 +560,7 @@ mod tests {
         let id = peer2
             .swarm()
             .behaviour_mut()
-            .pull(peer1, cid, selector, DealParams::default())
+            .pull(pid1, cid, selector, DealParams::default())
             .unwrap();
 
         loop {
@@ -479,7 +568,7 @@ mod tests {
                 match event {
                     DataTransferEvent::Started(_) => {}
                     DataTransferEvent::Accepted(_) => {}
-                    DataTransferEvent::Progress(chi) => {}
+                    DataTransferEvent::Progress(_) => {}
                     DataTransferEvent::Completed(chid, Ok(())) => {
                         assert_eq!(chid, id);
                         break;

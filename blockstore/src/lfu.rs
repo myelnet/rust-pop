@@ -399,7 +399,6 @@ mod read {
 #[cfg(test)]
 mod write {
     use super::LfuBlockstore;
-    use crate::errors::Error;
     use crate::memory::MemoryDB;
     use std::sync::Arc;
 

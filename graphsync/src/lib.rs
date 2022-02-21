@@ -1087,7 +1087,7 @@ mod tests {
                         assert_eq!(req_id, id);
                         assert_eq!(size, exp_size);
                     }
-                    GraphsyncEvent::ResponseReceived(_, responses) => {}
+                    GraphsyncEvent::ResponseReceived(_, _responses) => {}
                     GraphsyncEvent::Complete(rid, Ok(())) => {
                         assert_eq!(rid, id);
                         break;

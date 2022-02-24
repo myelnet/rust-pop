@@ -20,7 +20,9 @@ use libp2p::swarm::{Swarm, SwarmEvent};
 use libp2p::{self, identity, Multiaddr, PeerId};
 use rand::prelude::*;
 use routing::{Config as PeerDiscoveryConfig, PeerDiscovery};
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use warp::{http, Filter};
 #[cfg(feature = "browser")]
 use wasm_bindgen_futures;
 
@@ -31,11 +33,12 @@ use browser::build_transport;
 use server::build_transport;
 
 const DATA_SIZE: usize = 104857600;
+
 pub struct Node<B: 'static + BlockStore>
 where
     Ipld: Decode<<<B as BlockStore>::Params as StoreParams>::Codecs>,
 {
-    pub swarm: Swarm<DataTransfer<B>>,
+    pub swarm: Arc<Mutex<Swarm<DataTransfer<B>>>>,
     pub store: Arc<B>,
 }
 
@@ -49,7 +52,7 @@ impl<B: BlockStore> Node<B>
 where
     Ipld: Decode<<<B as BlockStore>::Params as StoreParams>::Codecs>,
 {
-    pub async fn new(config: NodeConfig<B>) -> Self {
+    pub fn new(config: NodeConfig<B>) -> Self {
         let local_key = identity::Keypair::generate_ed25519();
         let local_peer_id = PeerId::from(local_key.public());
         println!("Local peer id: {:?}", local_peer_id);
@@ -80,27 +83,16 @@ where
             Swarm::listen_on(&mut swarm, maddr).unwrap();
         }
 
-        // we need to pass a new instantiation of the behaviour as it doesn't implement copy
-        #[cfg(feature = "native")]
-        server::start_server(
-            store.clone(),
-            DataTransfer::new(
-                local_peer_id,
-                Graphsync::new(GraphsyncConfig::default(), store.clone()),
-                PeerDiscovery::new(PeerDiscoveryConfig::default(), local_peer_id),
-            ),
-        )
-        .await;
-
         Node {
-            swarm,
+            swarm: Arc::new(Mutex::new(swarm)),
             store: { store.clone() },
         }
     }
 
-    pub async fn run(mut self) {
+    pub async fn run(&mut self) {
+        self.start_server().await;
         loop {
-            match self.swarm.select_next_some().await {
+            match self.swarm.lock().unwrap().select_next_some().await {
                 SwarmEvent::NewListenAddr { address, .. } => println!("Listening on {:?}", address),
                 SwarmEvent::Behaviour(event) => println!("{:?}", event),
                 _ => {}
@@ -108,8 +100,69 @@ where
         }
     }
 
+    #[cfg(feature = "native")]
+    pub async fn start_server(&mut self) {
+        let swarm = self.swarm.clone();
+        let store = self.store.clone();
+        let store_filter = warp::any().map(move || store.clone());
+        let swarm_filter = warp::any().map(move || swarm.clone());
+
+        let add_file = warp::post()
+            .and(warp::path("add"))
+            .and(warp::body::bytes())
+            .map(|bytes: warp::hyper::body::Bytes| {
+                return std::str::from_utf8(&bytes).unwrap().to_string();
+            })
+            .and(store_filter.clone())
+            .and_then(|path: String, store: Arc<B>| {
+                return server::read_file(path.clone(), store.clone());
+            });
+
+        let export_file = warp::post()
+            .and(warp::path("export"))
+            .and(warp::body::json())
+            .and(store_filter.clone())
+            .and_then(|simple_map: HashMap<String, String>, store: Arc<B>| {
+                //  can safely unwrap entries as if they are None the method will just return a failure
+                //  response to the requesting client
+                return server::export_file(
+                    simple_map.get("cid").unwrap().to_string(),
+                    simple_map.get("path").unwrap().to_string(),
+                    store.clone(),
+                );
+            });
+
+        let retrieve_file = warp::post()
+            .and(warp::path("retrieve"))
+            .and(warp::body::json())
+            .and(swarm_filter.clone())
+            .and_then(
+                |simple_map: HashMap<String, String>,
+                 behaviour: Arc<Mutex<Swarm<DataTransfer<B>>>>| {
+                    //  can safely unwrap entries as if they are None the method will just return a failure
+                    //  response to the requesting client
+                    return server::retrieve_file(
+                        simple_map.get("cid").unwrap().to_string(),
+                        simple_map.get("peer").unwrap().to_string(),
+                        simple_map.get("multiaddr").unwrap().to_string(),
+                        behaviour,
+                    );
+                },
+            );
+
+        let routes = add_file.or(export_file).or(retrieve_file);
+        // serve on port 27403
+        async_std::task::spawn(
+            async move { warp::serve(routes).run(([127, 0, 0, 1], 27403)).await },
+        );
+    }
+
     pub async fn run_request(&mut self, addr: Multiaddr, peer: PeerId, cid: Cid) {
-        self.swarm.behaviour_mut().add_address(&peer, addr);
+        self.swarm
+            .lock()
+            .unwrap()
+            .behaviour_mut()
+            .add_address(&peer, addr);
 
         let selector = Selector::ExploreRecursive {
             limit: RecursionLimit::None,
@@ -126,14 +179,20 @@ where
 
         let start = Instant::now();
 
-        if let Err(e) = self.swarm.behaviour_mut().pull(peer, cid, selector, params) {
+        if let Err(e) = self
+            .swarm
+            .lock()
+            .unwrap()
+            .behaviour_mut()
+            .pull(peer, cid, selector, params)
+        {
             panic!("transfer failed {}", e);
         }
 
         log::info!("==> Started transfer");
 
         loop {
-            let ev = self.swarm.next().await.unwrap();
+            let ev = self.swarm.lock().unwrap().next().await.unwrap();
             if let SwarmEvent::Behaviour(event) = ev {
                 match event {
                     DataTransferEvent::Completed(_, Ok(())) => {

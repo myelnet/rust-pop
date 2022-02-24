@@ -3,6 +3,7 @@ use blockstore::lfu::LfuBlockstore;
 use clap::{App, Arg};
 // use libipld::Cid;
 // // use libp2p::{Multiaddr, PeerId};
+use futures::join;
 use pop::{Node, NodeConfig};
 use std::collections::HashMap;
 use std::error::Error;
@@ -35,28 +36,27 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 ),
         )
         .subcommand(
-            // TODO: implement get method on cli
-            App::new("get")
-                .override_help("gets a file from a peer")
-                // .arg(
-                //     Arg::new("peer")
-                //         .short('p')
-                //         .takes_value(true)
-                //         .long("file")
-                //         .required(false)
-                //         .help("path to save file to"),
-                // )
+            App::new("export")
+                .override_help("gets a file from blockstore")
+                .arg(
+                    Arg::new("cid")
+                        .short('c')
+                        .takes_value(true)
+                        .long("cid")
+                        .required(true)
+                        .help("cid to export"),
+                )
                 .arg(
                     Arg::new("path")
-                        .short('f')
+                        .short('p')
                         .takes_value(true)
-                        .long("file")
-                        .required(false)
+                        .long("path")
+                        .required(true)
                         .help("path to save file to"),
                 ),
         )
         .subcommand(
-            App::new("export")
+            App::new("retrieve")
                 .override_help("gets a file from blockstore")
                 .arg(
                     Arg::new("cid")
@@ -67,12 +67,20 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         .help("path to save file to"),
                 )
                 .arg(
-                    Arg::new("path")
+                    Arg::new("peer")
                         .short('p')
                         .takes_value(true)
-                        .long("path")
+                        .long("peer")
                         .required(true)
-                        .help("path to save file to"),
+                        .help("peer id to fetch from"),
+                )
+                .arg(
+                    Arg::new("multiaddr")
+                        .short('m')
+                        .takes_value(true)
+                        .long("multiaddr")
+                        .required(true)
+                        .help("multiaddr of peer to fetch from"),
                 ),
         );
 
@@ -90,6 +98,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
             export(
                 flags.values_of("cid").unwrap().collect(),
                 flags.values_of("path").unwrap().collect(),
+            )
+            .await
+        }
+        Some("retrieve") => {
+            let flags = matches.subcommand().unwrap().1;
+            retrieve(
+                flags.values_of("cid").unwrap().collect(),
+                flags.values_of("peer").unwrap().collect(),
+                flags.values_of("multiaddr").unwrap().collect(),
             )
             .await
         }
@@ -120,6 +137,18 @@ async fn export(cid: String, path: String) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+async fn retrieve(cid: String, peer: String, multiaddr: String) -> Result<(), Box<dyn Error>> {
+    let client = reqwest::Client::new();
+    let map = HashMap::from([("cid", cid), ("peer", peer), ("multiaddr", multiaddr)]);
+    let resp = client
+        .post("http://127.0.0.1:27403/retrieve")
+        .json(&map)
+        .send()
+        .await?;
+    println!("{:?}: {:?}", resp.status(), resp.text().await.unwrap());
+    Ok(())
+}
+
 async fn start() -> Result<(), Box<dyn Error>> {
     let bs = LfuBlockstore::new(0, BlockstoreDB::open("path")?)?;
     let config = NodeConfig {
@@ -127,8 +156,7 @@ async fn start() -> Result<(), Box<dyn Error>> {
         blockstore: bs,
     };
 
-    let node = Node::new(config).await;
-
+    let mut node = Node::new(config);
     node.run().await;
 
     Ok(())

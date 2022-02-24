@@ -10,10 +10,11 @@ use libp2p::{
     core,
     core::muxing::StreamMuxerBox,
     core::transport::{Boxed, OptionalTransport},
-    dns, identity, mplex, noise, tcp, websocket, Multiaddr, PeerId, Transport,
+    dns, identity, mplex, noise, tcp, websocket, Multiaddr, PeerId, Swarm, Transport,
 };
 use std::collections::HashMap;
 use std::fs::File;
+use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use warp::{http, Filter};
@@ -22,55 +23,6 @@ pub async fn start_server<B: 'static + BlockStore>(blockstore: Arc<B>, behaviour
 where
     Ipld: Decode<<<B as BlockStore>::Params as StoreParams>::Codecs>,
 {
-    let behaviour = Arc::new(Mutex::new(behaviour));
-    let store_filter = warp::any().map(move || blockstore.clone());
-    let swarm_filter =
-        warp::any().map(move || -> Arc<Mutex<DataTransfer<B>>> { behaviour.clone() });
-
-    let add_file = warp::post()
-        .and(warp::path("add"))
-        .and(warp::body::bytes())
-        .map(|bytes: warp::hyper::body::Bytes| {
-            return std::str::from_utf8(&bytes).unwrap().to_string();
-        })
-        .and(store_filter.clone())
-        .and_then(|path: String, store: Arc<B>| {
-            return read_file(path.clone(), store.clone());
-        });
-
-    let export_file = warp::post()
-        .and(warp::path("export"))
-        .and(warp::body::json())
-        .and(store_filter.clone())
-        .and_then(|simple_map: HashMap<String, String>, store: Arc<B>| {
-            //  can safely unwrap entries as if they are None the method will just return a failure
-            //  response to the requesting client
-            return export_file(
-                simple_map.get("cid").unwrap().to_string(),
-                simple_map.get("path").unwrap().to_string(),
-                store.clone(),
-            );
-        });
-
-    let retrieve_file = warp::post()
-        .and(warp::path("retrieve"))
-        .and(warp::body::json())
-        .and(swarm_filter.clone())
-        .and_then(
-            |simple_map: HashMap<String, String>, behaviour: Arc<Mutex<DataTransfer<B>>>| {
-                //  can safely unwrap entries as if they are None the method will just return a failure
-                //  response to the requesting client
-                return retrieve_file(
-                    simple_map.get("cid").unwrap().to_string(),
-                    simple_map.get("peer").unwrap().to_string(),
-                    behaviour,
-                );
-            },
-        );
-
-    let routes = add_file.or(export_file);
-    // serve on port 27403
-    async_std::task::spawn(async move { warp::serve(routes).run(([127, 0, 0, 1], 27403)).await });
 }
 
 pub async fn read_file<B: BlockStore>(
@@ -149,6 +101,86 @@ where
     }
 }
 
+pub async fn retrieve_file<B: 'static + BlockStore>(
+    key: String,
+    peer: String,
+    multiaddr: String,
+    swarm: Arc<Mutex<Swarm<DataTransfer<B>>>>,
+) -> Result<impl warp::Reply, warp::Rejection>
+where
+    Ipld: Decode<<<B as BlockStore>::Params as StoreParams>::Codecs>,
+{
+    log::info!("here");
+    let selector = Selector::ExploreRecursive {
+        limit: RecursionLimit::None,
+        sequence: Box::new(Selector::ExploreAll {
+            next: Box::new(Selector::ExploreRecursiveEdge),
+        }),
+        current: None,
+    };
+
+    match Cid::try_from(key) {
+        Ok(cid) => match PeerId::from_str(&peer) {
+            Ok(peer) => match Multiaddr::try_from(multiaddr) {
+                Ok(multiaddr) => {
+                    // make the peer dialable
+                    log::info!("loaded all params");
+                    swarm
+                        .lock()
+                        .unwrap()
+                        .behaviour_mut()
+                        .add_address(&peer, multiaddr);
+                    log::info!("loaded all params");
+                    match swarm.lock().unwrap().behaviour_mut().pull(
+                        peer,
+                        cid,
+                        selector,
+                        DealParams::default(),
+                    ) {
+                        Ok(_) => {
+                            let resp = format!("transfer started in background");
+                            Ok(warp::reply::with_status(resp, http::StatusCode::OK))
+                        }
+                        Err(e) => {
+                            let resp = format!("transfer failed: {}", e.to_string());
+                            println!("{:?}", resp);
+                            Ok(warp::reply::with_status(
+                                resp,
+                                http::StatusCode::INTERNAL_SERVER_ERROR,
+                            ))
+                        }
+                    }
+                }
+                Err(e) => {
+                    let resp = format!("invalid multiaddress: {:?}", e);
+                    println!("{:?}", resp);
+                    Ok(warp::reply::with_status(
+                        resp,
+                        http::StatusCode::BAD_REQUEST,
+                    ))
+                }
+            },
+
+            Err(e) => {
+                let resp = format!("invalid peer id: {:?}", e);
+                println!("{:?}", resp);
+                Ok(warp::reply::with_status(
+                    resp,
+                    http::StatusCode::BAD_REQUEST,
+                ))
+            }
+        },
+        Err(e) => {
+            let resp = format!("invalid cid: {}", e.to_string());
+            println!("{:?}", resp);
+            Ok(warp::reply::with_status(
+                resp,
+                http::StatusCode::BAD_REQUEST,
+            ))
+        }
+    }
+}
+
 /// Builds the transport stack that LibP2P will communicate over.
 pub fn build_transport(local_key: identity::Keypair) -> Boxed<(PeerId, StreamMuxerBox)> {
     let transport = tcp::TcpConfig::new().nodelay(true);
@@ -179,65 +211,4 @@ pub fn build_transport(local_key: identity::Keypair) -> Boxed<(PeerId, StreamMux
         .multiplex(mplex_config)
         .timeout(Duration::from_secs(20))
         .boxed()
-}
-
-pub async fn retrieve_file<B: 'static + BlockStore>(
-    key: String,
-    peer: String,
-    behaviour: Arc<Mutex<DataTransfer<B>>>,
-) -> Result<impl warp::Reply, warp::Rejection>
-where
-    Ipld: Decode<<<B as BlockStore>::Params as StoreParams>::Codecs>,
-{
-    let selector = Selector::ExploreRecursive {
-        limit: RecursionLimit::None,
-        sequence: Box::new(Selector::ExploreAll {
-            next: Box::new(Selector::ExploreRecursiveEdge),
-        }),
-        current: None,
-    };
-
-    match Cid::try_from(key) {
-        Ok(cid) => match PeerId::try_from(peer.as_bytes().to_vec()) {
-                Ok(peer) => {
-                    match behaviour
-                        .lock()
-                        .unwrap()
-                        .pull(peer, cid, selector, DealParams::default())
-                    {
-                        Ok(_) => {
-                            let resp = format!("transfer succeeded");
-                            Ok(warp::reply::with_status(resp, http::StatusCode::OK))
-                        }
-                        Err(e) => {
-                            let resp = format!("transfer failed: {}", e.to_string());
-                            println!("{:?}", resp);
-                            Ok(warp::reply::with_status(
-                                resp,
-                                http::StatusCode::INTERNAL_SERVER_ERROR,
-                            ))
-                        }
-                    }
-                }
-                Err(e) => {
-                    let resp = format!("invalid peer id: {:?}", e);
-                    println!("{:?}", resp);
-                    Ok(warp::reply::with_status(
-                        resp,
-                        http::StatusCode::BAD_REQUEST,
-                    ))
-                }
-        
-
-
-        },
-        Err(e) => {
-            let resp = format!("invalid cid: {}", e.to_string());
-            println!("{:?}", resp);
-            Ok(warp::reply::with_status(
-                resp,
-                http::StatusCode::BAD_REQUEST,
-            ))
-        }
-    }
 }

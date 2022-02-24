@@ -160,6 +160,7 @@ pub struct DiscoveryResponse {
     pub id: RequestId,
     pub addresses: SerializablePeerTable,
 }
+
 pub struct PeerDiscovery {
     //  we implement our own id_counter (instead of libp2p's) to ensure the request / response messages are CBOR encodable
     id_counter: Arc<AtomicI32>,

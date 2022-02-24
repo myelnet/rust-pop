@@ -19,6 +19,42 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use warp::{http, Filter};
 
+pub async fn read_file<B: BlockStore>(
+    path: String,
+    store: Arc<B>,
+) -> Result<impl warp::Reply, warp::Rejection>
+where
+    Ipld: Decode<<<B as BlockStore>::Params as StoreParams>::Codecs>,
+{
+    match File::open(path) {
+        Ok(mut f) => {
+            let res = dag_service::add_from_read(store.clone(), &mut f);
+            match res {
+                Ok(root) => {
+                    let resp = format!("added file {:?} to blockstore", root.unwrap().to_string());
+                    println!("{:?}", resp);
+                    Ok(warp::reply::with_status(resp, http::StatusCode::CREATED))
+                }
+                Err(e) => {
+                    let resp = format!("failed to write to buffer: {}", e.to_string());
+                    println!("{:?}", resp);
+                    Ok(warp::reply::with_status(
+                        resp,
+                        http::StatusCode::INTERNAL_SERVER_ERROR,
+                    ))
+                }
+            }
+        }
+        Err(e) => {
+            let resp = format!("invalid path to file: {}", e.to_string());
+            println!("{:?}", resp);
+            Ok(warp::reply::with_status(
+                resp,
+                http::StatusCode::BAD_REQUEST,
+            ))
+        }
+    }
+}
 
 pub async fn export_file<B: BlockStore>(
     key: String,

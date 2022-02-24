@@ -127,7 +127,7 @@ async fn start() -> Result<(), Box<dyn Error>> {
         blockstore: bs,
     };
 
-    let node = Node::new(config);
+    let node = Node::new(config).await;
 
     node.run().await;
 

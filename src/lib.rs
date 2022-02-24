@@ -49,7 +49,7 @@ impl<B: BlockStore> Node<B>
 where
     Ipld: Decode<<<B as BlockStore>::Params as StoreParams>::Codecs>,
 {
-    pub fn new(config: NodeConfig<B>) -> Self {
+    pub async fn new(config: NodeConfig<B>) -> Self {
         let local_key = identity::Keypair::generate_ed25519();
         let local_peer_id = PeerId::from(local_key.public());
         println!("Local peer id: {:?}", local_peer_id);
@@ -80,6 +80,18 @@ where
             Swarm::listen_on(&mut swarm, maddr).unwrap();
         }
 
+        // we need to pass a new instantiation of the behaviour as it doesn't implement copy
+        #[cfg(feature = "native")]
+        server::start_server(
+            store.clone(),
+            DataTransfer::new(
+                local_peer_id,
+                Graphsync::new(GraphsyncConfig::default(), store.clone()),
+                PeerDiscovery::new(PeerDiscoveryConfig::default(), local_peer_id),
+            ),
+        )
+        .await;
+
         Node {
             swarm,
             store: { store.clone() },
@@ -87,9 +99,6 @@ where
     }
 
     pub async fn run(mut self) {
-        #[cfg(feature = "native")]
-        server::start_server(self.store.clone()).await;
-
         loop {
             match self.swarm.select_next_some().await {
                 SwarmEvent::NewListenAddr { address, .. } => println!("Listening on {:?}", address),

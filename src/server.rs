@@ -1,6 +1,8 @@
 use async_std::task;
 use blockstore::types::BlockStore;
 use dag_service;
+use data_transfer::{DataTransfer, DealParams};
+use graphsync::traversal::{RecursionLimit, Selector};
 use libipld::codec::Decode;
 use libipld::store::StoreParams;
 use libipld::{Cid, Ipld};
@@ -8,19 +10,22 @@ use libp2p::{
     core,
     core::muxing::StreamMuxerBox,
     core::transport::{Boxed, OptionalTransport},
-    dns, identity, mplex, noise, tcp, websocket, PeerId, Transport,
+    dns, identity, mplex, noise, tcp, websocket, Multiaddr, PeerId, Transport,
 };
 use std::collections::HashMap;
 use std::fs::File;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use warp::{http, Filter};
 
-pub async fn start_server<B: 'static + BlockStore>(store: Arc<B>)
+pub async fn start_server<B: 'static + BlockStore>(blockstore: Arc<B>, behaviour: DataTransfer<B>)
 where
     Ipld: Decode<<<B as BlockStore>::Params as StoreParams>::Codecs>,
 {
-    let store_filter = warp::any().map(move || store.clone());
+    let behaviour = Arc::new(Mutex::new(behaviour));
+    let store_filter = warp::any().map(move || blockstore.clone());
+    let swarm_filter =
+        warp::any().map(move || -> Arc<Mutex<DataTransfer<B>>> { behaviour.clone() });
 
     let add_file = warp::post()
         .and(warp::path("add"))
@@ -47,8 +52,24 @@ where
             );
         });
 
+    let retrieve_file = warp::post()
+        .and(warp::path("retrieve"))
+        .and(warp::body::json())
+        .and(swarm_filter.clone())
+        .and_then(
+            |simple_map: HashMap<String, String>, behaviour: Arc<Mutex<DataTransfer<B>>>| {
+                //  can safely unwrap entries as if they are None the method will just return a failure
+                //  response to the requesting client
+                return retrieve_file(
+                    simple_map.get("cid").unwrap().to_string(),
+                    simple_map.get("peer").unwrap().to_string(),
+                    behaviour,
+                );
+            },
+        );
+
     let routes = add_file.or(export_file);
-    // serve on port 3000
+    // serve on port 27403
     async_std::task::spawn(async move { warp::serve(routes).run(([127, 0, 0, 1], 27403)).await });
 }
 
@@ -158,4 +179,65 @@ pub fn build_transport(local_key: identity::Keypair) -> Boxed<(PeerId, StreamMux
         .multiplex(mplex_config)
         .timeout(Duration::from_secs(20))
         .boxed()
+}
+
+pub async fn retrieve_file<B: 'static + BlockStore>(
+    key: String,
+    peer: String,
+    behaviour: Arc<Mutex<DataTransfer<B>>>,
+) -> Result<impl warp::Reply, warp::Rejection>
+where
+    Ipld: Decode<<<B as BlockStore>::Params as StoreParams>::Codecs>,
+{
+    let selector = Selector::ExploreRecursive {
+        limit: RecursionLimit::None,
+        sequence: Box::new(Selector::ExploreAll {
+            next: Box::new(Selector::ExploreRecursiveEdge),
+        }),
+        current: None,
+    };
+
+    match Cid::try_from(key) {
+        Ok(cid) => match PeerId::try_from(peer.as_bytes().to_vec()) {
+                Ok(peer) => {
+                    match behaviour
+                        .lock()
+                        .unwrap()
+                        .pull(peer, cid, selector, DealParams::default())
+                    {
+                        Ok(_) => {
+                            let resp = format!("transfer succeeded");
+                            Ok(warp::reply::with_status(resp, http::StatusCode::OK))
+                        }
+                        Err(e) => {
+                            let resp = format!("transfer failed: {}", e.to_string());
+                            println!("{:?}", resp);
+                            Ok(warp::reply::with_status(
+                                resp,
+                                http::StatusCode::INTERNAL_SERVER_ERROR,
+                            ))
+                        }
+                    }
+                }
+                Err(e) => {
+                    let resp = format!("invalid peer id: {:?}", e);
+                    println!("{:?}", resp);
+                    Ok(warp::reply::with_status(
+                        resp,
+                        http::StatusCode::BAD_REQUEST,
+                    ))
+                }
+        
+
+
+        },
+        Err(e) => {
+            let resp = format!("invalid cid: {}", e.to_string());
+            println!("{:?}", resp);
+            Ok(warp::reply::with_status(
+                resp,
+                http::StatusCode::BAD_REQUEST,
+            ))
+        }
+    }
 }

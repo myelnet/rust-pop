@@ -2,19 +2,19 @@ use crate::errors::Error;
 use async_trait::async_trait;
 
 use libipld::{store::StoreParams, Block, Cid};
-use std::error::Error as StdError;
 use std::iter::FromIterator;
 
 #[async_trait]
 pub trait BlockStore: Send + Sync + Sized {
     type Params: StoreParams;
 
-    fn get(&self, cid: &Cid) -> Result<Block<Self::Params>, Box<dyn StdError + Send + Sync>>;
-    fn insert(&self, block: &Block<Self::Params>) -> Result<(), Box<dyn StdError>>;
+    fn get(&self, cid: &Cid) -> Result<Block<Self::Params>, Error>;
 
-    fn evict(&self, cid: &Cid) -> Result<(), Box<dyn StdError>>;
+    fn insert(&self, block: &Block<Self::Params>) -> Result<(), Error>;
 
-    fn contains(&self, cid: &Cid) -> Result<bool, Box<dyn StdError>>;
+    fn evict(&self, cid: &Cid) -> Result<(), Error>;
+
+    fn contains(&self, cid: &Cid) -> Result<bool, Error>;
 }
 
 pub trait DBStore: Send + Sync {

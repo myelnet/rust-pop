@@ -6,6 +6,8 @@ use thiserror::Error;
 /// Database error
 #[derive(Debug, Error)]
 pub enum Error {
+    #[error("BlockStore: block not found")]
+    BlockNotFound,
     #[error("Invalid bulk write kv lengths, must be equal")]
     InvalidBulkLen,
     #[error("Cannot use unopened database")]

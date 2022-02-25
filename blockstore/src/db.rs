@@ -5,7 +5,6 @@ use libipld::{Block, Cid};
 pub use rocksdb::{
     perf::get_memory_usage_stats, DBIterator, IteratorMode, Options, WriteBatch, DB,
 };
-use std::error::Error as StdError;
 use std::path::Path;
 
 #[derive(Debug)]
@@ -89,24 +88,24 @@ impl DBStore for Db {
 impl BlockStore for Db {
     type Params = DefaultParams;
 
-    fn get(&self, cid: &Cid) -> Result<Block<Self::Params>, Box<dyn StdError + Send + Sync>> {
+    fn get(&self, cid: &Cid) -> Result<Block<Self::Params>, Error> {
         let read_res = self.read(cid.to_bytes())?;
         match read_res {
-            Some(bz) => Ok(Block::<Self::Params>::new(*cid, bz)?),
-            None => Err(Box::new(Error::Other("Cid not in blockstore".to_string()))),
+            Some(bz) => Ok(Block::<Self::Params>::new_unchecked(*cid, bz)),
+            None => Err(Error::BlockNotFound),
         }
     }
-    fn insert(&self, block: &Block<Self::Params>) -> Result<(), Box<dyn StdError>> {
+    fn insert(&self, block: &Block<Self::Params>) -> Result<(), Error> {
         let bytes = block.data();
         let cid = &block.cid().to_bytes();
         Ok(self.write(cid, bytes)?)
     }
 
-    fn evict(&self, cid: &Cid) -> Result<(), Box<dyn StdError>> {
+    fn evict(&self, cid: &Cid) -> Result<(), Error> {
         Ok(self.delete(cid.to_bytes())?)
     }
 
-    fn contains(&self, cid: &Cid) -> Result<bool, Box<dyn StdError>> {
+    fn contains(&self, cid: &Cid) -> Result<bool, Error> {
         Ok(self.exists(cid.to_bytes())?)
     }
 }

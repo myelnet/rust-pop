@@ -16,7 +16,7 @@ version = "0.1.0"
 edition = "2021"
 
 [[bin]]
-name = "bootnode"
+name = "pop"
 path = "src/native/bin/main.rs"
 required-features = ["native"]
 

@@ -7,10 +7,10 @@ use criterion::{criterion_group, criterion_main, BatchSize, Throughput};
 use dag_service::{add, cat};
 use futures::prelude::*;
 use graphsync::{
-    traversal::{RecursionLimit, Selector},
+    traversal::{BlockIterator, Progress, RecursionLimit, Selector, StoreLoader},
     Graphsync, GraphsyncEvent,
 };
-use libipld::Cid;
+use libipld::{Cid, Ipld};
 use libp2p::core::muxing::StreamMuxerBox;
 use libp2p::core::transport::Boxed;
 use libp2p::noise::{Keypair, NoiseConfig, X25519Spec};
@@ -19,6 +19,7 @@ use libp2p::tcp::TcpConfig;
 use libp2p::yamux::YamuxConfig;
 use libp2p::{identity, Multiaddr};
 use libp2p::{PeerId, Swarm, Transport};
+use pprof::criterion::{Output, PProfProfiler};
 use rand::prelude::*;
 use std::sync::Arc;
 use std::time::Duration;
@@ -113,7 +114,7 @@ struct Dag {
     store: Arc<MemoryDB>,
 }
 
-fn bench(c: &mut Criterion) {
+fn bench_transfer(c: &mut Criterion) {
     static MB: usize = 1024 * 1024;
 
     let mut group = c.benchmark_group("from_dag_size");
@@ -161,5 +162,65 @@ fn bench(c: &mut Criterion) {
     }
 }
 
-criterion_group!(benches, bench);
+fn bench_traversal(c: &mut Criterion) {
+    static MB: usize = 1024 * 1024;
+
+    let mut group = c.benchmark_group("traversal");
+    for size in [4 * MB, 10 * MB].iter() {
+        group.throughput(Throughput::Bytes(*size as u64));
+        // group.bench_with_input(BenchmarkId::new("callback", size), size, move |b, &size| {
+        //     b.iter_batched(
+        //         || prepare_blocks(size),
+        //         |dag| async move {
+        //             let store = Arc::<MemoryDB>::try_unwrap(dag.store).unwrap();
+        //             let loader = StoreLoader { store };
+        //             let mut progress = Progress {
+        //                 loader,
+        //                 path: Default::default(),
+        //                 last_block: None,
+        //             };
+        //             let selector = Selector::ExploreRecursive {
+        //                 limit: RecursionLimit::None,
+        //                 sequence: Box::new(Selector::ExploreAll {
+        //                     next: Box::new(Selector::ExploreRecursiveEdge),
+        //                 }),
+        //                 current: None,
+        //             };
+
+        //             progress
+        //                 .walk_adv(&Ipld::Link(dag.root), selector, &|_, _| Ok(()))
+        //                 .await
+        //                 .unwrap();
+        //         },
+        //         BatchSize::SmallInput,
+        //     );
+        // });
+        group.bench_with_input(BenchmarkId::new("iterator", size), size, move |b, &size| {
+            b.iter_batched(
+                || prepare_blocks(size),
+                |dag| {
+                    let store = Arc::<MemoryDB>::try_unwrap(dag.store).unwrap();
+                    let selector = Selector::ExploreRecursive {
+                        limit: RecursionLimit::None,
+                        sequence: Box::new(Selector::ExploreAll {
+                            next: Box::new(Selector::ExploreRecursiveEdge),
+                        }),
+                        current: None,
+                    };
+
+                    let it = BlockIterator::new(store, dag.root, selector);
+                    for _ in it {}
+                },
+                BatchSize::SmallInput,
+            );
+        });
+    }
+}
+
+// criterion_group! {
+//     name = benches;
+//     config = Criterion::default().with_profiler(PProfProfiler::new(100, Output::Flamegraph(None)));
+//     targets = bench_traversal
+// }
+criterion_group!(benches, bench_traversal);
 criterion_main!(benches);

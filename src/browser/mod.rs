@@ -78,7 +78,6 @@ pub fn request_bg(js_params: JsValue) -> Result<Promise, JsValue> {
     let (s, r) = oneshot::channel();
     let mut sender = Some(s);
     let onmessage = Closure::wrap(Box::new(move |event: MessageEvent| {
-        log::info!("received worker message");
         let sender = sender.take().unwrap();
         drop(sender.send(0));
     }) as Box<dyn FnMut(_)>);
@@ -86,7 +85,6 @@ pub fn request_bg(js_params: JsValue) -> Result<Promise, JsValue> {
     onmessage.forget();
 
     let _ = worker_handle.post_message(&wparams);
-    log::info!("posted message to worker");
 
     let future = async move {
         match r.await {

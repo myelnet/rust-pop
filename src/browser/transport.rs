@@ -191,7 +191,10 @@ impl AsyncWrite for Connection {
         _cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<Result<usize, io::Error>> {
-        match self.ws.send_with_u8_array(buf) {
+        // in a shared memory context, the uint8array becomes a shared array buffer so we need to
+        // copy it here.
+        let data = js_sys::Uint8Array::from(buf);
+        match self.ws.send_with_array_buffer(&data.buffer().slice(0)) {
             Ok(_) => Poll::Ready(Ok(buf.len())),
             Err(err) => {
                 return Poll::Ready(Err(io::Error::new(

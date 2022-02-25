@@ -13,9 +13,11 @@ use libipld::{Block, Cid};
 use protobuf::ProtobufError;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_cbor::{error::Error as CborError, from_slice, to_vec};
+use smallvec::SmallVec;
 use std::fmt;
 use std::io::Error as StdError;
 use std::sync::Arc;
+use std::vec;
 use thiserror::Error;
 use Selector::*;
 
@@ -30,7 +32,7 @@ pub trait Cbor: Serialize + DeserializeOwned {
 }
 
 /// Represents either a key in a map or an index in a list.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum PathSegment {
     /// Key in a map
     String(String),
@@ -77,7 +79,7 @@ impl fmt::Display for PathSegment {
     }
 }
 
-#[derive(Debug, PartialEq, Default, Clone)]
+#[derive(Debug, PartialEq, Eq, Hash, Default, Clone)]
 pub struct Path {
     segments: Vec<PathSegment>,
 }
@@ -245,11 +247,141 @@ pub trait LinkLoader {
     async fn load_link(&mut self, link: &Cid) -> Result<Option<Ipld>, String>;
 }
 
+#[derive(Debug)]
+struct Entries {
+    ipld: Ipld,
+    selector: Selector,
+    it: vec::IntoIter<PathSegment>,
+}
+
+impl Iterator for Entries {
+    type Item = (Ipld, Selector);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while let Some(ps) = self.it.next() {
+            if let Some(next_sel) = self.selector.clone().explore(&self.ipld, &ps) {
+                let v = match self.ipld.get(ps.ipld_index()) {
+                    Ok(node) => node,
+                    _ => continue,
+                };
+                return Some((v.clone(), next_sel));
+            }
+        }
+        None
+    }
+}
+
+#[derive(Debug)]
+pub struct BlockIterator<S> {
+    store: S,
+    selector: Selector,
+    root: Option<Cid>,
+    stack_list: SmallVec<[Entries; 8]>,
+}
+
+impl<S> Iterator for BlockIterator<S>
+where
+    S: BlockStore,
+    Ipld: Decode<<<S as BlockStore>::Params as StoreParams>::Codecs>,
+{
+    type Item = Result<Block<S::Params>, Error>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some(cid) = self.root.take() {
+            if let Some(block) = self.handle_node(Ipld::Link(cid), self.selector.clone()) {
+                return Some(block);
+            }
+        }
+        while !self.stack_list.is_empty() {
+            let next = self
+                .stack_list
+                .last_mut()
+                .expect("stack should be non-empty")
+                .next();
+            match next {
+                None => {
+                    self.stack_list.pop();
+                }
+                Some((node, selector)) => {
+                    if let Some(block) = self.handle_node(node, selector) {
+                        return Some(block);
+                    }
+                }
+            }
+        }
+        None
+    }
+}
+
+impl<S> BlockIterator<S>
+where
+    S: BlockStore,
+    Ipld: Decode<<<S as BlockStore>::Params as StoreParams>::Codecs>,
+{
+    pub fn new(store: S, root: Cid, selector: Selector) -> Self {
+        Self {
+            store,
+            selector,
+            root: Some(root),
+            stack_list: SmallVec::new(),
+        }
+    }
+
+    fn handle_node(
+        &mut self,
+        mut ipld: Ipld,
+        selector: Selector,
+    ) -> Option<Result<Block<S::Params>, Error>> {
+        let maybe_block = self.maybe_resolve_link(&mut ipld);
+        match ipld {
+            Ipld::StringMap(_) | Ipld::List(_) => self.push(ipld, selector),
+            _ => {}
+        }
+        maybe_block
+    }
+
+    fn maybe_resolve_link(&mut self, ipld: &mut Ipld) -> Option<Result<Block<S::Params>, Error>> {
+        let mut result = None;
+        while let Ipld::Link(cid) = ipld {
+            let block = match self.store.get(cid) {
+                Ok(block) => block,
+                Err(e) => return Some(Err(Error::Link(e.to_string()))),
+            };
+            *ipld = match block.ipld() {
+                Ok(node) => node,
+                Err(e) => return Some(Err(Error::Encoding(e.to_string()))),
+            };
+            result = Some(Ok(block));
+        }
+        result
+    }
+    fn push(&mut self, ipld: Ipld, selector: Selector) {
+        let it = match selector.interests() {
+            Some(attn) => attn.into_iter(),
+            None => match &ipld {
+                Ipld::StringMap(m) => m
+                    .keys()
+                    .map(|k| PathSegment::from(k.as_ref()))
+                    .collect::<Vec<PathSegment>>()
+                    .into_iter(),
+                Ipld::List(l) => l
+                    .iter()
+                    .enumerate()
+                    .map(|(i, _)| PathSegment::from(i))
+                    .collect::<Vec<PathSegment>>()
+                    .into_iter(),
+                _ => unreachable!(),
+            },
+        };
+        self.stack_list.push(Entries { ipld, selector, it });
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct Progress<L> {
-    loader: L,
-    path: Path,
-    last_block: Option<LastBlockInfo>,
+    pub loader: L,
+    pub path: Path,
+    pub last_block: Option<LastBlockInfo>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -397,7 +529,7 @@ impl From<ProtobufError> for Error {
 }
 
 pub struct StoreLoader<S> {
-    store: S,
+    pub store: S,
 }
 
 #[async_trait]
@@ -977,5 +1109,52 @@ mod tests {
 
         let current_idx = *index.lock().unwrap();
         assert_eq!(current_idx, 6)
+    }
+
+    #[test]
+    fn test_walk_next() {
+        let store = MemoryBlockStore::default();
+
+        let leaf1 = ipld!({ "name": "leaf1", "size": 12 });
+        let leaf1_block = Block::encode(DagCborCodec, Code::Sha2_256, &leaf1).unwrap();
+        store.insert(&leaf1_block).unwrap();
+
+        // leaf2 is not present in the blockstore
+        let leaf2 = ipld!({ "name": "leaf2", "size": 6 });
+        let leaf2_block =
+            Block::<DefaultParams>::encode(DagCborCodec, Code::Sha2_256, &leaf2).unwrap();
+        store.insert(&leaf2_block).unwrap();
+
+        let parent = ipld!({
+            "children": [leaf1_block.cid(), leaf2_block.cid()],
+            "favouriteChild": leaf2_block.cid(),
+            "name": "parent",
+        });
+        let parent_block = Block::encode(DagCborCodec, Code::Sha2_256, &parent).unwrap();
+        store.insert(&parent_block).unwrap();
+
+        let selector = Selector::ExploreRecursive {
+            limit: RecursionLimit::None,
+            sequence: Box::new(Selector::ExploreAll {
+                next: Box::new(Selector::ExploreRecursiveEdge),
+            }),
+            current: None,
+        };
+        let mut it = BlockIterator::new(store, *parent_block.cid(), selector);
+
+        let first = it.next().unwrap().unwrap();
+        assert_eq!(first, parent_block);
+
+        let second = it.next().unwrap().unwrap();
+        assert_eq!(second, leaf1_block);
+
+        let third = it.next().unwrap().unwrap();
+        assert_eq!(third, leaf2_block);
+
+        let last = it.next().unwrap().unwrap();
+        assert_eq!(last, leaf2_block);
+
+        let end = it.next();
+        assert_eq!(end, None);
     }
 }

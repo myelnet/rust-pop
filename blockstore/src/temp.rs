@@ -82,9 +82,10 @@ where
     type Params = S::Params;
 
     fn get(&self, cid: &Cid) -> Result<Block<Self::Params>, Error> {
-        match self.inner.get(cid) {
+        // try the cache first and fallback to blockstore
+        match self.get_from_cache(cid) {
             Ok(block) => Ok(block),
-            Err(_) => self.get_from_cache(cid),
+            Err(_) => self.inner.get(cid),
         }
     }
     fn insert(&self, block: &Block<Self::Params>) -> Result<(), Error> {

@@ -1,5 +1,6 @@
 mod errors;
 pub mod memory;
+pub mod temp;
 pub mod test_helpers;
 pub mod types;
 

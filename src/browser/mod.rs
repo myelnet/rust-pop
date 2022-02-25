@@ -1,4 +1,6 @@
-use crate::{Node, NodeConfig};
+pub mod node;
+
+pub use crate::browser::node::{Node, NodeConfig};
 use blockstore::memory::MemoryDB as BlockstoreMemory;
 use libipld::Cid;
 use libp2p::{

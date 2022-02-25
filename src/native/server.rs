@@ -125,12 +125,8 @@ where
     let multiaddr = Multiaddr::try_from(multiaddr)
         .map_err(|e| warp::reject::custom(Failure::InvalidMultiAdd { err: e.to_string() }))?;
 
-    // make the peer dialable
-    log::info!("loaded all params");
     let mut lock = swarm.lock();
     lock.behaviour_mut().add_address(&peer, multiaddr);
-    log::info!("loaded all params");
-
     lock.behaviour_mut()
         .pull(peer, cid, selector, DealParams::default())
         .map_err(|e| warp::reject::custom(Failure::TransferFailed { err: e.to_string() }))?;

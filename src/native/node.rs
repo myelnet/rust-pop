@@ -49,8 +49,6 @@ where
         let transport = build_transport(local_key.clone());
 
         let store = Arc::new(config.blockstore);
-        // temp behaviour to be replaced with graphsync
-        // let behaviour = Ping::new(PingConfig::new().with_keep_alive(true));
 
         let behaviour = DataTransfer::new(
             local_peer_id,

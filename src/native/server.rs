@@ -54,7 +54,7 @@ pub async fn handle_rejection(
             http::StatusCode::NOT_FOUND,
         ))
     } else if let Some(e) = err.find::<crate::native::server::Failure>() {
-        let resp = format!("request failed: {:?}", e.clone().get_err());
+        let resp = format!("request failed: {}", e.clone().get_err());
         Ok(warp::reply::with_status(
             resp,
             http::StatusCode::BAD_REQUEST,

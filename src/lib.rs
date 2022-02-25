@@ -3,7 +3,6 @@ mod browser;
 #[cfg(feature = "native")]
 mod server;
 
-use async_std::task;
 use blockstore::types::BlockStore;
 use dag_service;
 use data_transfer::{DataTransfer, DataTransferEvent, DealParams};
@@ -19,13 +18,13 @@ use libp2p::futures::StreamExt;
 use libp2p::swarm::SwarmBuilder;
 use libp2p::swarm::{Swarm, SwarmEvent};
 use libp2p::{self, identity, Multiaddr, PeerId};
-use parking_lot::{Mutex, MutexGuard};
+use parking_lot::Mutex;
 use rand::prelude::*;
 use routing::{Config as PeerDiscoveryConfig, PeerDiscovery};
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::{thread, time::Duration};
-use warp::{http, Filter};
+#[cfg(feature = "native")]
+use warp::Filter;
 
 #[cfg(feature = "browser")]
 use wasm_bindgen_futures;
@@ -94,14 +93,16 @@ where
     }
 
     pub async fn run(&mut self) {
+        #[cfg(feature = "native")]
         self.start_server().await;
         loop {
             let mut swarm = self.swarm.lock();
             let ev = swarm.select_next_some();
             // This method must only be called if the current thread logically owns a MutexGuard
-            // but that guard has be discarded using mem::forget.
-            // !!!!! This is the case here.
+            // but that guard has to be discarded using mem::forget. !!!!! This is the case here.
             //  frees the lock so other processes can act on the swarm whilst the event future awaits
+            // this also only applies to native builds which have operations being input via cli
+            #[cfg(feature = "native")]
             unsafe {
                 self.swarm.force_unlock();
             }

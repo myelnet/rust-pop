@@ -3,7 +3,6 @@ use blockstore::lfu::LfuBlockstore;
 use clap::{App, Arg};
 // use libipld::Cid;
 // // use libp2p::{Multiaddr, PeerId};
-use futures::join;
 use pop::{Node, NodeConfig};
 use std::collections::HashMap;
 use std::error::Error;

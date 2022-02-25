@@ -13,12 +13,11 @@ use libp2p::{
     dns, identity, mplex, noise, tcp, websocket, Multiaddr, PeerId, Swarm, Transport,
 };
 use parking_lot::Mutex;
-use std::collections::HashMap;
 use std::fs::File;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
-use warp::{http, Filter};
+use warp::{http};
 
 pub async fn read_file<B: BlockStore>(
     path: String,
@@ -123,12 +122,10 @@ where
                     let mut lock = swarm.lock();
                     lock.behaviour_mut().add_address(&peer, multiaddr);
                     log::info!("loaded all params");
-                    match lock.behaviour_mut().pull(
-                        peer,
-                        cid,
-                        selector,
-                        DealParams::default(),
-                    ) {
+                    match lock
+                        .behaviour_mut()
+                        .pull(peer, cid, selector, DealParams::default())
+                    {
                         Ok(_) => {
                             let resp = format!("transfer started in background");
                             Ok(warp::reply::with_status(resp, http::StatusCode::OK))

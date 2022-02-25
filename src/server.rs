@@ -12,10 +12,11 @@ use libp2p::{
     core::transport::{Boxed, OptionalTransport},
     dns, identity, mplex, noise, tcp, websocket, Multiaddr, PeerId, Swarm, Transport,
 };
+use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::fs::File;
 use std::str::FromStr;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 use warp::{http, Filter};
 
@@ -119,13 +120,10 @@ where
                 Ok(multiaddr) => {
                     // make the peer dialable
                     log::info!("loaded all params");
-                    swarm
-                        .lock()
-                        .unwrap()
-                        .behaviour_mut()
-                        .add_address(&peer, multiaddr);
+                    let mut lock = swarm.lock();
+                    lock.behaviour_mut().add_address(&peer, multiaddr);
                     log::info!("loaded all params");
-                    match swarm.lock().unwrap().behaviour_mut().pull(
+                    match lock.behaviour_mut().pull(
                         peer,
                         cid,
                         selector,

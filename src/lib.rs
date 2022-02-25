@@ -3,6 +3,7 @@ mod browser;
 #[cfg(feature = "native")]
 mod server;
 
+use async_std::task;
 use blockstore::types::BlockStore;
 use dag_service;
 use data_transfer::{DataTransfer, DataTransferEvent, DealParams};
@@ -18,11 +19,14 @@ use libp2p::futures::StreamExt;
 use libp2p::swarm::SwarmBuilder;
 use libp2p::swarm::{Swarm, SwarmEvent};
 use libp2p::{self, identity, Multiaddr, PeerId};
+use parking_lot::{Mutex, MutexGuard};
 use rand::prelude::*;
 use routing::{Config as PeerDiscoveryConfig, PeerDiscovery};
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::{thread, time::Duration};
 use warp::{http, Filter};
+
 #[cfg(feature = "browser")]
 use wasm_bindgen_futures;
 
@@ -92,8 +96,20 @@ where
     pub async fn run(&mut self) {
         self.start_server().await;
         loop {
-            match self.swarm.lock().unwrap().select_next_some().await {
-                SwarmEvent::NewListenAddr { address, .. } => println!("Listening on {:?}", address),
+            let mut swarm = self.swarm.lock();
+            let ev = swarm.select_next_some();
+            // This method must only be called if the current thread logically owns a MutexGuard
+            // but that guard has be discarded using mem::forget.
+            // !!!!! This is the case here.
+            //  frees the lock so other processes can act on the swarm whilst the event future awaits
+            unsafe {
+                self.swarm.force_unlock();
+            }
+
+            match ev.await {
+                SwarmEvent::NewListenAddr { address, .. } => {
+                    println!("Listening on {:?}", address)
+                }
                 SwarmEvent::Behaviour(event) => println!("{:?}", event),
                 _ => {}
             }
@@ -158,11 +174,7 @@ where
     }
 
     pub async fn run_request(&mut self, addr: Multiaddr, peer: PeerId, cid: Cid) {
-        self.swarm
-            .lock()
-            .unwrap()
-            .behaviour_mut()
-            .add_address(&peer, addr);
+        self.swarm.lock().behaviour_mut().add_address(&peer, addr);
 
         let selector = Selector::ExploreRecursive {
             limit: RecursionLimit::None,
@@ -182,7 +194,6 @@ where
         if let Err(e) = self
             .swarm
             .lock()
-            .unwrap()
             .behaviour_mut()
             .pull(peer, cid, selector, params)
         {
@@ -192,7 +203,7 @@ where
         log::info!("==> Started transfer");
 
         loop {
-            let ev = self.swarm.lock().unwrap().next().await.unwrap();
+            let ev = self.swarm.lock().next().await.unwrap();
             if let SwarmEvent::Behaviour(event) = ev {
                 match event {
                     DataTransferEvent::Completed(_, Ok(())) => {

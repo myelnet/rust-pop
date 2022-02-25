@@ -26,6 +26,7 @@ impl PartialEq for Error {
         use Error::*;
 
         match (self, other) {
+            (&BlockNotFound, &BlockNotFound) => true,
             (&InvalidBulkLen, &InvalidBulkLen) => true,
             (&Unopened, &Unopened) => true,
             #[cfg(feature = "native")]

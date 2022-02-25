@@ -79,7 +79,6 @@ where
             // but that guard has to be discarded using mem::forget. !!!!! This is the case here.
             //  frees the lock so other processes can act on the swarm whilst the event future awaits
             // this also only applies to native builds which have operations being input via cli
-            #[cfg(feature = "native")]
             unsafe {
                 self.swarm.force_unlock();
             }
@@ -94,7 +93,6 @@ where
         }
     }
 
-    #[cfg(feature = "native")]
     pub async fn start_server(&mut self) {
         let swarm = self.swarm.clone();
         let store = self.store.clone();

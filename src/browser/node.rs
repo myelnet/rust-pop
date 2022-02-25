@@ -55,10 +55,8 @@ where
             PeerDiscovery::new(PeerDiscoveryConfig::default(), local_peer_id),
         );
 
-        #[cfg(feature = "native")]
-        let mut swarm = Swarm::new(transport, behaviour, local_peer_id);
 
-        #[cfg(feature = "browser")]
+
         let mut swarm = SwarmBuilder::new(transport, behaviour, local_peer_id)
             .executor(Box::new(|fut| {
                 wasm_bindgen_futures::spawn_local(fut);

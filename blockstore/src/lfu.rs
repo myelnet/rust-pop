@@ -54,10 +54,9 @@ where
             capacity: NonZeroUsize::new(capacity),
             len: Mutex::new(0),
         };
-        match lfu.sync() {
-            Ok(_) => return Ok(lfu),
-            Err(_) => return Err(Error::Other("DB sync failed".to_string())),
-        }
+        lfu.sync()
+            .map_err(|_| Error::Other("DB sync failed".to_string()))?;
+        Ok(lfu)
     }
 
     fn exists(&self, key: &Vec<u8>) -> Result<bool, Error> {
@@ -144,28 +143,27 @@ where
     /// If the blockstore already has elements allocated (eg. loading from disk) but the
     /// lookup table and freq list are booted from scratch this creates a new entry for each key
     fn sync(&self) -> Result<(), Error> {
-        let key_res = self.db.key_iterator::<Vec<Vec<u8>>>();
-        match key_res {
-            Ok(iter) => {
-                for k in iter {
-                    let mut lookup = self.lookup.lock().unwrap();
-                    match lookup.0.get(&k) {
-                        Some(_entry) => {}
-                        None => {
-                            let arc_ref = Arc::new(k);
-                            lookup.0.insert(Arc::clone(&arc_ref), NonNull::dangling());
-                            let v = lookup.0.get_mut(&arc_ref).unwrap();
-                            *v = self.freq_list.lock().unwrap().insert(arc_ref);
+        let iter = self
+            .db
+            .key_iterator::<Vec<Vec<u8>>>()
+            .map_err(|_| Error::Other("Could not read keys from DB".to_string()))?;
 
-                            // let mut len =
-                            *self.len.lock().unwrap() += 1;
-                        }
-                    }
+        for k in iter {
+            let mut lookup = self.lookup.lock().unwrap();
+            match lookup.0.get(&k) {
+                Some(_entry) => {}
+                None => {
+                    let arc_ref = Arc::new(k);
+                    lookup.0.insert(Arc::clone(&arc_ref), NonNull::dangling());
+                    let v = lookup.0.get_mut(&arc_ref).unwrap();
+                    *v = self.freq_list.lock().unwrap().insert(arc_ref);
+
+                    // let mut len =
+                    *self.len.lock().unwrap() += 1;
                 }
-                return Ok(());
             }
-            Err(_) => return Err(Error::Other("Could not read keys from DB".to_string())),
         }
+        return Ok(());
     }
 
     /// Evicts the least frequently used key and returns it. If the lfu is

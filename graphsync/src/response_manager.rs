@@ -1,7 +1,7 @@
 use super::traversal::{BlockCallbackLoader, Progress};
 use super::{
-    Extensions, GraphsyncHooks, GraphsyncMessage, GraphsyncRequest, GraphsyncResponse, Prefix,
-    RequestId, ResponseStatusCode,
+    Extensions, GraphsyncHooks, GraphsyncMessage, GraphsyncRequest, GraphsyncResponse,
+    MetadataItem, Prefix, RequestId, ResponseStatusCode, METADATA_EXTENSION,
 };
 use async_std::channel::{bounded, Receiver, Sender};
 use async_std::task::{Context, Poll};
@@ -13,7 +13,6 @@ use libipld::ipld::Ipld;
 use libipld::store::StoreParams;
 use libipld::{Block, Cid};
 use libp2p::core::PeerId;
-use serde::{Deserialize, Serialize};
 use serde_cbor::to_vec;
 use std::collections::{HashSet, VecDeque};
 use std::sync::{Arc, Mutex, RwLock};
@@ -26,15 +25,6 @@ use async_std::task::spawn_local as spawn;
 
 // setting up slightly higher than 512kb so we can have up to 2 unixfs 256kb blocks
 const MAX_BLOCK_SIZE: usize = 513 * 1024;
-
-pub static METADATA_EXTENSION: &str = "graphsync/response-metadata";
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MetadataItem {
-    link: CidCbor,
-    block_present: bool,
-}
 
 #[derive(Debug)]
 pub enum ResponseEvent {

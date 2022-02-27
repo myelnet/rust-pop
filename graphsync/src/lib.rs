@@ -3,8 +3,10 @@ mod graphsync_pb;
 mod network;
 mod req_mgr;
 mod request_manager;
+mod res_mgr;
 mod response_manager;
 
+pub mod behaviour;
 pub mod traversal;
 
 use async_trait::async_trait;
@@ -21,6 +23,7 @@ use response_manager::{ResponseEvent, ResponseManager};
 use traversal::{Cbor, Error as EncodingError, Selector};
 // use futures::{future::BoxFuture, prelude::*, stream::FuturesUnordered};
 use blockstore::types::BlockStore;
+use filecoin::cid_helpers::CidCbor;
 use integer_encoding::{VarIntReader, VarIntWriter};
 use libipld::cid::Version;
 use libipld::codec::Decode;
@@ -34,6 +37,7 @@ use libp2p::swarm::{
     ProtocolsHandler,
 };
 use protobuf::Message as PBMessage;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::error::Error;
 use std::io::{self, Cursor};
@@ -103,7 +107,7 @@ impl<P: StoreParams> MessageCodec for GraphsyncCodec<P> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum GraphsyncEvent {
     // The local graphsync provider has accepted a new request
     RequestAccepted(PeerId, GraphsyncRequest),
@@ -738,6 +742,15 @@ impl From<Cid> for Prefix {
             mh_len: cid.hash().size().into(),
         }
     }
+}
+
+pub static METADATA_EXTENSION: &str = "graphsync/response-metadata";
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MetadataItem {
+    link: CidCbor,
+    block_present: bool,
 }
 
 #[cfg(test)]

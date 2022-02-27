@@ -2,7 +2,7 @@ use crate::empty_map;
 use async_recursion::async_recursion;
 use async_std::channel::{bounded, Receiver, Sender};
 use async_trait::async_trait;
-use blockstore::types::BlockStore;
+use blockstore::{errors::Error as BsError, types::BlockStore};
 use fnv::FnvHashMap;
 use libipld::cid::Error as CidError;
 use libipld::codec::Decode;
@@ -14,6 +14,7 @@ use protobuf::ProtobufError;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_cbor::{error::Error as CborError, from_slice, to_vec};
 use smallvec::SmallVec;
+use std::collections::HashSet;
 use std::fmt;
 use std::io::Error as StdError;
 use std::sync::Arc;
@@ -271,12 +272,16 @@ impl Iterator for Entries {
     }
 }
 
+/// Executes an iterative traversal based on the give root CID and selector
+/// and returns the blocks resolved along the way.
 #[derive(Debug)]
 pub struct BlockIterator<S> {
-    store: S,
+    store: Arc<S>,
     selector: Selector,
-    root: Option<Cid>,
+    start: Option<Cid>,
     stack_list: SmallVec<[Entries; 8]>,
+    seen: Option<HashSet<Cid>>,
+    restart: bool,
 }
 
 impl<S> Iterator for BlockIterator<S>
@@ -287,7 +292,7 @@ where
     type Item = Result<Block<S::Params>, Error>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if let Some(cid) = self.root.take() {
+        if let Some(cid) = self.start.take() {
             if let Some(block) = self.handle_node(Ipld::Link(cid), self.selector.clone()) {
                 return Some(block);
             }
@@ -318,13 +323,29 @@ where
     S: BlockStore,
     Ipld: Decode<<<S as BlockStore>::Params as StoreParams>::Codecs>,
 {
-    pub fn new(store: S, root: Cid, selector: Selector) -> Self {
+    pub fn new(store: Arc<S>, root: Cid, selector: Selector) -> Self {
         Self {
             store,
             selector,
-            root: Some(root),
+            start: Some(root),
             stack_list: SmallVec::new(),
+            seen: None,
+            restart: false,
         }
+    }
+    /// if activated, the traversal will not revisit the same block if it is linked
+    /// somewhere else.
+    pub fn ignore_duplicate_links(mut self) -> Self {
+        self.seen = Some(HashSet::default());
+        self
+    }
+    /// if activated, the traversal will always reattempt to traverse from the
+    /// last missing link. May cause an infinite loop if the the block is never inserted
+    /// into the underlying blockstore. To continue traversal even if a block is missing,
+    /// the underlying blockstore should return a SkipMe or custom error.
+    pub fn restart_missing_link(mut self) -> Self {
+        self.restart = true;
+        self
     }
 
     fn handle_node(
@@ -334,18 +355,33 @@ where
     ) -> Option<Result<Block<S::Params>, Error>> {
         let maybe_block = self.maybe_resolve_link(&mut ipld);
         match ipld {
-            Ipld::StringMap(_) | Ipld::List(_) => self.push(ipld, selector),
+            Ipld::StringMap(_) | Ipld::List(_) => self.push(ipld, selector.clone()),
             _ => {}
         }
-        maybe_block
+        match maybe_block {
+            Some(Err(Error::BlockNotFound(cid))) => {
+                // if the block is missing the next iteration will restart from there
+                if self.restart {
+                    self.start = Some(cid);
+                    self.selector = selector;
+                }
+                Some(Err(Error::BlockNotFound(cid)))
+            }
+            mb => mb,
+        }
     }
 
     fn maybe_resolve_link(&mut self, ipld: &mut Ipld) -> Option<Result<Block<S::Params>, Error>> {
         let mut result = None;
         while let Ipld::Link(cid) = ipld {
+            if let Some(ref mut seen) = self.seen {
+                if !seen.insert(*cid) {
+                    break;
+                }
+            }
             let block = match self.store.get(cid) {
                 Ok(block) => block,
-                Err(e) => return Some(Err(Error::Link(e.to_string()))),
+                Err(e) => return Some(Err(Error::from(e))),
             };
             *ipld = match block.ipld() {
                 Ok(node) => node,
@@ -494,6 +530,10 @@ pub enum Error {
     Other(&'static str),
     #[error("Failed to traverse link: {0}")]
     Link(String),
+    #[error("BlockStore: block not found for {0}")]
+    BlockNotFound(Cid),
+    #[error("BlockStore: skipping block for {0}")]
+    SkipMe(Cid),
     #[error("{0}")]
     Custom(String),
 }
@@ -525,6 +565,16 @@ impl From<MultihashError> for Error {
 impl From<ProtobufError> for Error {
     fn from(err: ProtobufError) -> Error {
         Self::Encoding(err.to_string())
+    }
+}
+
+impl From<BsError> for Error {
+    fn from(err: BsError) -> Error {
+        match err {
+            BsError::BlockNotFound(c) => Self::BlockNotFound(c),
+            BsError::SkipMe(c) => Self::SkipMe(c),
+            e => Self::Custom(e.to_string()),
+        }
     }
 }
 
@@ -1113,7 +1163,7 @@ mod tests {
 
     #[test]
     fn test_walk_next() {
-        let store = MemoryBlockStore::default();
+        let store = Arc::new(MemoryBlockStore::default());
 
         let leaf1 = ipld!({ "name": "leaf1", "size": 12 });
         let leaf1_block = Block::encode(DagCborCodec, Code::Sha2_256, &leaf1).unwrap();
@@ -1148,6 +1198,66 @@ mod tests {
         let second = it.next().unwrap().unwrap();
         assert_eq!(second, leaf1_block);
 
+        let third = it.next().unwrap().unwrap();
+        assert_eq!(third, leaf2_block);
+
+        let last = it.next().unwrap().unwrap();
+        assert_eq!(last, leaf2_block);
+
+        let end = it.next();
+        assert_eq!(end, None);
+    }
+
+    #[test]
+    fn test_walk_next_missing() {
+        let store = Arc::new(MemoryBlockStore::default());
+
+        let leaf1 = ipld!({ "name": "leaf1", "size": 12 });
+        let leaf1_block = Block::encode(DagCborCodec, Code::Sha2_256, &leaf1).unwrap();
+
+        // leaf2 is not present in the blockstore
+        let leaf2 = ipld!({ "name": "leaf2", "size": 6 });
+        let leaf2_block =
+            Block::<DefaultParams>::encode(DagCborCodec, Code::Sha2_256, &leaf2).unwrap();
+
+        let parent = ipld!({
+            "children": [leaf1_block.cid(), leaf2_block.cid()],
+            "favouriteChild": leaf2_block.cid(),
+            "name": "parent",
+        });
+        let parent_block = Block::encode(DagCborCodec, Code::Sha2_256, &parent).unwrap();
+
+        let selector = Selector::ExploreRecursive {
+            limit: RecursionLimit::None,
+            sequence: Box::new(Selector::ExploreAll {
+                next: Box::new(Selector::ExploreRecursiveEdge),
+            }),
+            current: None,
+        };
+        let mut it =
+            BlockIterator::new(store.clone(), *parent_block.cid(), selector).restart_missing_link();
+
+        let first = it.next().unwrap();
+        assert_eq!(first, Err(Error::BlockNotFound(*parent_block.cid())));
+
+        let first = it.next().unwrap();
+        assert_eq!(first, Err(Error::BlockNotFound(*parent_block.cid())));
+
+        store.insert(&parent_block).unwrap();
+        let first = it.next().unwrap().unwrap();
+        assert_eq!(first, parent_block);
+
+        let second = it.next().unwrap();
+        assert_eq!(second, Err(Error::BlockNotFound(*leaf1_block.cid())));
+
+        store.insert(&leaf1_block).unwrap();
+        let second = it.next().unwrap().unwrap();
+        assert_eq!(second, leaf1_block);
+
+        let third = it.next().unwrap();
+        assert_eq!(third, Err(Error::BlockNotFound(*leaf2_block.cid())));
+
+        store.insert(&leaf2_block).unwrap();
         let third = it.next().unwrap().unwrap();
         assert_eq!(third, leaf2_block);
 

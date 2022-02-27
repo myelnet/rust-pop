@@ -7,6 +7,7 @@ use criterion::{criterion_group, criterion_main, BatchSize, Throughput};
 use dag_service::{add, cat};
 use futures::prelude::*;
 use graphsync::{
+    behaviour::GraphsyncBehaviour,
     traversal::{BlockIterator, Progress, RecursionLimit, Selector, StoreLoader},
     Graphsync, GraphsyncEvent,
 };
@@ -96,6 +97,60 @@ impl Peer {
     }
 }
 
+struct Peer2 {
+    peer_id: PeerId,
+    addr: Multiaddr,
+    swarm: Swarm<GraphsyncBehaviour<MemoryDB>>,
+}
+
+impl Peer2 {
+    fn new(store: Arc<MemoryDB>) -> Self {
+        let (peer_id, trans) = mk_transport();
+        let mut swarm = Swarm::new(
+            trans,
+            GraphsyncBehaviour::new(Default::default(), store.clone()),
+            peer_id,
+        );
+        Swarm::listen_on(&mut swarm, "/ip4/127.0.0.1/tcp/0".parse().unwrap()).unwrap();
+        while swarm.next().now_or_never().is_some() {}
+        let addr = Swarm::listeners(&swarm).next().unwrap().clone();
+        Self {
+            peer_id,
+            addr,
+            swarm,
+        }
+    }
+
+    fn add_address(&mut self, peer: &Peer2) {
+        self.swarm
+            .behaviour_mut()
+            .add_address(&peer.peer_id, peer.addr.clone());
+    }
+
+    fn swarm(&mut self) -> &mut Swarm<GraphsyncBehaviour<MemoryDB>> {
+        &mut self.swarm
+    }
+
+    fn spawn(mut self, _name: &'static str) -> PeerId {
+        let peer_id = self.peer_id;
+        task::spawn(async move {
+            loop {
+                let event = self.swarm.next().await;
+            }
+        });
+        peer_id
+    }
+
+    async fn next(&mut self) -> Option<GraphsyncEvent> {
+        loop {
+            let ev = self.swarm.next().await?;
+            if let SwarmEvent::Behaviour(event) = ev {
+                return Some(event);
+            }
+        }
+    }
+}
+
 fn prepare_blocks(size: usize) -> Dag {
     let mut data = vec![0u8; size];
     rand::thread_rng().fill_bytes(&mut data);
@@ -120,7 +175,7 @@ fn bench_transfer(c: &mut Criterion) {
     let mut group = c.benchmark_group("from_dag_size");
     for size in [MB, 4 * MB, 15 * MB, 60 * MB].iter() {
         group.throughput(Throughput::Bytes(*size as u64));
-        group.bench_with_input(BenchmarkId::from_parameter(size), size, move |b, &size| {
+        group.bench_with_input(BenchmarkId::new("async", size), size, move |b, &size| {
             b.iter_batched(
                 || prepare_blocks(size),
                 |dag| async move {
@@ -159,6 +214,49 @@ fn bench_transfer(c: &mut Criterion) {
                 BatchSize::SmallInput,
             );
         });
+        group.bench_with_input(
+            BenchmarkId::new("iterators", size),
+            size,
+            move |b, &size| {
+                b.iter_batched(
+                    || prepare_blocks(size),
+                    |dag| async move {
+                        let peer1 = Peer2::new(dag.store);
+                        let mut peer2 = Peer2::new(Arc::new(MemoryDB::default()));
+                        peer2.add_address(&peer1);
+
+                        let peer1 = peer1.spawn("peer1");
+
+                        let selector = Selector::ExploreRecursive {
+                            limit: RecursionLimit::None,
+                            sequence: Box::new(Selector::ExploreAll {
+                                next: Box::new(Selector::ExploreRecursiveEdge),
+                            }),
+                            current: None,
+                        };
+
+                        let id = peer2.swarm().behaviour_mut().request(
+                            peer1,
+                            dag.root,
+                            selector,
+                            Default::default(),
+                        );
+
+                        loop {
+                            if let Some(event) = peer2.next().await {
+                                match event {
+                                    GraphsyncEvent::Complete(rid, Ok(())) => {
+                                        break;
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    },
+                    BatchSize::SmallInput,
+                );
+            },
+        );
     }
 }
 
@@ -199,7 +297,6 @@ fn bench_traversal(c: &mut Criterion) {
             b.iter_batched(
                 || prepare_blocks(size),
                 |dag| {
-                    let store = Arc::<MemoryDB>::try_unwrap(dag.store).unwrap();
                     let selector = Selector::ExploreRecursive {
                         limit: RecursionLimit::None,
                         sequence: Box::new(Selector::ExploreAll {
@@ -208,7 +305,8 @@ fn bench_traversal(c: &mut Criterion) {
                         current: None,
                     };
 
-                    let it = BlockIterator::new(store, dag.root, selector);
+                    let it =
+                        BlockIterator::new(dag.store, dag.root, selector).ignore_duplicate_links();
                     for _ in it {}
                 },
                 BatchSize::SmallInput,
@@ -222,5 +320,5 @@ fn bench_traversal(c: &mut Criterion) {
 //     config = Criterion::default().with_profiler(PProfProfiler::new(100, Output::Flamegraph(None)));
 //     targets = bench_traversal
 // }
-criterion_group!(benches, bench_traversal);
+criterion_group!(benches, bench_transfer);
 criterion_main!(benches);

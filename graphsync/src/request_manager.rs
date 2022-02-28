@@ -26,7 +26,7 @@ pub enum RequestEvent {
     Progress {
         req_id: RequestId,
         link: Cid,
-        size: usize,
+        data: Vec<u8>,
     },
     Completed(RequestId, Result<(), Error>),
 }
@@ -70,7 +70,7 @@ where
                 .try_send(RequestEvent::Progress {
                     req_id: id,
                     link: *blk.cid(),
-                    size: blk.data().len(),
+                    data: blk.data().to_vec(),
                 })
                 .map_err(|e| e.to_string())?;
             Ok(())
@@ -145,9 +145,9 @@ mod tests {
     ) {
         if let Ok(evt) = result {
             match evt {
-                RequestEvent::Progress { req_id, size, link } => {
+                RequestEvent::Progress { req_id, data, link } => {
                     assert_eq!(req_id, id);
-                    assert_eq!(size, size2);
+                    assert_eq!(data.len(), size2);
                     assert_eq!(link, cid,);
                 }
                 _ => panic!("Received wrong event"),

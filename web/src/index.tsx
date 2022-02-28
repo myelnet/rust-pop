@@ -31,6 +31,7 @@ function App() {
     wasm_bindgen("pop_bg.wasm")
       .then(() => {
         console.log("wasm loaded");
+        const start = performance.now();
         //@ts-ignore
         const { request_bg } = wasm_bindgen;
         const parts = maddr.split("/p2p/");
@@ -40,7 +41,12 @@ function App() {
           peerId: parts[1],
           cid: root,
         })
-          .then(() => console.log("success"))
+          .blob()
+          .then((blob) => {
+            const done = performance.now();
+            const duration = done - start;
+            console.log(`done in ${duration}ms (${blob.size / duration}bps)`);
+          })
           .catch(console.error);
       })
       .catch(console.error);

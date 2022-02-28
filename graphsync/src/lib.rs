@@ -119,7 +119,7 @@ pub enum GraphsyncEvent {
     Progress {
         req_id: RequestId,
         link: Cid,
-        size: usize,
+        data: Vec<u8>,
     },
     Complete(RequestId, Result<(), EncodingError>),
 }
@@ -366,8 +366,8 @@ where
                     RequestEvent::NewRequest(responder, req) => {
                         self.inner.send_request(&responder, req);
                     }
-                    RequestEvent::Progress { req_id, link, size } => {
-                        let event = GraphsyncEvent::Progress { req_id, link, size };
+                    RequestEvent::Progress { req_id, link, data } => {
+                        let event = GraphsyncEvent::Progress { req_id, link, data };
                         return Poll::Ready(NetworkBehaviourAction::GenerateEvent(event));
                     }
                     RequestEvent::Completed(req_id, res) => {
@@ -922,11 +922,11 @@ mod tests {
         }
     }
 
-    fn assert_progress_ok(event: Option<GraphsyncEvent>, id: RequestId, cid: Cid, size2: usize) {
-        if let Some(GraphsyncEvent::Progress { req_id, link, size }) = event {
+    fn assert_progress_ok(event: Option<GraphsyncEvent>, id: RequestId, cid: Cid, size: usize) {
+        if let Some(GraphsyncEvent::Progress { req_id, link, data }) = event {
             assert_eq!(req_id, id);
             assert_eq!(link, cid);
-            assert_eq!(size, size2);
+            assert_eq!(data.len(), size);
         } else {
             panic!("{:?} is not a progress event", event);
         }
@@ -1093,13 +1093,13 @@ mod tests {
         loop {
             if let Some(event) = peer2.next().await {
                 match event {
-                    GraphsyncEvent::Progress { req_id, size, .. } => {
+                    GraphsyncEvent::Progress { req_id, data, .. } => {
                         let mut exp_size = 262158;
                         if n == 1 {
                             exp_size = 809;
                         }
                         assert_eq!(req_id, id);
-                        assert_eq!(size, exp_size);
+                        assert_eq!(data.len(), exp_size);
                     }
                     GraphsyncEvent::ResponseReceived(_, _responses) => {}
                     GraphsyncEvent::Complete(rid, Ok(())) => {

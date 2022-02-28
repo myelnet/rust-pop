@@ -2,19 +2,15 @@ importScripts("pop.js");
 
 self.onmessage = (event) => {
   // Load the wasm file by awaiting the Promise returned by `wasm_bindgen`.
-  let initialized = wasm_bindgen("pop_bg.wasm").catch((err) => {
+  let initialized = wasm_bindgen(...event.data).catch((err) => {
     setTimeout(() => {
       throw err;
     });
     throw err;
   });
 
-  console.log("worker received message");
-
-  initialized.then(() => {
-    wasm_bindgen
-      .request(event.data)
-      .then(() => self.postMessage(undefined))
-      .catch((err) => console.log(err));
-  });
+  self.onmessage = async (event) => {
+    await initialized;
+    wasm_bindgen.request(event.data);
+  };
 };

@@ -34,6 +34,11 @@ pub enum DataTransferEvent {
     Started(ChannelId),
     Accepted(ChannelId),
     Progress(ChannelId),
+    Block {
+        ch_id: ChannelId,
+        link: Cid,
+        data: Vec<u8>,
+    },
     Completed(ChannelId, Result<(), String>),
     PeerTableUpdated,
 }
@@ -323,17 +328,18 @@ where
                     };
                 }
             }
-            GraphsyncEvent::Progress {
-                req_id,
-                link: _,
-                size,
-            } => {
+            GraphsyncEvent::Progress { req_id, link, data } => {
                 let (ch_id, ch) = self
                     .get_channel_by_req_id(req_id)
                     .expect("Expected channel to be created before graphsync progress");
-                let event = ChannelEvent::BlockReceived { size };
+                let event = ChannelEvent::BlockReceived { size: data.len() };
                 let next_state = ch.transition(event);
                 self.channels.insert(ch_id.clone(), next_state.clone());
+                self.pending_events.push_back(DataTransferEvent::Block {
+                    ch_id: ch_id.clone(),
+                    link,
+                    data,
+                });
                 self.pending_events.push_back(next_state.into());
             }
             GraphsyncEvent::Complete(req_id, result) => {
@@ -569,6 +575,7 @@ mod tests {
                     DataTransferEvent::Started(_) => {}
                     DataTransferEvent::Accepted(_) => {}
                     DataTransferEvent::Progress(_) => {}
+                    DataTransferEvent::Block { .. } => {}
                     DataTransferEvent::Completed(chid, Ok(())) => {
                         assert_eq!(chid, id);
                         break;

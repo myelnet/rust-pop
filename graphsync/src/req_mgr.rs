@@ -73,7 +73,7 @@ where
                                 queue.push_back(GraphsyncEvent::Progress {
                                     req_id: res.id,
                                     link: *blk.cid(),
-                                    size: blk.data().len(),
+                                    data: blk.data().to_vec(),
                                 });
                             }
                             None => {

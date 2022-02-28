@@ -1,20 +1,28 @@
 pub mod node;
+mod stream;
+pub mod transport;
 
-pub use crate::browser::node::{Node, NodeConfig};
 use blockstore::memory::MemoryDB as BlockstoreMemory;
 use blockstore::types::BlockStore;
 use dag_service;
+use data_transfer::{DataTransfer, DataTransferEvent, DealParams};
 use futures::channel::{mpsc, oneshot};
 use futures::prelude::*;
 use futures::{SinkExt, StreamExt};
+use graphsync::traversal::{RecursionLimit, Selector};
+use graphsync::{Config as GraphsyncConfig, Graphsync};
 use js_sys::{Promise, Uint8Array};
 use libipld::{cbor::DagCborCodec, multihash::Code, Block, Cid, Ipld};
 use libp2p::{
     core,
     core::muxing::StreamMuxerBox,
     core::transport::{Boxed, OptionalTransport, Transport},
-    identity, mplex, noise, Multiaddr, PeerId,
+    identity, mplex, noise,
+    swarm::{SwarmBuilder, SwarmEvent},
+    Multiaddr, PeerId,
 };
+use node::{Node, NodeConfig};
+use routing::{Config as PeerDiscoveryConfig, PeerDiscovery};
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -22,16 +30,16 @@ use std::str::FromStr;
 use std::string::ToString;
 use std::sync::Arc;
 use std::time::Duration;
+use stream::{IntoUnderlyingSource, QueuingStrategy, ReadableStream};
 use wasm_bindgen::JsCast;
-use web_sys::{DedicatedWorkerGlobalScope, MessageEvent};
+use wasm_bindgen_futures;
+use web_sys::{DedicatedWorkerGlobalScope, MessageEvent, ReadableStream as JsStream, Response};
 use web_sys::{ErrorEvent, Event, File, Worker};
 
 use wasm_bindgen::prelude::*;
 
 // pub use console_error_panic_hook::set_once as set_console_error_panic_hook;
 pub use console_log::init_with_level as init_console_log;
-
-pub mod transport;
 
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -44,29 +52,75 @@ pub struct RequestParams {
 
 #[wasm_bindgen]
 pub async fn request(js_params: JsValue) -> Result<(), JsValue> {
+    let global = js_sys::global().unchecked_into::<DedicatedWorkerGlobalScope>();
     let params: RequestParams = js_params.into_serde().map_err(js_err)?;
-
-    console_error_panic_hook::set_once();
-    init_console_log(log::Level::from_str(&params.log_level).unwrap()).unwrap();
 
     let maddr: Multiaddr = params.maddress.parse().map_err(js_err)?;
     let peer_id = PeerId::from_str(&params.peer_id).map_err(js_err)?;
     let cid = Cid::try_from(params.cid).map_err(js_err)?;
 
-    let config = NodeConfig {
-        listening_multiaddr: None,
-        blockstore: BlockstoreMemory::default(),
+    let store = Arc::new(BlockstoreMemory::default());
+
+    let local_key = identity::Keypair::generate_ed25519();
+    let local_peer_id = PeerId::from(local_key.public());
+    log::info!("Local peer id: {:?}", local_peer_id);
+
+    let transport = build_transport(local_key.clone());
+
+    let behaviour = DataTransfer::new(
+        local_peer_id,
+        Graphsync::new(GraphsyncConfig::default(), store.clone()),
+        PeerDiscovery::new(PeerDiscoveryConfig::default(), local_peer_id),
+    );
+
+    let mut swarm = SwarmBuilder::new(transport, behaviour, local_peer_id)
+        .executor(Box::new(|fut| {
+            wasm_bindgen_futures::spawn_local(fut);
+        }))
+        .build();
+
+    swarm.behaviour_mut().add_address(&peer_id, maddr);
+
+    let selector = Selector::ExploreRecursive {
+        limit: RecursionLimit::None,
+        sequence: Box::new(Selector::ExploreAll {
+            next: Box::new(Selector::ExploreRecursiveEdge),
+        }),
+        current: None,
     };
 
-    let mut node = Node::new(config);
+    let params = DealParams {
+        selector: Some(selector.clone()),
+        ..Default::default()
+    };
 
-    node.run_request(maddr, peer_id, cid).await;
+    swarm
+        .behaviour_mut()
+        .pull(peer_id, cid, selector, params)
+        .map_err(js_err)?;
+
+    while let Some(evt) = swarm.next().await {
+        if let SwarmEvent::Behaviour(event) = evt {
+            match event {
+                DataTransferEvent::Block { data, .. } => {
+                    let data = js_sys::Uint8Array::from(data.as_slice());
+                    global.post_message_with_transfer(&data, &data.buffer());
+                }
+                DataTransferEvent::Completed(_, Ok(())) => {
+                    break;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    global.post_message(&JsValue::undefined())?;
 
     Ok(())
 }
 
 #[wasm_bindgen]
-pub fn request_bg(js_params: JsValue) -> Result<Promise, JsValue> {
+pub fn request_bg(js_params: JsValue) -> Result<Response, JsValue> {
     let params: RequestParams = js_params.into_serde().map_err(js_err)?;
 
     console_error_panic_hook::set_once();
@@ -75,24 +129,34 @@ pub fn request_bg(js_params: JsValue) -> Result<Promise, JsValue> {
     let wparams = JsValue::from_serde(&params).unwrap();
 
     let worker_handle = Worker::new("worker-main.js").unwrap();
-    let (s, r) = oneshot::channel();
-    let mut sender = Some(s);
+
+    let array = js_sys::Array::new();
+    array.push(&wasm_bindgen::module());
+    array.push(&wasm_bindgen::memory());
+    worker_handle.post_message(&array)?;
+
+    let (s, r) = mpsc::channel(1000);
+    let mut sender = s.clone();
     let onmessage = Closure::wrap(Box::new(move |event: MessageEvent| {
-        let sender = sender.take().unwrap();
-        drop(sender.send(0));
+        if event.data().is_undefined() {
+            sender.close_channel()
+        } else {
+            sender.start_send(event.data()).unwrap();
+        }
     }) as Box<dyn FnMut(_)>);
     worker_handle.set_onmessage(Some(onmessage.as_ref().unchecked_ref()));
     onmessage.forget();
 
-    let _ = worker_handle.post_message(&wparams);
+    worker_handle.post_message(&wparams)?;
 
-    let future = async move {
-        match r.await {
-            Ok(_) => Ok(JsValue::undefined()),
-            Err(_) => Err(JsValue::undefined()),
-        }
-    };
-    Ok(wasm_bindgen_futures::future_to_promise(future))
+    let source = IntoUnderlyingSource::new(Box::new(r.map(|v| Ok(v))));
+    // Set HWM to 0 to prevent the JS ReadableStream from buffering chunks in its queue,
+    // since the original Rust stream is better suited to handle that.
+    let strategy = QueuingStrategy::new(0.0);
+
+    let js_stream: JsStream = ReadableStream::new_with_source(source, strategy).unchecked_into();
+
+    Response::new_with_opt_readable_stream(Some(&js_stream))
 }
 
 fn js_err<E: ToString + Send + Sync + 'static>(e: E) -> JsValue {

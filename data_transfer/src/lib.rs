@@ -365,7 +365,7 @@ where
     fn inject_event(&mut self, event: DtNetEvent) {
         match event {
             DtNetEvent::Request(peer_id, request) => {
-                self.process_request(peer_id, *request);
+                self.process_request(peer_id, request);
             }
             DtNetEvent::Response(peer_id, response) => {
                 self.process_response(peer_id, response);

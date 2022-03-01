@@ -5,6 +5,17 @@ A Rust implementation of Myel points of presence for wasm and all platforms.
 
 ### WASM
 
+Make sure you have `.cargo/config.toml` enabled with:
+```toml
+[unstable]
+build-std = ['std', 'panic_abort']
+
+[build]
+target = "wasm32-unknown-unknown"
+rustflags = '-Ctarget-feature=+atomics,+bulk-memory,+mutable-globals'
+```
+For regular Rust build, the file should be disabled.
+
 ```sh
 # install rust
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
@@ -17,10 +28,13 @@ rustup target add wasm32-unknown-unknown
 rustup target add wasm32-unknown-unknown --toolchain nightly
 
 # Build the browser pkg (linked in root/package.json)
-wasm-pack build --target web --out-dir web/src/wasm -- --features browser --no-default-features
+wasm-pack build --target no-modules --out-dir web/src/wasm -- --features browser --no-default-features
 
 # Move the wasm file to the dev server public directory
 mv src/wasm/pop_bg.wasm public/pop_bg.wasm
+
+# Move the generated js to the public directory
+mv src/wasm/pop.js public/pop.js
 
 # Start the dev server (after running npm install)
 cd web && npm run start
@@ -32,7 +46,7 @@ cargo build --bin bootnode
 target/debug/bootnode
 
 ```
-Open http://localhost:8000 in a new incognito window.
+Open http://localhost:8008 in a new incognito window.
 
 #### M1 Mac
 

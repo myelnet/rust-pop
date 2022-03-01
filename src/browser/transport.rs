@@ -57,7 +57,7 @@ impl WsTransport {
         let mut sender = Some(s);
         let onopen = Closure::wrap(Box::new(move |_| {
             let sender = sender.take().unwrap();
-            drop(sender.send(0));
+            sender.send(0);
         }) as Box<dyn FnMut(JsValue)>);
         ws.set_onopen(Some(onopen.as_ref().unchecked_ref()));
         onopen.forget();

@@ -2,6 +2,9 @@ import * as React from "react";
 import { useState, useEffect } from "react";
 import * as ReactDOM from "react-dom";
 
+const CID_KEY = "/cid/default";
+const ADDR_KEY = "/maddr/default";
+
 // if ("serviceWorker" in navigator) {
 //   // window.addEventListener("load", function() {
 //   navigator.serviceWorker.register("sw.js").then(
@@ -53,49 +56,57 @@ function Spinner() {
 }
 
 function App() {
-  const [root, setRoot] = useState("");
-  const [maddr, setMaddr] = useState("");
+  const [root, setRoot] = useState(localStorage.getItem(CID_KEY) ?? "");
+  const [maddr, setMaddr] = useState(localStorage.getItem(ADDR_KEY) ?? "");
   const [img, setImg] = useState("");
+  const [vid, setVid] = useState("");
   const [loading, setLoading] = useState(false);
+  const [wasmLoaded, setWasmLoaded] = useState(false);
+
+  const disabled = !root || !maddr || loading;
 
   function sendRequest() {
-    if (!root || !maddr) {
+    if (disabled) {
       return;
     }
     setLoading(true);
-    wasm_bindgen("pop_bg.wasm")
-      .then(() => {
-        console.log("wasm loaded");
-        const start = performance.now();
-        //@ts-ignore
-        const { request_bg } = wasm_bindgen;
-        const parts = maddr.split("/p2p/");
-        request_bg({
-          logLevel: "info",
-          maddress: parts[0],
-          peerId: parts[1],
-          cid: root,
-        })
-          .then((res) => res.blob())
-          .then((blob) => {
-            const url = URL.createObjectURL(blob);
-            setLoading(false);
-            setImg(url);
-            const done = performance.now();
-            const duration = done - start;
-            console.log(`done in ${duration}ms (${blob.size / duration}bps)`);
-          })
-          .catch(console.error);
+    const start = performance.now();
+    //@ts-ignore
+    const { request_bg } = wasm_bindgen;
+    const parts = maddr.split("/p2p/");
+    request_bg({
+      logLevel: "info",
+      maddress: parts[0],
+      peerId: parts[1],
+      cid: root,
+    })
+      .then((res) => res.blob())
+      .then((blob) => {
+        const url = URL.createObjectURL(blob);
+        setLoading(false);
+        if (/image/.test(blob.type)) {
+          setImg(url);
+        }
+        if (/video/.test(blob.type)) {
+          setVid(url);
+        }
+        const done = performance.now();
+        const duration = done - start;
+        console.log(`done in ${duration}ms (${blob.size / duration}bps)`);
+
+        localStorage.setItem(CID_KEY, root);
+        localStorage.setItem(ADDR_KEY, maddr);
       })
       .catch(console.error);
   }
   useEffect(() => {
     // @ts-ignore
-    // if (wasm_bindgen) {
-    //   console.log("starting wasm");
-    // @ts-ignore
-    // wasm_bindgen("pop_bg.wasm")
-    // .then(() => {
+    if (wasm_bindgen) {
+      // @ts-ignore
+      wasm_bindgen("pop_bg.wasm").then(() => {
+        setWasmLoaded(true);
+      });
+    }
     //@ts-ignore
     // const { DagService, WorkerPool } = wasm_bindgen;
     // const pool = new WorkerPool(1);
@@ -112,6 +123,10 @@ function App() {
     <div className="app">
       {img ? (
         <img className="img" src={img} alt="Retrieved image" />
+      ) : vid ? (
+        <video controls className="img" autoPlay loop>
+          <source src={vid} type="video/mp4" />
+        </video>
       ) : (
         <div className="img">{loading && <Spinner />}</div>
       )}
@@ -135,9 +150,10 @@ function App() {
         value={maddr}
         onChange={(e) => setMaddr(e.target.value)}
       />
-      <button className="btn" onClick={sendRequest} disabled={loading}>
+      <button className="btn" onClick={sendRequest} disabled={disabled}>
         request
       </button>
+      <p className="p">{wasmLoaded && "wasm loaded"}</p>
     </div>
   );
 }

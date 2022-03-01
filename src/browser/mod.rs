@@ -1,15 +1,12 @@
-pub mod node;
 mod store;
 mod stream;
 pub mod transport;
 
 use blockstore::memory::MemoryDB as BlockstoreMemory;
 use blockstore::types::BlockStore;
-use dag_service;
 use data_transfer::{mimesniff::detect_content_type, DataTransfer, DataTransferEvent, DealParams};
 use futures::channel::{mpsc, oneshot};
-use futures::prelude::*;
-use futures::{SinkExt, StreamExt};
+use futures::StreamExt;
 use graphsync::traversal::{RecursionLimit, Selector};
 use graphsync::{Config as GraphsyncConfig, Graphsync};
 use js_sys::{Promise, Uint8Array};
@@ -22,7 +19,6 @@ use libp2p::{
     swarm::{SwarmBuilder, SwarmEvent},
     Multiaddr, PeerId,
 };
-use node::{Node, NodeConfig};
 use routing::{Config as PeerDiscoveryConfig, PeerDiscovery};
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
@@ -34,7 +30,6 @@ use std::time::Duration;
 use store::CacheStore;
 use stream::{IntoUnderlyingSource, QueuingStrategy, ReadableStream};
 use wasm_bindgen::JsCast;
-use wasm_bindgen_futures;
 use web_sys::{
     DedicatedWorkerGlobalScope, MessageEvent, ReadableStream as JsStream, Response, ResponseInit,
 };
@@ -112,11 +107,12 @@ pub async fn request(js_params: JsValue) -> Result<(), JsValue> {
     while let Some(evt) = swarm.next().await {
         if let SwarmEvent::Behaviour(event) = evt {
             match event {
-                DataTransferEvent::Block { data, .. } => {
-                    if let Ipld::Bytes(bytes) = data {
-                        let data = js_sys::Uint8Array::from(bytes.as_slice());
-                        global.post_message_with_transfer(&data, &data.buffer())?;
-                    }
+                DataTransferEvent::Block {
+                    data: Ipld::Bytes(bytes),
+                    ..
+                } => {
+                    let data = js_sys::Uint8Array::from(bytes.as_slice());
+                    global.post_message_with_transfer(&data, &data.buffer())?;
                 }
                 DataTransferEvent::Completed(_, Ok(())) => {
                     break;
@@ -151,21 +147,18 @@ pub fn request_bg(js_params: JsValue) -> Result<Promise, JsValue> {
     let (os, or) = oneshot::channel();
     let mut osender = Some(os);
     // the bytes are streamed through this channel.
-    let (s, r) = mpsc::channel(1000);
-    let mut sender = s.clone();
+    let (mut sender, r) = mpsc::channel(64);
     let onmessage = Closure::wrap(Box::new(move |event: MessageEvent| {
         if event.data().is_undefined() {
             sender.close_channel()
-        } else {
-            if let Some(os) = osender.take() {
-                if let Ok(buf) = event.data().dyn_into::<js_sys::Uint8Array>() {
-                    let ct = detect_content_type(&buf.to_vec());
-                    drop(os.send(ct));
-                    sender.start_send(event.data()).unwrap();
-                }
-            } else {
+        } else if let Some(os) = osender.take() {
+            if let Ok(buf) = event.data().dyn_into::<js_sys::Uint8Array>() {
+                let ct = detect_content_type(&buf.to_vec());
+                drop(os.send(ct));
                 sender.start_send(event.data()).unwrap();
             }
+        } else {
+            sender.start_send(event.data()).unwrap();
         }
     }) as Box<dyn FnMut(_)>);
     worker_handle.set_onmessage(Some(onmessage.as_ref().unchecked_ref()));
@@ -176,7 +169,7 @@ pub fn request_bg(js_params: JsValue) -> Result<Promise, JsValue> {
     let done = async move {
         match or.await {
             Ok(ct) => {
-                let source = IntoUnderlyingSource::new(Box::new(r.map(|v| Ok(v))));
+                let source = IntoUnderlyingSource::new(Box::new(r.map(Ok)));
                 // Set HWM to 0 to prevent the JS ReadableStream from buffering chunks in its queue,
                 // since the original Rust stream is better suited to handle that.
                 let strategy = QueuingStrategy::new(0.0);
@@ -241,7 +234,7 @@ impl DagService {
         }
     }
     pub fn string_to_block(self, value: String, pool: &WorkerPool) -> Result<Promise, JsValue> {
-        let store = self.store.clone();
+        let store = self.store;
         let (tx, rx) = oneshot::channel();
         pool.run(move || {
             let node = Ipld::String(value);
@@ -261,7 +254,7 @@ impl DagService {
     }
 
     pub fn bytes_to_blocks(self, value: Uint8Array, pool: &WorkerPool) -> Result<Promise, JsValue> {
-        let store = self.store.clone();
+        let store = self.store;
 
         let (tx, rx) = oneshot::channel();
 

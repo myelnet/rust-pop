@@ -339,9 +339,7 @@ pub const EMPTY_QUEUE_SHRINK_THRESHOLD: usize = 100;
 
 #[derive(Debug)]
 pub enum DtNetEvent {
-    // using Box here see https://rust-lang.github.io/rust-clippy/master/index.html#large_enum_variant
-    // can probably remove when we upgrade data transfer messages to put less stuff inside.
-    Request(PeerId, Box<TransferRequest>),
+    Request(PeerId, TransferRequest),
     Response(PeerId, TransferResponse),
 }
 
@@ -433,11 +431,9 @@ impl NetworkBehaviour for DataTransferNetwork {
             self.pending_events
                 .push_back(NetworkBehaviourAction::GenerateEvent(DtNetEvent::Request(
                     peer_id,
-                    Box::new(
-                        event
-                            .request
-                            .expect("Expected event request to have request field"),
-                    ),
+                    event
+                        .request
+                        .expect("Expected event request to have request field"),
                 )));
         } else {
             self.pending_events

@@ -2,7 +2,6 @@ use crate::hub_discovery::SerializablePeerTable;
 use filecoin::{cid_helpers::CidCbor, types::Cbor};
 use futures::future::BoxFuture;
 use futures::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use libipld::Cid;
 use libp2p::core::{
     connection::ConnectionId, ConnectedPoint, InboundUpgrade, Multiaddr, OutboundUpgrade, PeerId,
     UpgradeInfo,
@@ -11,8 +10,6 @@ use libp2p::swarm::{
     IntoProtocolsHandler, NetworkBehaviour, NetworkBehaviourAction, NotifyHandler, OneShotHandler,
     PollParameters, ProtocolsHandler,
 };
-// use serde::{Deserialize, Serialize};
-use serde::{Deserialize, Serialize};
 use serde_tuple::{Deserialize_tuple, Serialize_tuple};
 use smallvec::SmallVec;
 use std::{
@@ -21,39 +18,13 @@ use std::{
     task::{Context, Poll},
 };
 
-#[derive(Debug, PartialEq, Eq, Serialize_tuple, Deserialize_tuple, Clone, Hash)]
-pub struct ChannelId {
-    pub initiator: String,
-    pub responder: String,
-    pub id: u64,
-}
-
-impl Default for ChannelId {
-    fn default() -> Self {
-        Self {
-            initiator: "".to_string(),
-            responder: "".to_string(),
-            id: 0,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize_tuple, Deserialize_tuple)]
+#[derive(Debug, Clone, PartialEq, Serialize_tuple, Deserialize_tuple, Default)]
 pub struct PeersforContent {
     pub root: CidCbor,
     pub peers: Option<SerializablePeerTable>,
 }
 
 impl Cbor for PeersforContent {}
-
-impl Default for PeersforContent {
-    fn default() -> Self {
-        Self {
-            root: CidCbor::default(),
-            peers: None,
-        }
-    }
-}
 
 impl From<()> for PeersforContent {
     fn from(_: ()) -> Self {
@@ -63,7 +34,6 @@ impl From<()> for PeersforContent {
 
 impl From<PeersforContent> for () {
     fn from(_: PeersforContent) -> Self {
-        ()
     }
 }
 
@@ -146,6 +116,12 @@ pub struct RoutingNetwork {
     >,
     connected: HashMap<PeerId, SmallVec<[Connection; 2]>>,
     pending_outbound_requests: HashMap<PeerId, SmallVec<[PeersforContent; 10]>>,
+}
+
+impl Default for RoutingNetwork {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl RoutingNetwork {

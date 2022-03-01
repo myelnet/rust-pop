@@ -2,14 +2,12 @@ use crate::hub_discovery::{PeerTable, SerializablePeerTable};
 use crate::utils::{content_table_from_bytes, content_table_to_bytes};
 use async_std::io;
 use async_trait::async_trait;
+use filecoin::cid_helpers::CidCbor;
 use futures::io::{AsyncRead, AsyncWrite};
 use futures::prelude::*;
 use futures::task::{Context, Poll};
-use libipld::Cid;
 use libp2p::core::connection::{ConnectionId, ListenerId};
 use libp2p::core::{upgrade, ConnectedPoint, Multiaddr, PeerId};
-
-use filecoin::{cid_helpers::CidCbor, types::Cbor};
 use libp2p::request_response::{
     ProtocolName, ProtocolSupport, RequestResponse, RequestResponseCodec, RequestResponseConfig,
     RequestResponseEvent, RequestResponseMessage,
@@ -191,7 +189,7 @@ impl HubIndexing {
 
         // if no hub table was passed then initialize a dummy one (mainly for testing purposes)
         let hub_table: Arc<RwLock<PeerTable>> =
-            hub_table.unwrap_or(Arc::new(RwLock::new(HashMap::new())));
+            hub_table.unwrap_or_else(|| Arc::new(RwLock::new(HashMap::new())));
 
         Self {
             id_counter: Arc::new(AtomicI32::new(1)),
@@ -200,6 +198,11 @@ impl HubIndexing {
             content_table,
         }
     }
+
+    pub fn add_entry(&mut self, cid: CidCbor, peer_table: PeerTable) {
+        self.content_table.write().unwrap().insert(cid, peer_table);
+    }
+
     pub fn add_address(&mut self, peer: &PeerId, address: Multiaddr) {
         self.inner.add_address(peer, address);
     }
@@ -217,7 +220,7 @@ impl HubIndexing {
             let id = self.id_counter.fetch_add(1, Ordering::Relaxed);
             let content = content_table_to_bytes(&self.content_table.read().unwrap());
             self.inner.send_request(
-                &peer_id,
+                peer_id,
                 IndexingRequest {
                     id,
                     content_table: content,
@@ -313,7 +316,7 @@ impl NetworkBehaviour for HubIndexing {
         conn: ConnectionId,
         event: <Self::ProtocolsHandler as ProtocolsHandler>::OutEvent,
     ) {
-        return self.inner.inject_event(peer_id, conn, event);
+        self.inner.inject_event(peer_id, conn, event)
     }
     fn poll(
         &mut self,
@@ -413,6 +416,7 @@ impl NetworkBehaviour for HubIndexing {
 mod tests {
     use super::*;
     use async_std::task;
+    use libipld::Cid;
     use libp2p::core::muxing::StreamMuxerBox;
     use libp2p::core::transport::Boxed;
     use libp2p::identity;
@@ -422,6 +426,7 @@ mod tests {
     use libp2p::yamux::YamuxConfig;
     use libp2p::{Multiaddr, PeerId, Swarm, Transport};
     use serde_cbor::{from_slice, to_vec};
+    use smallvec::SmallVec;
 
     #[test]
     fn request_serialization() {
@@ -485,11 +490,15 @@ mod tests {
     }
 
     impl Peer {
-        fn new(num_addreses: usize) -> Self {
+        fn new(
+            num_addreses: usize,
+            is_hub: bool,
+            hub_table: Option<Arc<RwLock<PeerTable>>>,
+        ) -> Self {
             let (peer_id, trans) = mk_transport();
             let mut swarm = Swarm::new(
                 trans,
-                HubIndexing::new(Config::default(), true, None),
+                HubIndexing::new(Config::default(), is_hub, hub_table),
                 peer_id,
             );
             for _i in 0..num_addreses {
@@ -519,8 +528,7 @@ mod tests {
             let peer_id = self.peer_id;
             task::spawn(async move {
                 loop {
-                    let event = self.swarm.next().await;
-                    println!("event {:?}", event);
+                    let _event = self.swarm.next().await;
                 }
             });
             peer_id
@@ -545,50 +553,65 @@ mod tests {
     }
 
     #[async_std::test]
-    async fn test_request() {
-        let mut peer1 = Peer::new(7);
-        let mut peer2 = Peer::new(1);
-        let mut peer3 = Peer::new(3);
+    async fn test_index_update() {
+        let cid = Cid::try_from("bafy2bzaceafciokjlt5v5l53pftj6zcmulc2huy3fduwyqsm3zo5bzkau7muq")
+            .unwrap();
+        let content = CidCbor::from(cid);
+        let host_peer = Peer::new(1, true, None);
+        let multiaddr = SmallVec::<[Multiaddr; 6]>::from(host_peer.addr);
+        let peer_id = host_peer.peer_id;
+        let peer_table: PeerTable = HashMap::from([(peer_id, multiaddr)]);
+
+        let mut hub_peer = Peer::new(3, true, None);
+        let hub_id = hub_peer.peer_id;
+        let hub_addr = SmallVec::<[Multiaddr; 6]>::from(hub_peer.addr.clone());
+        let hub_table: PeerTable = HashMap::from([(hub_id, hub_addr)]);
+        let mut peer1 = Peer::new(7, false, Some(Arc::new(RwLock::new(hub_table))));
+        peer1.swarm().behaviour_mut().add_entry(content, peer_table);
+
+        let mut peer2 = Peer::new(3, false, None);
 
         println!(
-            "{:?}",
-            peer3.swarm().behaviour().content_table.read().unwrap()
-        );
-        println!(
-            "{:?}",
+            "before {:?}",
             peer1.swarm().behaviour().content_table.read().unwrap()
         );
+        println!(
+            "before {:?}",
+            peer2.swarm().behaviour().content_table.read().unwrap()
+        );
 
-        // peer 2 knows everyone
-        peer2.add_address(&peer1);
-        peer2.add_address(&peer3);
-        // peer 3 knows peer 2 only and itself
-        peer3.add_address(&peer2);
-        peer3.add_address(&peer2);
-        peer3.add_address(&peer2);
-        // peer 1 knows peer 2 only and itself
+        peer1.add_address(&hub_peer);
         peer1.add_address(&peer2);
 
         //  print logs for peer 2
-        let peer2id = peer2.spawn("peer2");
+        let hub_table = hub_peer.swarm().behaviour().content_table.clone();
+        hub_peer.spawn("hub");
 
-        peer3.swarm().dial(peer2id).unwrap();
-        peer1.swarm().dial(peer2id).unwrap();
-
-        assert_response_ok(peer3.next().await, 1);
-        assert_response_ok(peer1.next().await, 1);
+        // update remote hubs
+        peer1.swarm().behaviour_mut().update();
 
         println!(
-            "{:?}",
-            peer3.swarm().behaviour().content_table.read().unwrap()
+            "after {:?}",
+            peer2.swarm().behaviour().content_table.read().unwrap()
         );
         println!(
-            "{:?}",
+            "after {:?}",
             peer1.swarm().behaviour().content_table.read().unwrap()
         );
 
+        assert_response_ok(peer1.next().await, 1);
+
+        // assert peer 2 table did not update
+        assert!(peer2
+            .swarm()
+            .behaviour_mut()
+            .content_table
+            .read()
+            .unwrap()
+            .is_empty());
+
         assert_eq!(
-            *peer3.swarm().behaviour().content_table.read().unwrap(),
+            *hub_table.read().unwrap(),
             *peer1.swarm().behaviour().content_table.read().unwrap()
         );
     }

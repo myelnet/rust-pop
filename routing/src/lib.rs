@@ -7,16 +7,13 @@ use hub_discovery::Config as DiscoveryConfig;
 use hub_discovery::{DiscoveryEvent, HubDiscovery, PeerTable};
 use hub_indexing::Config as IndexingConfig;
 use hub_indexing::{ContentTable, HubIndexing, IndexingEvent};
-use libipld::Cid;
-use libp2p::gossipsub::{Gossipsub, GossipsubEvent, GossipsubMessage, Hasher, IdentTopic};
+use libp2p::gossipsub::{Gossipsub, GossipsubEvent, GossipsubMessage, IdentTopic};
 use libp2p::swarm::{
     NetworkBehaviour, NetworkBehaviourAction, NetworkBehaviourEventProcess, PollParameters,
 };
 use libp2p::{Multiaddr, NetworkBehaviour, PeerId};
 use network::{PeersforContent, RoutingNetEvent, RoutingNetwork, EMPTY_QUEUE_SHRINK_THRESHOLD};
 use serde::{Deserialize, Serialize};
-use serde_tuple::{Deserialize_tuple, Serialize_tuple};
-use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::sync::{Arc, RwLock};

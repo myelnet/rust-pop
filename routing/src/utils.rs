@@ -1,6 +1,6 @@
 use crate::hub_discovery::{PeerTable, SerializablePeerTable};
 use crate::hub_indexing::{ContentTable, SerializableContentTable};
-use filecoin::{cid_helpers::CidCbor, types::Cbor};
+use filecoin::cid_helpers::CidCbor;
 use libipld::Cid;
 use libp2p::core::{Multiaddr, PeerId};
 use libp2p::gossipsub::MessageId;
@@ -9,8 +9,6 @@ use libp2p::gossipsub::{
     ValidationMode,
 };
 use smallvec::SmallVec;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use std::time::Duration;
 
 pub fn peer_table_to_bytes(p: &PeerTable) -> SerializablePeerTable {
@@ -36,9 +34,8 @@ pub fn peer_table_from_bytes(p: &SerializablePeerTable) -> PeerTable {
                 Ok(p) => {
                     // check associated multiaddresses are valid
                     for addr in addresses {
-                        match Multiaddr::try_from(addr.clone()) {
-                            Ok(a) => addr_vec.push(a),
-                            Err(_) => {}
+                        if let Ok(a) = Multiaddr::try_from(addr.clone()) {
+                            addr_vec.push(a)
                         }
                     }
                     // remove any potential duplicate data
@@ -78,7 +75,7 @@ pub fn content_table_from_bytes(c: &SerializableContentTable) -> ContentTable {
 
 pub fn content_routing_init(peer_id: PeerId, topic: Topic) -> Gossipsub {
     // We take current time as request id as request content may not be unique
-    let message_id_fn = |message: &GossipsubMessage| MessageId::from(instant::now().to_ne_bytes());
+    let message_id_fn = |_message: &GossipsubMessage| MessageId::from(instant::now().to_ne_bytes());
 
     // Set a custom gossipsub
     let gossipsub_config = GossipsubConfigBuilder::default()
@@ -95,5 +92,5 @@ pub fn content_routing_init(peer_id: PeerId, topic: Topic) -> Gossipsub {
 
     // subscribes to our topic
     content_routing.subscribe(&topic).unwrap();
-    return content_routing;
+    content_routing
 }

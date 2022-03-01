@@ -186,7 +186,7 @@ impl HubDiscovery {
 
         // if no hub table was passed then initialize a dummy one (mainly for testing purposes)
         let hub_table: Arc<RwLock<PeerTable>> =
-            hub_table.unwrap_or(Arc::new(RwLock::new(HashMap::new())));
+            hub_table.unwrap_or_else(|| Arc::new(RwLock::new(HashMap::new())));
 
         Self {
             id_counter: Arc::new(AtomicI32::new(1)),
@@ -215,7 +215,7 @@ impl HubDiscovery {
     fn request(&mut self, peer_id: &PeerId) -> RequestId {
         let id = self.id_counter.fetch_add(1, Ordering::Relaxed);
         self.inner
-            .send_request(&peer_id, DiscoveryRequest { id, hub: self.hub });
+            .send_request(peer_id, DiscoveryRequest { id, hub: self.hub });
         id
     }
 }
@@ -322,7 +322,7 @@ impl NetworkBehaviour for HubDiscovery {
         conn: ConnectionId,
         event: <Self::ProtocolsHandler as ProtocolsHandler>::OutEvent,
     ) {
-        return self.inner.inject_event(peer_id, conn, event);
+        self.inner.inject_event(peer_id, conn, event)
     }
     fn poll(
         &mut self,
@@ -382,7 +382,7 @@ impl NetworkBehaviour for HubDiscovery {
                         response,
                     } => {
                         //  addresses only get returned on a successful response
-                        let new_addresses = peer_table_from_bytes(&response.clone().addresses);
+                        let new_addresses = peer_table_from_bytes(&response.addresses);
                         //  update our local peer table
                         //  extend overwrites colliding keys (we assume inbound information is most up to date)
                         self.hub_table.write().unwrap().extend(new_addresses);

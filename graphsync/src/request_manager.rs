@@ -147,9 +147,11 @@ mod tests {
     ) {
         if let Ok(evt) = result {
             match evt {
-                RequestEvent::Progress { req_id, data, link } => {
+                RequestEvent::Progress {
+                    req_id, size, link, ..
+                } => {
                     assert_eq!(req_id, id);
-                    assert_eq!(data.len(), size2);
+                    assert_eq!(size, size2);
                     assert_eq!(link, cid,);
                 }
                 _ => panic!("Received wrong event"),

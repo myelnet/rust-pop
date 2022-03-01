@@ -25,6 +25,9 @@ smallvec = "1.8.0"
 instant = "0.1.12"
 rand = { version = "0.7", features = ["wasm-bindgen"] }
 serde_tuple = "0.5"
+libipld = "0.12"
+filecoin = { path = "../filecoin", default_features = false }
+lazy_static = "1.4.0"
 
 
 [build-dependencies]
@@ -38,5 +41,5 @@ criterion = { version = "0.3", features = ["async_futures", "async_std"] }
 
 [features]
 default = ["native"]
-native = []
-browser = ["instant/wasm-bindgen"]
+native = ["filecoin/native"]
+browser = ["instant/wasm-bindgen", "filecoin/browser"]

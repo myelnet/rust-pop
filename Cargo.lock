@@ -1294,6 +1294,7 @@ dependencies = [
  "async-std",
  "blockstore",
  "byteorder",
+ "criterion",
  "cs_serde_bytes",
  "cs_serde_cbor",
  "dag_service",

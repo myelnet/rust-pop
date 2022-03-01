@@ -326,7 +326,7 @@ where
         conn: ConnectionId,
         event: <Self::ProtocolsHandler as ProtocolsHandler>::OutEvent,
     ) {
-        return self.inner.inject_event(peer_id, conn, event);
+        self.inner.inject_event(peer_id, conn, event)
     }
     fn poll(
         &mut self,
@@ -428,7 +428,7 @@ where
                         }
                         if !msg.responses.is_empty() {
                             let responses: Vec<GraphsyncResponse> =
-                                msg.responses.values().map(|res| res.clone()).collect();
+                                msg.responses.values().cloned().collect();
                             self.request_manager.inject_response(msg);
                             return Poll::Ready(NetworkBehaviourAction::GenerateEvent(
                                 GraphsyncEvent::ResponseReceived(peer, responses),

@@ -9,7 +9,6 @@ use filecoin::{cid_helpers::CidCbor, types::Cbor};
 use fsm::{Channel, ChannelEvent};
 use graphsync::traversal::Selector;
 use graphsync::{Graphsync, GraphsyncEvent, RequestId};
-use instant;
 use libipld::codec::Decode;
 use libipld::store::StoreParams;
 use libipld::{Cid, Ipld};
@@ -80,8 +79,6 @@ where
         mut graphsync: Graphsync<S>,
         peer_discovery: PeerDiscovery,
     ) -> Self {
-        let now_unix = instant::now() as u64;
-
         graphsync.register_incoming_request_hook(Arc::new(|_peer, gs_req| {
             let mut extensions = HashMap::new();
             if let Ok(rmsg) = TransferMessage::try_from(&gs_req.extensions) {
@@ -93,13 +90,13 @@ where
                     id: vch.id,
                     status: DealStatus::Accepted,
                     message: "".to_string(),
-                    payment_owed: (0 as isize).to_bigint().unwrap(),
+                    payment_owed: (0_isize).to_bigint().unwrap(),
                 };
                 let tmsg = TransferMessage {
                     is_rq: false,
                     request: None,
                     response: Some(TransferResponse {
-                        mtype: MessageType::NewMessage,
+                        mtype: MessageType::New,
                         accepted: true,
                         paused: false,
                         transfer_id: req.transfer_id,
@@ -113,6 +110,8 @@ where
                 (false, extensions)
             }
         }));
+
+        let now_unix = instant::now() as u64;
         Self {
             peer_id,
             graphsync,
@@ -132,7 +131,7 @@ where
         selector: Selector,
         params: DealParams,
     ) -> Result<ChannelId, String> {
-        let cid = CidCbor::from(root.clone());
+        let cid = CidCbor::from(root);
         let request_id = self.next_request_id();
         let voucher = DealProposal {
             id: request_id,
@@ -143,7 +142,7 @@ where
             is_rq: true,
             request: Some(TransferRequest {
                 root: cid,
-                mtype: MessageType::NewMessage,
+                mtype: MessageType::New,
                 pause: false,
                 partial: false,
                 pull: true,
@@ -207,7 +206,7 @@ where
 
     fn get_channel_by_req_id(&mut self, req_id: RequestId) -> Option<(ChannelId, Channel)> {
         let ch_id = self.channel_ids.get(&req_id)?;
-        let ch = self.channels.remove(&ch_id)?;
+        let ch = self.channels.remove(ch_id)?;
         Some((ch_id.clone(), ch))
     }
 
@@ -265,10 +264,6 @@ where
     pub fn add_address(&mut self, peer_id: &PeerId, addr: Multiaddr) {
         self.peer_discovery.add_address(peer_id, addr);
     }
-
-    fn addresses_of_peer(&mut self, peer_id: &PeerId) -> Vec<Multiaddr> {
-        self.peer_discovery.addresses_of_peer(peer_id)
-    }
 }
 
 impl<S: 'static + BlockStore> NetworkBehaviourEventProcess<GraphsyncEvent> for DataTransfer<S>
@@ -298,13 +293,13 @@ where
                             id: deal_id,
                             status: DealStatus::Completed,
                             message: "Thanks for doing business with us".to_string(),
-                            payment_owed: (0 as isize).to_bigint().unwrap(),
+                            payment_owed: (0_isize).to_bigint().unwrap(),
                         };
                         let tmsg = TransferMessage {
                             is_rq: false,
                             request: None,
                             response: Some(TransferResponse {
-                                mtype: MessageType::CompleteMessage,
+                                mtype: MessageType::Complete,
                                 accepted: true,
                                 paused: false,
                                 transfer_id: ch_id.id,
@@ -318,15 +313,10 @@ where
             }
             GraphsyncEvent::ResponseReceived(peer, responses) => {
                 for res in responses.iter() {
-                    match TransferMessage::try_from(&res.extensions) {
-                        Ok(res) => {
-                            println!("received response {:?}", res);
-
-                            if let Some(response) = res.response {
-                                self.process_response(peer, response);
-                            }
+                    if let Ok(res) = TransferMessage::try_from(&res.extensions) {
+                        if let Some(response) = res.response {
+                            self.process_response(peer, response);
                         }
-                        Err(_) => {}
                     };
                 }
             }
@@ -343,7 +333,7 @@ where
                 let next_state = ch.transition(event);
                 self.channels.insert(ch_id.clone(), next_state.clone());
                 self.pending_events.push_back(DataTransferEvent::Block {
-                    ch_id: ch_id.clone(),
+                    ch_id,
                     link,
                     size,
                     data,
@@ -375,7 +365,7 @@ where
     fn inject_event(&mut self, event: DtNetEvent) {
         match event {
             DtNetEvent::Request(peer_id, request) => {
-                self.process_request(peer_id, request);
+                self.process_request(peer_id, *request);
             }
             DtNetEvent::Response(peer_id, response) => {
                 self.process_response(peer_id, response);

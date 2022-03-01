@@ -37,6 +37,7 @@ hex = "0.4.3"
 async-std = { version = "1.6.2", features = ["attributes", "unstable"] }
 rand = { version = "0.7", features = ["wasm-bindgen"] }
 dag_service = { path = "../dag_service" }
+criterion = { version = "0.3", features = ["async_futures", "async_std"] }
 
 [features]
 default = ["native"]
@@ -47,3 +48,7 @@ browser = [
   "blockstore/browser",
   "instant/wasm-bindgen",
 ]
+
+[[bench]]
+name = "e2e"
+harness = false

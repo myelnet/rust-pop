@@ -114,19 +114,19 @@ impl Channel {
     }
 }
 
-impl Into<DataTransferEvent> for Channel {
-    fn into(self) -> DataTransferEvent {
-        match self {
-            Self::New { id, .. } => DataTransferEvent::Started(id),
-            Self::Accepted { id, .. } => DataTransferEvent::Accepted(id),
-            Self::Ongoing {
+impl From<Channel> for DataTransferEvent {
+    fn from(ch: Channel) -> DataTransferEvent {
+        match ch {
+            Channel::New { id, .. } => DataTransferEvent::Started(id),
+            Channel::Accepted { id, .. } => DataTransferEvent::Accepted(id),
+            Channel::Ongoing {
                 id,
                 received: _,
                 all_received: _,
             } => DataTransferEvent::Progress(id),
-            Self::PendingLastBlocks { id, received: _ } => DataTransferEvent::Progress(id),
-            Self::Failed { id, reason } => DataTransferEvent::Completed(id, Err(reason)),
-            Self::Completed { id, received: _ } => DataTransferEvent::Completed(id, Ok(())),
+            Channel::PendingLastBlocks { id, received: _ } => DataTransferEvent::Progress(id),
+            Channel::Failed { id, reason } => DataTransferEvent::Completed(id, Err(reason)),
+            Channel::Completed { id, received: _ } => DataTransferEvent::Completed(id, Ok(())),
         }
     }
 }

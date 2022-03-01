@@ -6,10 +6,10 @@ pub fn detect_content_type(content: &[u8]) -> String {
     while first_non_ws < 512 && is_ws(content[first_non_ws] as u16) {
         first_non_ws += 1;
     }
-    if &content[0..JPEG.len()] == &JPEG {
+    if content[0..JPEG.len()] == JPEG {
         return "image/jpeg".to_string();
     }
-    if &content[0..PNG.len()] == &PNG {
+    if content[0..PNG.len()] == PNG {
         return "image/png".to_string();
     }
     if &content[0..GIF1.len()] == GIF1 {
@@ -28,7 +28,7 @@ fn match_mp4(buf: &[u8]) -> bool {
     if buf.len() < 12 {
         return false;
     }
-    let mut temp = buf.clone();
+    let mut temp = buf;
     if let Ok(val) = temp.read_u32::<BigEndian>() {
         let box_size = val as usize;
         if box_size % 4 != 0 || buf.len() < box_size {
@@ -54,10 +54,10 @@ fn match_mp4(buf: &[u8]) -> bool {
 
 const JPEG: [u8; 3] = [0xff, 0xd8, 0xff];
 const PNG: [u8; 8] = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
-const GIF1: &'static [u8] = "GIF87a".as_bytes();
-const GIF2: &'static [u8] = "GIF89a".as_bytes();
-const MP4: &'static [u8] = "mp4".as_bytes();
-const FTYP: &'static [u8] = "ftyp".as_bytes();
+const GIF1: &[u8] = "GIF87a".as_bytes();
+const GIF2: &[u8] = "GIF89a".as_bytes();
+const MP4: &[u8] = "mp4".as_bytes();
+const FTYP: &[u8] = "ftyp".as_bytes();
 
 const TAB: u16 = utf16!("\t")[0];
 const NL: u16 = utf16!("\n")[0];
@@ -66,10 +66,7 @@ const RET: u16 = utf16!("\r")[0];
 const SP: u16 = utf16!(" ")[0];
 
 fn is_ws(b: u16) -> bool {
-    match b {
-        TAB | NL | PB | RET | SP => true,
-        _ => false,
-    }
+    matches!(b, TAB | NL | PB | RET | SP)
 }
 
 #[cfg(test)]

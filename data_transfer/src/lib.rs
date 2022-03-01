@@ -1,4 +1,5 @@
 mod fsm;
+pub mod mimesniff;
 mod network;
 
 pub use network::DealParams;
@@ -37,7 +38,8 @@ pub enum DataTransferEvent {
     Block {
         ch_id: ChannelId,
         link: Cid,
-        data: Vec<u8>,
+        size: usize,
+        data: Ipld,
     },
     Completed(ChannelId, Result<(), String>),
     PeerTableUpdated,
@@ -328,16 +330,22 @@ where
                     };
                 }
             }
-            GraphsyncEvent::Progress { req_id, link, data } => {
+            GraphsyncEvent::Progress {
+                req_id,
+                link,
+                size,
+                data,
+            } => {
                 let (ch_id, ch) = self
                     .get_channel_by_req_id(req_id)
                     .expect("Expected channel to be created before graphsync progress");
-                let event = ChannelEvent::BlockReceived { size: data.len() };
+                let event = ChannelEvent::BlockReceived { size };
                 let next_state = ch.transition(event);
                 self.channels.insert(ch_id.clone(), next_state.clone());
                 self.pending_events.push_back(DataTransferEvent::Block {
                     ch_id: ch_id.clone(),
                     link,
+                    size,
                     data,
                 });
                 self.pending_events.push_back(next_state.into());

@@ -26,7 +26,8 @@ pub enum RequestEvent {
     Progress {
         req_id: RequestId,
         link: Cid,
-        data: Vec<u8>,
+        data: Ipld,
+        size: usize,
     },
     Completed(RequestId, Result<(), Error>),
 }
@@ -69,8 +70,9 @@ where
             sender
                 .try_send(RequestEvent::Progress {
                     req_id: id,
-                    link: *blk.cid(),
-                    data: blk.data().to_vec(),
+                    link: blk.link,
+                    size: blk.size,
+                    data: blk.data,
                 })
                 .map_err(|e| e.to_string())?;
             Ok(())

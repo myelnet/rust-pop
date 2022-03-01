@@ -248,30 +248,6 @@ pub trait LinkLoader {
     async fn load_link(&mut self, link: &Cid) -> Result<Option<Ipld>, String>;
 }
 
-#[derive(Debug)]
-struct Entries {
-    ipld: Ipld,
-    selector: Selector,
-    it: vec::IntoIter<PathSegment>,
-}
-
-impl Iterator for Entries {
-    type Item = (Ipld, Selector);
-
-    fn next(&mut self) -> Option<Self::Item> {
-        while let Some(ps) = self.it.next() {
-            if let Some(next_sel) = self.selector.clone().explore(&self.ipld, &ps) {
-                let v = match self.ipld.get(ps.ipld_index()) {
-                    Ok(node) => node,
-                    _ => continue,
-                };
-                return Some((v.clone(), next_sel));
-            }
-        }
-        None
-    }
-}
-
 /// Executes an iterative traversal based on the give root CID and selector
 /// and returns the blocks resolved along the way.
 #[derive(Debug)]
@@ -279,7 +255,7 @@ pub struct BlockIterator<S> {
     store: Arc<S>,
     selector: Selector,
     start: Option<Cid>,
-    stack_list: SmallVec<[Entries; 8]>,
+    stack_list: SmallVec<[vec::IntoIter<(Ipld, Selector)>; 8]>,
     seen: Option<HashSet<Cid>>,
     restart: bool,
 }
@@ -392,24 +368,60 @@ where
         result
     }
     fn push(&mut self, ipld: Ipld, selector: Selector) {
-        let it = match selector.interests() {
-            Some(attn) => attn.into_iter(),
-            None => match &ipld {
-                Ipld::StringMap(m) => m
-                    .keys()
-                    .map(|k| PathSegment::from(k.as_ref()))
-                    .collect::<Vec<PathSegment>>()
-                    .into_iter(),
-                Ipld::List(l) => l
-                    .iter()
-                    .enumerate()
-                    .map(|(i, _)| PathSegment::from(i))
-                    .collect::<Vec<PathSegment>>()
-                    .into_iter(),
-                _ => unreachable!(),
-            },
-        };
-        self.stack_list.push(Entries { ipld, selector, it });
+        self.stack_list
+            .push(select_next_entries(ipld, selector).into_iter());
+    }
+}
+
+/// returns a list of ipld values selected by the given selector.
+/// TODO: there should be a way to return an iterator so it can be lazily evaluated.
+fn select_next_entries(ipld: Ipld, selector: Selector) -> Vec<(Ipld, Selector)> {
+    match selector.interests() {
+        Some(attn) => attn
+            .into_iter()
+            .filter_map(|ps| {
+                if let Some(next_sel) = selector.clone().explore(&ipld, &ps) {
+                    let v = match ipld.get(ps.ipld_index()) {
+                        Ok(node) => node,
+                        _ => return None,
+                    };
+                    return Some((v.clone(), next_sel));
+                }
+                None
+            })
+            .collect(),
+        None => match &ipld {
+            Ipld::StringMap(m) => m
+                .keys()
+                .filter_map(|k| {
+                    let ps = PathSegment::from(k.as_ref());
+                    if let Some(next_sel) = selector.clone().explore(&ipld, &ps) {
+                        let v = match ipld.get(ps.ipld_index()) {
+                            Ok(node) => node,
+                            _ => return None,
+                        };
+                        return Some((v.clone(), next_sel));
+                    }
+                    None
+                })
+                .collect(),
+            Ipld::List(l) => l
+                .iter()
+                .enumerate()
+                .filter_map(|(i, _)| {
+                    let ps = PathSegment::from(i);
+                    if let Some(next_sel) = selector.clone().explore(&ipld, &ps) {
+                        let v = match ipld.get(ps.ipld_index()) {
+                            Ok(node) => node,
+                            _ => return None,
+                        };
+                        return Some((v.clone(), next_sel));
+                    }
+                    None
+                })
+                .collect(),
+            _ => Vec::new(),
+        },
     }
 }
 
@@ -640,6 +652,13 @@ where
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct BlockData {
+    pub link: Cid,
+    pub data: Ipld,
+    pub size: usize,
+}
+
 // TODO: add a max cache size so we start evicting pending blocks to
 // prevent an attack where a peer would flood us with unrelated blocks
 pub struct AsyncLoader<S: BlockStore, F> {
@@ -656,7 +675,7 @@ pub struct AsyncLoader<S: BlockStore, F> {
 
 impl<S: BlockStore, F> AsyncLoader<S, F>
 where
-    F: Fn(&Block<S::Params>) -> Result<(), String> + Send + Sync,
+    F: Fn(BlockData) -> Result<(), String> + Send + Sync,
     Ipld: Decode<<S::Params as StoreParams>::Codecs>,
 {
     pub fn new(store: Arc<S>, cb: F) -> Self {
@@ -704,7 +723,7 @@ where
         self.data.remove(&id);
         self.lookup.remove(block.cid());
         self.store.insert(block).map_err(|e| e.to_string())?;
-        (self.cb)(block)?;
+        // (self.cb)(block)?;
         Ok(())
     }
 
@@ -716,7 +735,7 @@ where
 #[async_trait]
 impl<S: BlockStore, F> LinkLoader for AsyncLoader<S, F>
 where
-    F: Fn(&Block<S::Params>) -> Result<(), String> + Send + Sync,
+    F: Fn(BlockData) -> Result<(), String> + Send + Sync,
     Ipld: Decode<<S::Params as StoreParams>::Codecs>,
 {
     async fn load_link(&mut self, link: &Cid) -> Result<Option<Ipld>, String> {
@@ -725,7 +744,14 @@ where
             if let Some(block) = self.get_pending(link) {
                 self.flush_pending(&block)?;
                 match block.ipld() {
-                    Ok(node) => return Ok(Some(node)),
+                    Ok(node) => {
+                        (self.cb)(BlockData {
+                            link: *link,
+                            size: block.data().len(),
+                            data: node.clone(),
+                        })?;
+                        return Ok(Some(node));
+                    }
                     Err(e) => return Err(e.to_string()),
                 }
             }
@@ -740,9 +766,15 @@ where
                 Ok(block) => {
                     if block.cid() == link {
                         self.store.insert(&block).map_err(|e| e.to_string())?;
-                        (self.cb)(&block)?;
                         match block.ipld() {
-                            Ok(node) => return Ok(Some(node)),
+                            Ok(node) => {
+                                (self.cb)(BlockData {
+                                    link: *link,
+                                    size: block.data().len(),
+                                    data: node.clone(),
+                                })?;
+                                return Ok(Some(node));
+                            }
                             Err(e) => return Err(e.to_string()),
                         }
                     }

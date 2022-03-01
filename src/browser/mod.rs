@@ -1,11 +1,12 @@
 pub mod node;
+mod store;
 mod stream;
 pub mod transport;
 
 use blockstore::memory::MemoryDB as BlockstoreMemory;
 use blockstore::types::BlockStore;
 use dag_service;
-use data_transfer::{DataTransfer, DataTransferEvent, DealParams};
+use data_transfer::{mimesniff::detect_content_type, DataTransfer, DataTransferEvent, DealParams};
 use futures::channel::{mpsc, oneshot};
 use futures::prelude::*;
 use futures::{SinkExt, StreamExt};
@@ -30,10 +31,13 @@ use std::str::FromStr;
 use std::string::ToString;
 use std::sync::Arc;
 use std::time::Duration;
+use store::CacheStore;
 use stream::{IntoUnderlyingSource, QueuingStrategy, ReadableStream};
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures;
-use web_sys::{DedicatedWorkerGlobalScope, MessageEvent, ReadableStream as JsStream, Response};
+use web_sys::{
+    DedicatedWorkerGlobalScope, MessageEvent, ReadableStream as JsStream, Response, ResponseInit,
+};
 use web_sys::{ErrorEvent, Event, File, Worker};
 
 use wasm_bindgen::prelude::*;
@@ -50,6 +54,12 @@ pub struct RequestParams {
     pub cid: String,
 }
 
+#[derive(Serialize, Deserialize)]
+pub struct ResponseHeaders {
+    #[serde(rename = "Content-Type")]
+    pub content_type: String,
+}
+
 #[wasm_bindgen]
 pub async fn request(js_params: JsValue) -> Result<(), JsValue> {
     let global = js_sys::global().unchecked_into::<DedicatedWorkerGlobalScope>();
@@ -59,7 +69,7 @@ pub async fn request(js_params: JsValue) -> Result<(), JsValue> {
     let peer_id = PeerId::from_str(&params.peer_id).map_err(js_err)?;
     let cid = Cid::try_from(params.cid).map_err(js_err)?;
 
-    let store = Arc::new(BlockstoreMemory::default());
+    let store = Arc::new(CacheStore::default());
 
     let local_key = identity::Keypair::generate_ed25519();
     let local_peer_id = PeerId::from(local_key.public());
@@ -103,8 +113,10 @@ pub async fn request(js_params: JsValue) -> Result<(), JsValue> {
         if let SwarmEvent::Behaviour(event) = evt {
             match event {
                 DataTransferEvent::Block { data, .. } => {
-                    let data = js_sys::Uint8Array::from(data.as_slice());
-                    global.post_message_with_transfer(&data, &data.buffer());
+                    if let Ipld::Bytes(bytes) = data {
+                        let data = js_sys::Uint8Array::from(bytes.as_slice());
+                        global.post_message_with_transfer(&data, &data.buffer())?;
+                    }
                 }
                 DataTransferEvent::Completed(_, Ok(())) => {
                     break;
@@ -120,7 +132,7 @@ pub async fn request(js_params: JsValue) -> Result<(), JsValue> {
 }
 
 #[wasm_bindgen]
-pub fn request_bg(js_params: JsValue) -> Result<Response, JsValue> {
+pub fn request_bg(js_params: JsValue) -> Result<Promise, JsValue> {
     let params: RequestParams = js_params.into_serde().map_err(js_err)?;
 
     console_error_panic_hook::set_once();
@@ -135,13 +147,25 @@ pub fn request_bg(js_params: JsValue) -> Result<Response, JsValue> {
     array.push(&wasm_bindgen::memory());
     worker_handle.post_message(&array)?;
 
+    // this sender receives the content type, meaning that we received the first bytes.
+    let (os, or) = oneshot::channel();
+    let mut osender = Some(os);
+    // the bytes are streamed through this channel.
     let (s, r) = mpsc::channel(1000);
     let mut sender = s.clone();
     let onmessage = Closure::wrap(Box::new(move |event: MessageEvent| {
         if event.data().is_undefined() {
             sender.close_channel()
         } else {
-            sender.start_send(event.data()).unwrap();
+            if let Some(os) = osender.take() {
+                if let Ok(buf) = event.data().dyn_into::<js_sys::Uint8Array>() {
+                    let ct = detect_content_type(&buf.to_vec());
+                    drop(os.send(ct));
+                    sender.start_send(event.data()).unwrap();
+                }
+            } else {
+                sender.start_send(event.data()).unwrap();
+            }
         }
     }) as Box<dyn FnMut(_)>);
     worker_handle.set_onmessage(Some(onmessage.as_ref().unchecked_ref()));
@@ -149,14 +173,32 @@ pub fn request_bg(js_params: JsValue) -> Result<Response, JsValue> {
 
     worker_handle.post_message(&wparams)?;
 
-    let source = IntoUnderlyingSource::new(Box::new(r.map(|v| Ok(v))));
-    // Set HWM to 0 to prevent the JS ReadableStream from buffering chunks in its queue,
-    // since the original Rust stream is better suited to handle that.
-    let strategy = QueuingStrategy::new(0.0);
+    let done = async move {
+        match or.await {
+            Ok(ct) => {
+                let source = IntoUnderlyingSource::new(Box::new(r.map(|v| Ok(v))));
+                // Set HWM to 0 to prevent the JS ReadableStream from buffering chunks in its queue,
+                // since the original Rust stream is better suited to handle that.
+                let strategy = QueuingStrategy::new(0.0);
 
-    let js_stream: JsStream = ReadableStream::new_with_source(source, strategy).unchecked_into();
+                let js_stream: JsStream =
+                    ReadableStream::new_with_source(source, strategy).unchecked_into();
 
-    Response::new_with_opt_readable_stream(Some(&js_stream))
+                let headers =
+                    JsValue::from_serde(&ResponseHeaders { content_type: ct }).map_err(js_err)?;
+
+                let mut init = ResponseInit::new();
+
+                let res = Response::new_with_opt_readable_stream_and_init(
+                    Some(&js_stream),
+                    init.headers(&headers).status(200),
+                )?;
+                Ok(res.into())
+            }
+            Err(_) => Err(JsValue::undefined()),
+        }
+    };
+    Ok(wasm_bindgen_futures::future_to_promise(done))
 }
 
 fn js_err<E: ToString + Send + Sync + 'static>(e: E) -> JsValue {

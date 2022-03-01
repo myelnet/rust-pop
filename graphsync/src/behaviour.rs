@@ -375,11 +375,11 @@ mod tests {
         }
     }
 
-    fn assert_progress_ok(event: Option<GraphsyncEvent>, id: RequestId, cid: Cid, size2: usize) {
-        if let Some(GraphsyncEvent::Progress { req_id, link, size }) = event {
+    fn assert_progress_ok(event: Option<GraphsyncEvent>, id: RequestId, cid: Cid, size: usize) {
+        if let Some(GraphsyncEvent::Progress { req_id, link, data }) = event {
             assert_eq!(req_id, id);
             assert_eq!(link, cid);
-            assert_eq!(size, size2);
+            assert_eq!(data.len(), size);
         } else {
             panic!("{:?} is not a progress event", event);
         }

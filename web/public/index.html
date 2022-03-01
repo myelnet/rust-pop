@@ -58,6 +58,38 @@
 	  width: 100%;
 	  padding: 4px 8px;
 	}
+
+	.img {
+	  width: 100%;
+	  min-height: 520px;
+	  background-color: #dbdbdb;
+	  border: 1px solid rgb(118, 118, 118);
+	  margin-bottom: 24px;
+	  border-radius: 2px;
+	  border-style: inset;
+	  display: flex;
+	  align-items: center;
+	  justify-content: center;
+	}
+
+	.spin {
+	  animation-name: spin;
+	  animation-timing-function: linear;
+	  animation-iteration-count: infinite;
+	  animation-duration: 0.75s;
+	  cursor: wait;
+	  height: 32px;
+	  width: 32px;
+	}
+
+	@keyframes spin {
+	  from {
+	    transform: rotate(0deg);
+	  }
+	  to {
+	    transform: rotate(360deg);
+	  }
+	}
 </style>
 </head>
 

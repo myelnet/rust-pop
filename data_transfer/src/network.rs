@@ -1,7 +1,4 @@
-use filecoin::{
-    cid_helpers::CidCbor,
-    types::{Cbor},
-};
+use filecoin::{cid_helpers::CidCbor, types::Cbor};
 use futures::future::BoxFuture;
 use futures::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use graphsync::traversal::{RecursionLimit, Selector};
@@ -32,14 +29,14 @@ pub static EXTENSION_KEY: &str = "fil/data-transfer/1.1";
 #[derive(Debug, PartialEq, Clone, Serialize_repr, Deserialize_repr)]
 #[repr(u64)]
 pub enum MessageType {
-    NewMessage = 0,
-    UpdateMessage,
-    CancelMessage,
-    CompleteMessage,
-    VoucherMessage,
-    VoucherResultMessage,
-    RestartMessage,
-    RestartExistingChannelRequestMessage,
+    New = 0,
+    Update,
+    Cancel,
+    Complete,
+    Voucher,
+    VoucherResult,
+    Restart,
+    RestartExistingChannelRequest,
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize_tuple, Deserialize_tuple, Clone, Hash)]
@@ -92,8 +89,8 @@ impl Default for TransferRequest {
             params: Default::default(),
         };
         Self {
-            root: cid.clone(),
-            mtype: MessageType::NewMessage,
+            root: cid,
+            mtype: MessageType::New,
             pause: false,
             partial: false,
             pull: true,
@@ -131,12 +128,12 @@ pub struct TransferResponse {
 impl Default for TransferResponse {
     fn default() -> Self {
         Self {
-            mtype: MessageType::NewMessage,
+            mtype: MessageType::New,
             accepted: true,
             paused: false,
             transfer_id: 1,
             voucher: None,
-            voucher_type: format!(""),
+            voucher_type: String::new(),
         }
     }
 }
@@ -163,9 +160,7 @@ impl From<()> for TransferMessage {
 }
 
 impl From<TransferMessage> for () {
-    fn from(_: TransferMessage) -> Self {
-        ()
-    }
+    fn from(_: TransferMessage) -> Self {}
 }
 
 impl TryFrom<&Extensions> for TransferMessage {
@@ -330,10 +325,10 @@ where
 
     fn upgrade_outbound(self, mut socket: TSocket, _info: Self::Info) -> Self::Future {
         Box::pin(async move {
-            let mut buf = self
+            let buf = self
                 .marshal_cbor()
                 .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
-            socket.write_all(&mut buf).await?;
+            socket.write_all(&buf).await?;
             socket.close().await?;
             Ok(())
         })
@@ -357,6 +352,12 @@ pub struct DataTransferNetwork {
     >,
     connected: HashMap<PeerId, SmallVec<[Connection; 2]>>,
     pending_outbound_requests: HashMap<PeerId, SmallVec<[TransferMessage; 10]>>,
+}
+
+impl Default for DataTransferNetwork {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl DataTransferNetwork {
@@ -591,7 +592,7 @@ mod tests {
         assert_eq!(msg.is_rq, false);
 
         let response = msg.response.unwrap();
-        assert_eq!(response.mtype, MessageType::CompleteMessage);
+        assert_eq!(response.mtype, MessageType::Complete);
         assert_eq!(response.voucher.unwrap().status, DealStatus::Completed);
     }
 
@@ -617,7 +618,7 @@ mod tests {
                     is_rq: true,
                     request: Some(TransferRequest {
                         root: CidCbor::from(Cid::default()),
-                        mtype: MessageType::NewMessage,
+                        mtype: MessageType::New,
                         ..Default::default()
                     }),
                     response: None,
@@ -717,7 +718,7 @@ mod tests {
                 is_rq: true,
                 request: Some(TransferRequest {
                     root: CidCbor::from(cid.clone()),
-                    mtype: MessageType::NewMessage,
+                    mtype: MessageType::New,
                     ..Default::default()
                 }),
                 response: None,

@@ -20,6 +20,7 @@ use response_manager::{ResponseEvent, ResponseManager};
 use traversal::{Cbor, Error as EncodingError, Selector};
 // use futures::{future::BoxFuture, prelude::*, stream::FuturesUnordered};
 use blockstore::types::BlockStore;
+use filecoin::cid_helpers::CidCbor;
 use integer_encoding::{VarIntReader, VarIntWriter};
 use libipld::cid::Version;
 use libipld::codec::Decode;
@@ -33,6 +34,7 @@ use libp2p::swarm::{
     ProtocolsHandler,
 };
 use protobuf::Message as PBMessage;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::error::Error;
 use std::io::{self, Cursor};
@@ -102,7 +104,7 @@ impl<P: StoreParams> MessageCodec for GraphsyncCodec<P> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum GraphsyncEvent {
     // The local graphsync provider has accepted a new request
     RequestAccepted(PeerId, GraphsyncRequest),
@@ -115,6 +117,7 @@ pub enum GraphsyncEvent {
         req_id: RequestId,
         link: Cid,
         size: usize,
+        data: Ipld,
     },
     Complete(RequestId, Result<(), EncodingError>),
 }
@@ -323,7 +326,7 @@ where
         conn: ConnectionId,
         event: <Self::ProtocolsHandler as ProtocolsHandler>::OutEvent,
     ) {
-        return self.inner.inject_event(peer_id, conn, event);
+        self.inner.inject_event(peer_id, conn, event)
     }
     fn poll(
         &mut self,
@@ -361,8 +364,18 @@ where
                     RequestEvent::NewRequest(responder, req) => {
                         self.inner.send_request(&responder, req);
                     }
-                    RequestEvent::Progress { req_id, link, size } => {
-                        let event = GraphsyncEvent::Progress { req_id, link, size };
+                    RequestEvent::Progress {
+                        req_id,
+                        link,
+                        data,
+                        size,
+                    } => {
+                        let event = GraphsyncEvent::Progress {
+                            req_id,
+                            link,
+                            data,
+                            size,
+                        };
                         return Poll::Ready(NetworkBehaviourAction::GenerateEvent(event));
                     }
                     RequestEvent::Completed(req_id, res) => {
@@ -415,7 +428,7 @@ where
                         }
                         if !msg.responses.is_empty() {
                             let responses: Vec<GraphsyncResponse> =
-                                msg.responses.values().map(|res| res.clone()).collect();
+                                msg.responses.values().cloned().collect();
                             self.request_manager.inject_response(msg);
                             return Poll::Ready(NetworkBehaviourAction::GenerateEvent(
                                 GraphsyncEvent::ResponseReceived(peer, responses),
@@ -739,6 +752,15 @@ impl From<Cid> for Prefix {
     }
 }
 
+pub static METADATA_EXTENSION: &str = "graphsync/response-metadata";
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MetadataItem {
+    link: CidCbor,
+    block_present: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::traversal::{RecursionLimit, Selector};
@@ -909,7 +931,10 @@ mod tests {
     }
 
     fn assert_progress_ok(event: Option<GraphsyncEvent>, id: RequestId, cid: Cid, size2: usize) {
-        if let Some(GraphsyncEvent::Progress { req_id, link, size }) = event {
+        if let Some(GraphsyncEvent::Progress {
+            req_id, link, size, ..
+        }) = event
+        {
             assert_eq!(req_id, id);
             assert_eq!(link, cid);
             assert_eq!(size, size2);

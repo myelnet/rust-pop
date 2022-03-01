@@ -29,12 +29,15 @@ libipld = "0.12"
 smallvec = "1.8.0"
 instant = "0.1.12"
 routing = { path = "../routing" }
+utf16_lit = "2.0.2"
+byteorder = "1.4.3"
 
 [dev-dependencies]
 hex = "0.4.3"
 async-std = { version = "1.6.2", features = ["attributes", "unstable"] }
 rand = { version = "0.7", features = ["wasm-bindgen"] }
 dag_service = { path = "../dag_service" }
+criterion = { version = "0.3", features = ["async_futures", "async_std"] }
 
 [features]
 default = ["native"]
@@ -45,3 +48,7 @@ browser = [
   "blockstore/browser",
   "instant/wasm-bindgen",
 ]
+
+[[bench]]
+name = "e2e"
+harness = false

@@ -1,13 +1,14 @@
-// Copyright 2019-2022 ChainSafe Systems
-// SPDX-License-Identifier: Apache-2.0, MIT
-
+use libipld::Cid;
 use serde_cbor::error::Error as CborError;
 use thiserror::Error;
-/// Database error
+
+/// BlockStore error
 #[derive(Debug, Error)]
 pub enum Error {
-    #[error("BlockStore: block not found")]
-    BlockNotFound,
+    #[error("BlockStore: block not found for {0}")]
+    BlockNotFound(Cid),
+    #[error("BlockStore: skip missing block {0}")]
+    SkipMe(Cid),
     #[error("Invalid bulk write kv lengths, must be equal")]
     InvalidBulkLen,
     #[error("Cannot use unopened database")]
@@ -26,7 +27,8 @@ impl PartialEq for Error {
         use Error::*;
 
         match (self, other) {
-            (&BlockNotFound, &BlockNotFound) => true,
+            (&BlockNotFound(a), &BlockNotFound(b)) => a == b,
+            (&SkipMe(a), &SkipMe(b)) => a == b,
             (&InvalidBulkLen, &InvalidBulkLen) => true,
             (&Unopened, &Unopened) => true,
             #[cfg(feature = "native")]

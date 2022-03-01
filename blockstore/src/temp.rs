@@ -2,7 +2,7 @@ use crate::errors::Error;
 use crate::types::BlockStore;
 use libipld::{Block, Cid};
 use parking_lot::RwLock;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc,
@@ -16,6 +16,7 @@ pub struct TempBlockStore<S> {
     data: RwLock<HashMap<Cid, Vec<u8>>>,
     queue: RwLock<VecDeque<Cid>>,
     capacity: Arc<AtomicUsize>,
+    missing: RwLock<HashSet<Cid>>,
     max_cap: usize,
     inner: Arc<S>,
 }
@@ -29,6 +30,7 @@ where
             data: RwLock::new(HashMap::default()),
             capacity: Arc::new(AtomicUsize::new(0)),
             queue: RwLock::new(VecDeque::new()),
+            missing: RwLock::new(HashSet::new()),
             max_cap: 16 * 1024 * 1024,
             inner: store,
         }
@@ -48,7 +50,7 @@ where
             self.inner
                 .insert(&Block::<S::Params>::new_unchecked(*cid, data))
         } else {
-            Err(Error::BlockNotFound)
+            Err(Error::BlockNotFound(*cid))
         }
     }
 
@@ -57,12 +59,17 @@ where
         if let Some(data) = self.data.read().get(cid) {
             return Ok(Block::<S::Params>::new_unchecked(*cid, data.clone()));
         }
-        Err(Error::BlockNotFound)
+        Err(Error::BlockNotFound(*cid))
     }
 
     /// returns the current cache size.
     pub fn capacity(&self) -> usize {
         self.capacity.load(Ordering::Relaxed)
+    }
+
+    /// flag a missing block so it tells the consumer it can be skipped
+    pub fn insert_missing(&self, cid: Cid) {
+        self.missing.write().insert(cid);
     }
 
     fn remove_from_queue(&self, cid: &Cid) {
@@ -82,6 +89,9 @@ where
     type Params = S::Params;
 
     fn get(&self, cid: &Cid) -> Result<Block<Self::Params>, Error> {
+        if self.missing.read().contains(cid) {
+            return Err(Error::SkipMe(*cid));
+        }
         // try the cache first and fallback to blockstore
         match self.get_from_cache(cid) {
             Ok(block) => Ok(block),
@@ -121,7 +131,7 @@ where
                 self.remove_from_queue(cid);
                 Ok(())
             }
-            None => Err(Error::BlockNotFound),
+            None => Err(Error::BlockNotFound(*cid)),
         }
     }
     fn contains(&self, cid: &Cid) -> Result<bool, Error> {
@@ -169,13 +179,13 @@ mod tests {
 
         // block1 should have been evicted from the cache
         let result = tstore.get(block1.cid());
-        assert_eq!(result, Err(Error::BlockNotFound));
+        assert_eq!(result, Err(Error::BlockNotFound(*block1.cid())));
 
         tstore.flush(block2.cid()).unwrap();
 
         // block2 should have been evicted from the cache
         let result = tstore.get_from_cache(block2.cid());
-        assert_eq!(result, Err(Error::BlockNotFound));
+        assert_eq!(result, Err(Error::BlockNotFound(*block2.cid())));
 
         // block2 should still be available in the inner store
         let _ = tstore.get(block2.cid()).unwrap();
@@ -183,10 +193,14 @@ mod tests {
         tstore.evict(block3.cid()).unwrap();
 
         let result = tstore.get(block3.cid());
-        assert_eq!(result, Err(Error::BlockNotFound));
+        assert_eq!(result, Err(Error::BlockNotFound(*block3.cid())));
 
         assert_eq!(tstore.capacity(), 0);
 
         assert_eq!(tstore.queue.read().len(), 0);
+
+        // if we tell it's missing it should return skipme
+        tstore.insert_missing(*block1.cid());
+        assert_eq!(tstore.get(block1.cid()), Err(Error::SkipMe(*block1.cid())));
     }
 }

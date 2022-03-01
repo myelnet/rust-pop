@@ -104,7 +104,7 @@ impl BlockStore for MemoryDB {
         let read_res = self.read(cid.to_bytes())?;
         match read_res {
             Some(bz) => Ok(Block::<Self::Params>::new_unchecked(*cid, bz)),
-            None => Err(Error::BlockNotFound),
+            None => Err(Error::BlockNotFound(*cid)),
         }
     }
     fn insert(&self, block: &Block<Self::Params>) -> Result<(), Error> {

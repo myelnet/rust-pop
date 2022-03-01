@@ -4,13 +4,14 @@ use criterion::async_executor::FuturesExecutor;
 use criterion::BenchmarkId;
 use criterion::Criterion;
 use criterion::{criterion_group, criterion_main, BatchSize, Throughput};
-use dag_service::{add, cat};
+use dag_service::add;
+use data_transfer::{DataTransfer, DataTransferEvent};
 use futures::prelude::*;
 use graphsync::{
-    traversal::{BlockIterator, Progress, RecursionLimit, Selector, StoreLoader},
-    Graphsync, GraphsyncEvent,
+    traversal::{RecursionLimit, Selector},
+    Graphsync,
 };
-use libipld::{Cid, Ipld};
+use libipld::Cid;
 use libp2p::core::muxing::StreamMuxerBox;
 use libp2p::core::transport::Boxed;
 use libp2p::noise::{Keypair, NoiseConfig, X25519Spec};
@@ -19,8 +20,8 @@ use libp2p::tcp::TcpConfig;
 use libp2p::yamux::YamuxConfig;
 use libp2p::{identity, Multiaddr};
 use libp2p::{PeerId, Swarm, Transport};
-use pprof::criterion::{Output, PProfProfiler};
 use rand::prelude::*;
+use routing::PeerDiscovery;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -45,17 +46,16 @@ fn mk_transport() -> (PeerId, Boxed<(PeerId, StreamMuxerBox)>) {
 struct Peer {
     peer_id: PeerId,
     addr: Multiaddr,
-    swarm: Swarm<Graphsync<MemoryDB>>,
+    swarm: Swarm<DataTransfer<MemoryDB>>,
 }
 
 impl Peer {
     fn new(store: Arc<MemoryDB>) -> Self {
         let (peer_id, trans) = mk_transport();
-        let mut swarm = Swarm::new(
-            trans,
-            Graphsync::new(Default::default(), store.clone()),
-            peer_id,
-        );
+        let gs = Graphsync::new(Default::default(), store.clone());
+        let pd = PeerDiscovery::new(Default::default(), peer_id);
+        let dt = DataTransfer::new(peer_id, gs, pd);
+        let mut swarm = Swarm::new(trans, dt, peer_id);
         Swarm::listen_on(&mut swarm, "/ip4/127.0.0.1/tcp/0".parse().unwrap()).unwrap();
         while swarm.next().now_or_never().is_some() {}
         let addr = Swarm::listeners(&swarm).next().unwrap().clone();
@@ -72,7 +72,7 @@ impl Peer {
             .add_address(&peer.peer_id, peer.addr.clone());
     }
 
-    fn swarm(&mut self) -> &mut Swarm<Graphsync<MemoryDB>> {
+    fn swarm(&mut self) -> &mut Swarm<DataTransfer<MemoryDB>> {
         &mut self.swarm
     }
 
@@ -80,13 +80,13 @@ impl Peer {
         let peer_id = self.peer_id;
         task::spawn(async move {
             loop {
-                let event = self.swarm.next().await;
+                let _ = self.swarm.next().await;
             }
         });
         peer_id
     }
 
-    async fn next(&mut self) -> Option<GraphsyncEvent> {
+    async fn next(&mut self) -> Option<DataTransferEvent> {
         loop {
             let ev = self.swarm.next().await?;
             if let SwarmEvent::Behaviour(event) = ev {
@@ -117,7 +117,7 @@ struct Dag {
 fn bench_transfer(c: &mut Criterion) {
     static MB: usize = 1024 * 1024;
 
-    let mut group = c.benchmark_group("from_dag_size");
+    let mut group = c.benchmark_group("data_transfer");
     for size in [MB, 4 * MB, 15 * MB, 60 * MB].iter() {
         group.throughput(Throughput::Bytes(*size as u64));
         group.bench_with_input(BenchmarkId::new("async", size), size, move |b, &size| {
@@ -138,78 +138,22 @@ fn bench_transfer(c: &mut Criterion) {
                         current: None,
                     };
 
-                    let id = peer2.swarm().behaviour_mut().request(
-                        peer1,
-                        dag.root,
-                        selector,
-                        Default::default(),
-                    );
+                    let _ = peer2
+                        .swarm()
+                        .behaviour_mut()
+                        .pull(peer1, dag.root, selector, Default::default())
+                        .unwrap();
 
                     loop {
                         if let Some(event) = peer2.next().await {
                             match event {
-                                GraphsyncEvent::Complete(rid, Ok(())) => {
+                                DataTransferEvent::Completed(_chid, Ok(())) => {
                                     break;
                                 }
                                 _ => {}
                             }
                         }
                     }
-                },
-                BatchSize::SmallInput,
-            );
-        });
-    }
-}
-
-fn bench_traversal(c: &mut Criterion) {
-    static MB: usize = 1024 * 1024;
-
-    let mut group = c.benchmark_group("traversal");
-    for size in [4 * MB, 10 * MB].iter() {
-        group.throughput(Throughput::Bytes(*size as u64));
-        // group.bench_with_input(BenchmarkId::new("callback", size), size, move |b, &size| {
-        //     b.iter_batched(
-        //         || prepare_blocks(size),
-        //         |dag| async move {
-        //             let store = Arc::<MemoryDB>::try_unwrap(dag.store).unwrap();
-        //             let loader = StoreLoader { store };
-        //             let mut progress = Progress {
-        //                 loader,
-        //                 path: Default::default(),
-        //                 last_block: None,
-        //             };
-        //             let selector = Selector::ExploreRecursive {
-        //                 limit: RecursionLimit::None,
-        //                 sequence: Box::new(Selector::ExploreAll {
-        //                     next: Box::new(Selector::ExploreRecursiveEdge),
-        //                 }),
-        //                 current: None,
-        //             };
-
-        //             progress
-        //                 .walk_adv(&Ipld::Link(dag.root), selector, &|_, _| Ok(()))
-        //                 .await
-        //                 .unwrap();
-        //         },
-        //         BatchSize::SmallInput,
-        //     );
-        // });
-        group.bench_with_input(BenchmarkId::new("iterator", size), size, move |b, &size| {
-            b.iter_batched(
-                || prepare_blocks(size),
-                |dag| {
-                    let selector = Selector::ExploreRecursive {
-                        limit: RecursionLimit::None,
-                        sequence: Box::new(Selector::ExploreAll {
-                            next: Box::new(Selector::ExploreRecursiveEdge),
-                        }),
-                        current: None,
-                    };
-
-                    let it =
-                        BlockIterator::new(dag.store, dag.root, selector).ignore_duplicate_links();
-                    for _ in it {}
                 },
                 BatchSize::SmallInput,
             );

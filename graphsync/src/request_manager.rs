@@ -26,6 +26,7 @@ pub enum RequestEvent {
     Progress {
         req_id: RequestId,
         link: Cid,
+        data: Ipld,
         size: usize,
     },
     Completed(RequestId, Result<(), Error>),
@@ -69,8 +70,9 @@ where
             sender
                 .try_send(RequestEvent::Progress {
                     req_id: id,
-                    link: *blk.cid(),
-                    size: blk.data().len(),
+                    link: blk.link,
+                    size: blk.size,
+                    data: blk.data,
                 })
                 .map_err(|e| e.to_string())?;
             Ok(())
@@ -145,7 +147,9 @@ mod tests {
     ) {
         if let Ok(evt) = result {
             match evt {
-                RequestEvent::Progress { req_id, size, link } => {
+                RequestEvent::Progress {
+                    req_id, size, link, ..
+                } => {
                     assert_eq!(req_id, id);
                     assert_eq!(size, size2);
                     assert_eq!(link, cid,);

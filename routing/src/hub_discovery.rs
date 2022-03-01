@@ -198,9 +198,7 @@ impl HubDiscovery {
     }
     // only hubs should track leaf nodes, they do so using the inner behaviour's table
     pub fn add_address(&mut self, peer: &PeerId, address: Multiaddr) {
-        if self.hub {
-            self.inner.add_address(peer, address);
-        }
+        self.inner.add_address(peer, address);
     }
 
     /// Removes an address of a peer previously added via `add_address`.
@@ -231,15 +229,7 @@ impl NetworkBehaviour for HubDiscovery {
     }
 
     fn addresses_of_peer(&mut self, peer_id: &PeerId) -> Vec<Multiaddr> {
-        if self.hub {
-            self.inner.addresses_of_peer(peer_id)
-        } else {
-            let mut addresses = Vec::new();
-            if let Some(more) = self.hub_table.read().unwrap().get(peer_id) {
-                addresses.extend(more.into_iter().cloned());
-            }
-            addresses
-        }
+        self.inner.addresses_of_peer(peer_id)
     }
 
     fn inject_connected(&mut self, peer_id: &PeerId) {
@@ -408,7 +398,7 @@ impl NetworkBehaviour for HubDiscovery {
                     error,
                 } => {
                     println!(
-                        "peer discovery outbound failure {} {} {:?}",
+                        "hub discovery outbound failure {} {} {:?}",
                         peer, request_id, error
                     );
                 }
@@ -418,7 +408,7 @@ impl NetworkBehaviour for HubDiscovery {
                     error,
                 } => {
                     println!(
-                        "peer discovery inbound failure {} {} {:?}",
+                        "hub discovery inbound failure {} {} {:?}",
                         peer, request_id, error
                     );
                 }
@@ -500,11 +490,11 @@ mod tests {
     }
 
     impl Peer {
-        fn new(num_addreses: usize) -> Self {
+        fn new(num_addreses: usize, is_hub: bool) -> Self {
             let (peer_id, trans) = mk_transport();
             let mut swarm = Swarm::new(
                 trans,
-                HubDiscovery::new(Config::default(), peer_id, true, None),
+                HubDiscovery::new(Config::default(), peer_id, is_hub, None),
                 peer_id,
             );
             for _i in 0..num_addreses {
@@ -518,6 +508,10 @@ mod tests {
                 swarm,
             };
             return peer;
+        }
+
+        fn get_hub_table(&mut self) -> Arc<RwLock<PeerTable>> {
+            return self.swarm.behaviour_mut().hub_table.clone();
         }
 
         fn add_address(&mut self, peer: &Peer) {
@@ -561,38 +555,45 @@ mod tests {
 
     #[async_std::test]
     async fn test_request() {
-        let mut peer1 = Peer::new(7);
-        let mut peer2 = Peer::new(1);
-        let mut peer3 = Peer::new(3);
+        //  will have empty hub table as not a hub
+        let mut peer1 = Peer::new(7, false);
+        // will have themselves in hub table
+        let peer2 = Peer::new(1, true);
+        let mut peer3 = Peer::new(3, true);
 
-        println!("{:?}", peer3.swarm().behaviour().hub_table.read().unwrap());
-        println!("{:?}", peer1.swarm().behaviour().hub_table.read().unwrap());
+        println!("before {:?}", peer3.get_hub_table().read().unwrap());
+        println!("before {:?}", peer1.get_hub_table().read().unwrap());
 
-        // peer 2 knows everyone
-        peer2.add_address(&peer1);
-        peer2.add_address(&peer3);
         // peer 3 knows peer 2 only and itself
         peer3.add_address(&peer2);
-        peer3.add_address(&peer2);
-        peer3.add_address(&peer2);
-        // peer 1 knows peer 2 only and itself
+        // peer 1 knows peer 3 only and itself
         peer1.add_address(&peer2);
 
         //  print logs for peer 2
         let peer2id = peer2.spawn("peer2");
 
         peer3.swarm().dial(peer2id).unwrap();
-        peer1.swarm().dial(peer2id).unwrap();
-
         assert_response_ok(peer3.next().await, 1);
+        peer1.swarm().dial(peer2id).unwrap();
         assert_response_ok(peer1.next().await, 1);
 
-        println!("{:?}", peer3.swarm().behaviour().hub_table.read().unwrap());
-        println!("{:?}", peer1.swarm().behaviour().hub_table.read().unwrap());
+        println!("after {:?}", peer3.get_hub_table().read().unwrap());
+        println!("after {:?}", peer1.get_hub_table().read().unwrap());
 
-        assert_eq!(
-            *peer3.swarm().behaviour().hub_table.read().unwrap(),
-            *peer1.swarm().behaviour().hub_table.read().unwrap()
-        );
+        let table1 = peer1.get_hub_table();
+        let lock1 = table1.read().unwrap();
+
+        let table3 = peer3.get_hub_table();
+        let lock3 = table3.read().unwrap();
+
+        let mut k1: Vec<&PeerId> = lock1.keys().collect();
+        let mut k3: Vec<&PeerId> = lock3.keys().collect();
+
+        assert_eq!(k1.sort(), k3.sort());
+
+        let mut v1: Vec<&SmallVec<[Multiaddr; 6]>> = lock1.values().collect();
+        let mut v3: Vec<&SmallVec<[Multiaddr; 6]>> = lock3.values().collect();
+
+        assert_eq!(v1.sort(), v3.sort());
     }
 }

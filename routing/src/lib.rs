@@ -56,8 +56,10 @@ pub struct Routing {
 }
 
 impl Routing {
-    pub fn new(peer_id: PeerId, is_hub: bool) -> Self {
-        let hub_table = Arc::new(RwLock::new(HashMap::new()));
+    pub fn new(peer_id: PeerId, is_hub: bool, hub_table: Option<Arc<RwLock<PeerTable>>>) -> Self {
+        // if no hub table was passed then initialize a dummy one (mainly for testing purposes)
+        let hub_table: Arc<RwLock<PeerTable>> =
+            hub_table.unwrap_or_else(|| Arc::new(RwLock::new(HashMap::new())));
         let hub_discovery = HubDiscovery::new(
             DiscoveryConfig::default(),
             peer_id,
@@ -234,4 +236,217 @@ impl NetworkBehaviourEventProcess<GossipsubEvent> for Routing {
             _ => {}
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_std::task;
+    use dag_service::add;
+    use futures::prelude::*;
+    use libipld::Cid;
+    use libp2p::core::muxing::StreamMuxerBox;
+    use libp2p::core::transport::Boxed;
+    use libp2p::identity;
+    use libp2p::noise::{Keypair, NoiseConfig, X25519Spec};
+    use libp2p::swarm::SwarmEvent;
+    use libp2p::tcp::TcpConfig;
+    use libp2p::yamux::YamuxConfig;
+    use libp2p::{PeerId, Swarm, Transport};
+    use smallvec::SmallVec;
+    use std::time::Duration;
+
+    fn mk_transport() -> (PeerId, Boxed<(PeerId, StreamMuxerBox)>) {
+        let id_key = identity::Keypair::generate_ed25519();
+        let peer_id = id_key.public().to_peer_id();
+        let dh_key = Keypair::<X25519Spec>::new()
+            .into_authentic(&id_key)
+            .unwrap();
+        let noise = NoiseConfig::xx(dh_key).into_authenticated();
+
+        let transport = TcpConfig::new()
+            .nodelay(true)
+            .upgrade(libp2p::core::upgrade::Version::V1)
+            .authenticate(noise)
+            .multiplex(YamuxConfig::default())
+            .timeout(Duration::from_secs(20))
+            .boxed();
+        (peer_id, transport)
+    }
+
+    struct Peer {
+        peer_id: PeerId,
+        addr: Multiaddr,
+        swarm: Swarm<Routing>,
+    }
+
+    impl Peer {
+        fn new(is_hub: bool, hub_table: Option<Arc<RwLock<PeerTable>>>) -> Self {
+            let (peer_id, trans) = mk_transport();
+            let rt = Routing::new(peer_id, is_hub, hub_table);
+            let mut swarm = Swarm::new(trans, rt, peer_id);
+            Swarm::listen_on(&mut swarm, "/ip4/127.0.0.1/tcp/0".parse().unwrap()).unwrap();
+            while swarm.next().now_or_never().is_some() {}
+            let addr = Swarm::listeners(&swarm).next().unwrap().clone();
+            Self {
+                peer_id,
+                addr,
+                swarm,
+            }
+        }
+
+        fn get_hub_table(&mut self) -> Arc<RwLock<PeerTable>> {
+            return self.swarm.behaviour_mut().hub_discovery.hub_table.clone();
+        }
+
+        fn get_content_table(&mut self) -> Arc<RwLock<ContentTable>> {
+            return self
+                .swarm
+                .behaviour_mut()
+                .hub_indexing
+                .content_table
+                .clone();
+        }
+
+        fn add_address(&mut self, peer: &Peer) {
+            self.swarm
+                .behaviour_mut()
+                .add_address(&peer.peer_id, peer.addr.clone());
+        }
+
+        fn swarm(&mut self) -> &mut Swarm<Routing> {
+            &mut self.swarm
+        }
+
+        fn spawn(mut self, _name: &'static str) -> PeerId {
+            let peer_id = self.peer_id;
+            task::spawn(async move {
+                loop {
+                    let event = self.swarm.next().await;
+                    println!("event {:?}", event);
+                }
+            });
+            peer_id
+        }
+
+        async fn next(&mut self) -> Option<RoutingEvent> {
+            loop {
+                let ev = self.swarm.next().await?;
+                if let SwarmEvent::Behaviour(event) = ev {
+                    match event {
+                        RoutingEvent::HubTableUpdated => {}
+                        RoutingEvent::HubIndexUpdated => {}
+                        _ => return Some(event),
+                    }
+                }
+            }
+        }
+
+        async fn next_discovery(&mut self) -> Option<RoutingEvent> {
+            loop {
+                let ev = self.swarm.next().await?;
+                if let SwarmEvent::Behaviour(event) = ev {
+                    match event {
+                        RoutingEvent::HubTableUpdated => return Some(event),
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        async fn next_indexing(&mut self) -> Option<RoutingEvent> {
+            loop {
+                let ev = self.swarm.next().await?;
+                if let SwarmEvent::Behaviour(event) = ev {
+                    match event {
+                        RoutingEvent::HubIndexUpdated => return Some(event),
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+
+    #[async_std::test]
+    async fn test_peer_discovery() {
+        //  will have empty hub table as not a hub
+        let mut peer1 = Peer::new(false, None);
+        // will have themselves in hub table
+        let peer2 = Peer::new(true, None);
+        let mut peer3 = Peer::new(true, None);
+
+        // peer 3 knows peer 2 only and itself
+        peer3.add_address(&peer2);
+        // peer 1 knows peer 3 only and itself
+        peer1.add_address(&peer2);
+
+        //  print logs for peer 2
+        let peer2id = peer2.spawn("peer2");
+
+        peer3.swarm().dial(peer2id).unwrap();
+        peer1.swarm().dial(peer2id).unwrap();
+
+        peer3.next_discovery().await;
+        peer1.next_discovery().await;
+
+        let table1 = peer1.get_hub_table();
+        let lock1 = table1.read().unwrap();
+
+        let table3 = peer3.get_hub_table();
+        let lock3 = table3.read().unwrap();
+
+        let mut k1: Vec<&PeerId> = lock1.keys().collect();
+        let mut k3: Vec<&PeerId> = lock3.keys().collect();
+
+        assert_eq!(k1.sort(), k3.sort());
+
+        let mut v1: Vec<&SmallVec<[Multiaddr; 6]>> = lock1.values().collect();
+        let mut v3: Vec<&SmallVec<[Multiaddr; 6]>> = lock3.values().collect();
+
+        assert_eq!(v1.sort(), v3.sort());
+    }
+
+    #[async_std::test]
+    async fn test_index_update() {
+        let cid = Cid::try_from("bafy2bzaceafciokjlt5v5l53pftj6zcmulc2huy3fduwyqsm3zo5bzkau7muq")
+            .unwrap();
+        let content = CidCbor::from(cid);
+        let host_peer = Peer::new(true, None);
+        let multiaddr = SmallVec::<[Multiaddr; 6]>::from(Vec::from([host_peer.addr]));
+        let peer_id = host_peer.peer_id;
+        let peer_table: PeerTable = HashMap::from([(peer_id, multiaddr)]);
+
+        let mut hub_peer = Peer::new(true, None);
+        let hub_id = hub_peer.peer_id;
+        let hub_addr = SmallVec::<[Multiaddr; 6]>::from(Vec::from([hub_peer.addr.clone()]));
+        let hub_table: PeerTable = HashMap::from([(hub_id, hub_addr)]);
+        let mut peer1 = Peer::new(false, Some(Arc::new(RwLock::new(hub_table))));
+        peer1
+            .swarm()
+            .behaviour_mut()
+            .hub_indexing
+            .add_entry(content, peer_table);
+
+        let mut peer2 = Peer::new(false, None);
+
+        peer1.add_address(&hub_peer);
+        peer1.add_address(&peer2);
+
+        //  print logs for peer 2
+        let hub_table = hub_peer.get_content_table().clone();
+        hub_peer.spawn("hub");
+
+        // update remote hubs
+        peer1.swarm().behaviour_mut().update_hubs();
+        peer1.next_indexing().await;
+
+        // assert peer 2 table did not update
+        assert!(peer2.get_content_table().read().unwrap().is_empty());
+
+        assert_eq!(
+            *hub_table.read().unwrap(),
+            *peer1.get_content_table().read().unwrap()
+        );
+    }
+
 }

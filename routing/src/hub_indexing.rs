@@ -514,6 +514,10 @@ mod tests {
             return peer;
         }
 
+        fn get_content_table(&mut self) -> Arc<RwLock<ContentTable>> {
+            return self.swarm.behaviour_mut().content_table.clone();
+        }
+
         fn add_address(&mut self, peer: &Peer) {
             for addr in peer.addr.clone() {
                 self.swarm.behaviour_mut().add_address(&peer.peer_id, addr);
@@ -571,48 +575,30 @@ mod tests {
 
         let mut peer2 = Peer::new(3, false, None);
 
-        println!(
-            "before {:?}",
-            peer1.swarm().behaviour().content_table.read().unwrap()
-        );
-        println!(
-            "before {:?}",
-            peer2.swarm().behaviour().content_table.read().unwrap()
-        );
+        println!("before {:?}", peer1.get_content_table().read().unwrap());
+        println!("before {:?}", peer2.get_content_table().read().unwrap());
 
         peer1.add_address(&hub_peer);
         peer1.add_address(&peer2);
 
         //  print logs for peer 2
-        let hub_table = hub_peer.swarm().behaviour().content_table.clone();
+        let hub_table = hub_peer.get_content_table().clone();
         hub_peer.spawn("hub");
 
         // update remote hubs
         peer1.swarm().behaviour_mut().update();
 
-        println!(
-            "after {:?}",
-            peer2.swarm().behaviour().content_table.read().unwrap()
-        );
-        println!(
-            "after {:?}",
-            peer1.swarm().behaviour().content_table.read().unwrap()
-        );
+        println!("after {:?}", peer2.get_content_table().read().unwrap());
+        println!("after {:?}", peer1.get_content_table().read().unwrap());
 
         assert_response_ok(peer1.next().await, 1);
 
         // assert peer 2 table did not update
-        assert!(peer2
-            .swarm()
-            .behaviour_mut()
-            .content_table
-            .read()
-            .unwrap()
-            .is_empty());
+        assert!(peer2.get_content_table().read().unwrap().is_empty());
 
         assert_eq!(
             *hub_table.read().unwrap(),
-            *peer1.swarm().behaviour().content_table.read().unwrap()
+            *peer1.get_content_table().read().unwrap()
         );
     }
 }

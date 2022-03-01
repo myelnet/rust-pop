@@ -55,8 +55,89 @@ pub struct ResponseHeaders {
     pub content_type: String,
 }
 
+/// request initialize a transfer from the main thread. It spins up a dedicated worker with shared
+/// memory and receive each block via the on_message callback. The blocks are then streamed through
+/// an mpsc chanel which is translated into a JS readable stream sent via a promise that resolve to
+/// a Response object akin to the watwg Fetch api.
 #[wasm_bindgen]
-pub async fn request(js_params: JsValue) -> Result<(), JsValue> {
+pub fn request(js_params: JsValue) -> Result<Promise, JsValue> {
+    let params: RequestParams = js_params.into_serde().map_err(js_err)?;
+
+    console_error_panic_hook::set_once();
+    init_console_log(log::Level::from_str(&params.log_level).unwrap()).unwrap();
+
+    let wparams = JsValue::from_serde(&params).unwrap();
+
+    // initialize a new thread with shared memory for the transfer.
+    let worker_handle = Worker::new("worker-main.js").unwrap();
+    let array = js_sys::Array::new();
+    array.push(&wasm_bindgen::module());
+    array.push(&wasm_bindgen::memory());
+    worker_handle.post_message(&array)?;
+
+    // this sender receives the content type, meaning that we received the first bytes.
+    let (os, or) = oneshot::channel();
+    let mut osender = Some(os);
+    // the bytes are streamed through this channel.
+    let (mut sender, r) = mpsc::channel(64);
+    // set the worker callback, the first call will take ownership of the oneshot sender so it
+    // knows to check the first bytes for the content type. After that all bytes are sent to the
+    // mpsc returned by the promise.
+    let onmessage = Closure::wrap(Box::new(move |event: MessageEvent| {
+        if event.data().is_undefined() {
+            sender.close_channel()
+        } else if let Some(os) = osender.take() {
+            if let Ok(buf) = event.data().dyn_into::<js_sys::Uint8Array>() {
+                let ct = detect_content_type(&buf.to_vec());
+                drop(os.send(ct));
+                sender.start_send(event.data()).unwrap();
+            }
+        } else {
+            sender.start_send(event.data()).unwrap();
+        }
+    }) as Box<dyn FnMut(_)>);
+    worker_handle.set_onmessage(Some(onmessage.as_ref().unchecked_ref()));
+    onmessage.forget();
+
+    // start the request
+    worker_handle.post_message(&wparams)?;
+
+    // the returned promise waits for the content type to be sent and then returns the stream to
+    // start reading chunks.
+    let done = async move {
+        match or.await {
+            Ok(ct) => {
+                // the mpsc receiver is mapped into a readable stream source.
+                let source = IntoUnderlyingSource::new(Box::new(r.map(Ok)));
+                // Set HWM to 0 to prevent the JS ReadableStream from buffering chunks in its queue,
+                // since the original Rust stream is better suited to handle that.
+                let strategy = QueuingStrategy::new(0.0);
+
+                let js_stream: JsStream =
+                    ReadableStream::new_with_source(source, strategy).unchecked_into();
+
+                let headers =
+                    JsValue::from_serde(&ResponseHeaders { content_type: ct }).map_err(js_err)?;
+
+                let mut init = ResponseInit::new();
+
+                let res = Response::new_with_opt_readable_stream_and_init(
+                    Some(&js_stream),
+                    init.headers(&headers).status(200),
+                )?;
+                Ok(res.into())
+            }
+            Err(_) => Err(JsValue::undefined()),
+        }
+    };
+    Ok(wasm_bindgen_futures::future_to_promise(done))
+}
+
+/// bg_request does the actual request, it runs on a background thread so as not to block the main
+/// thread. For now it spins a new node each time but there should be a way to pass the swarm so
+/// a single instance of the node runs and spawns parallel requests in different workers.
+#[wasm_bindgen]
+pub async fn bg_request(js_params: JsValue) -> Result<(), JsValue> {
     let global = js_sys::global().unchecked_into::<DedicatedWorkerGlobalScope>();
     let params: RequestParams = js_params.into_serde().map_err(js_err)?;
 
@@ -104,6 +185,9 @@ pub async fn request(js_params: JsValue) -> Result<(), JsValue> {
         .pull(peer_id, cid, selector, params)
         .map_err(js_err)?;
 
+    // we loop through swarm events and send chunks as shared memory back to the main thread. To
+    // resolve the content from the IPLD DAG we check for the bytes enum as these are the actual
+    // chunks of the DAGifyed content.
     while let Some(evt) = swarm.next().await {
         if let SwarmEvent::Behaviour(event) = evt {
             match event {
@@ -121,77 +205,11 @@ pub async fn request(js_params: JsValue) -> Result<(), JsValue> {
             }
         }
     }
-
+    // once the transfer is complete we break out the loop and send an undefined value to notify
+    // main thread the work is compete.
     global.post_message(&JsValue::undefined())?;
 
     Ok(())
-}
-
-#[wasm_bindgen]
-pub fn request_bg(js_params: JsValue) -> Result<Promise, JsValue> {
-    let params: RequestParams = js_params.into_serde().map_err(js_err)?;
-
-    console_error_panic_hook::set_once();
-    init_console_log(log::Level::from_str(&params.log_level).unwrap()).unwrap();
-
-    let wparams = JsValue::from_serde(&params).unwrap();
-
-    let worker_handle = Worker::new("worker-main.js").unwrap();
-
-    let array = js_sys::Array::new();
-    array.push(&wasm_bindgen::module());
-    array.push(&wasm_bindgen::memory());
-    worker_handle.post_message(&array)?;
-
-    // this sender receives the content type, meaning that we received the first bytes.
-    let (os, or) = oneshot::channel();
-    let mut osender = Some(os);
-    // the bytes are streamed through this channel.
-    let (mut sender, r) = mpsc::channel(64);
-    let onmessage = Closure::wrap(Box::new(move |event: MessageEvent| {
-        if event.data().is_undefined() {
-            sender.close_channel()
-        } else if let Some(os) = osender.take() {
-            if let Ok(buf) = event.data().dyn_into::<js_sys::Uint8Array>() {
-                let ct = detect_content_type(&buf.to_vec());
-                drop(os.send(ct));
-                sender.start_send(event.data()).unwrap();
-            }
-        } else {
-            sender.start_send(event.data()).unwrap();
-        }
-    }) as Box<dyn FnMut(_)>);
-    worker_handle.set_onmessage(Some(onmessage.as_ref().unchecked_ref()));
-    onmessage.forget();
-
-    worker_handle.post_message(&wparams)?;
-
-    let done = async move {
-        match or.await {
-            Ok(ct) => {
-                let source = IntoUnderlyingSource::new(Box::new(r.map(Ok)));
-                // Set HWM to 0 to prevent the JS ReadableStream from buffering chunks in its queue,
-                // since the original Rust stream is better suited to handle that.
-                let strategy = QueuingStrategy::new(0.0);
-
-                let js_stream: JsStream =
-                    ReadableStream::new_with_source(source, strategy).unchecked_into();
-
-                let headers =
-                    JsValue::from_serde(&ResponseHeaders { content_type: ct }).map_err(js_err)?;
-
-                let mut init = ResponseInit::new();
-
-                let res = Response::new_with_opt_readable_stream_and_init(
-                    Some(&js_stream),
-                    init.headers(&headers).status(200),
-                )?;
-                Ok(res.into())
-            }
-            Err(_) => Err(JsValue::undefined()),
-        }
-    };
-    Ok(wasm_bindgen_futures::future_to_promise(done))
 }
 
 fn js_err<E: ToString + Send + Sync + 'static>(e: E) -> JsValue {

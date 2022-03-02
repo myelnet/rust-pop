@@ -1106,11 +1106,12 @@ mod tests {
                 match event {
                     GraphsyncEvent::Progress { req_id, size, .. } => {
                         let mut exp_size = 262158;
-                        if n == 1 {
+                        if n == 0 {
                             exp_size = 809;
                         }
                         assert_eq!(req_id, id);
                         assert_eq!(size, exp_size);
+                        n += 1;
                     }
                     GraphsyncEvent::ResponseReceived(_, _responses) => {}
                     GraphsyncEvent::Complete(rid, Ok(())) => {
@@ -1124,7 +1125,6 @@ mod tests {
             } else {
                 break;
             }
-            n += 1;
         }
 
         let store = peer2.store.clone();

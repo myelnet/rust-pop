@@ -4,17 +4,19 @@ use async_std::channel::{bounded, Receiver, Sender};
 use async_trait::async_trait;
 use blockstore::{errors::Error as BsError, types::BlockStore};
 use fnv::FnvHashMap;
+use indexmap::{self, IndexMap};
 use libipld::cid::Error as CidError;
 use libipld::codec::Decode;
 use libipld::ipld::{Ipld, IpldIndex};
 use libipld::multihash::Error as MultihashError;
+use libipld::pb::{PbLink, PbNode};
 use libipld::store::StoreParams;
 use libipld::{Block, Cid};
 use protobuf::ProtobufError;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_cbor::{error::Error as CborError, from_slice, to_vec};
 use smallvec::SmallVec;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::io::Error as StdError;
 use std::sync::Arc;
@@ -46,6 +48,12 @@ impl PathSegment {
         match self {
             PathSegment::String(string) => IpldIndex::Map(string.clone()),
             PathSegment::Int(int) => IpldIndex::List(*int),
+        }
+    }
+    pub fn to_string(&self) -> String {
+        match self {
+            PathSegment::String(string) => string.to_string(),
+            PathSegment::Int(int) => int.to_string(),
         }
     }
 }
@@ -142,6 +150,20 @@ pub enum Selector {
     },
     #[serde(rename = "@", with = "empty_map")]
     ExploreRecursiveEdge,
+    #[serde(rename = "f")]
+    ExploreFields {
+        #[serde(rename = "f>")]
+        fields: IndexMap<String, Selector>,
+    },
+    #[serde(rename = "~")]
+    ExploreInterpretAs {
+        #[serde(rename = "as")]
+        reifier: String,
+        #[serde(rename = ">")]
+        next: Box<Selector>,
+    },
+    #[serde(rename = ".", with = "empty_map")]
+    Matcher,
 }
 
 impl Cbor for Selector {}
@@ -158,6 +180,12 @@ impl Selector {
     pub fn interests(&self) -> Option<Vec<PathSegment>> {
         match self {
             ExploreAll { .. } => None,
+            ExploreFields { fields } => Some(
+                fields
+                    .keys()
+                    .map(|k| PathSegment::from(k.to_string()))
+                    .collect(),
+            ),
             ExploreRecursive {
                 current, sequence, ..
             } => {
@@ -171,11 +199,17 @@ impl Selector {
                 // Should never be called on this variant
                 Some(vec![])
             }
+            ExploreInterpretAs { next, .. } => next.interests(),
+            Matcher => Some(vec![]),
         }
     }
     pub fn explore(self, ipld: &Ipld, p: &PathSegment) -> Option<Selector> {
         match self {
             ExploreAll { next } => Some(*next),
+            ExploreFields { mut fields } => {
+                ipld.get(p.ipld_index()).ok()?;
+                fields.remove(&p.to_string())
+            }
             ExploreRecursive {
                 current,
                 sequence,
@@ -214,10 +248,13 @@ impl Selector {
                 }
             }
             ExploreRecursiveEdge => None,
+            ExploreInterpretAs { next, .. } => Some(*next),
+            Matcher => None,
         }
     }
     pub fn decide(&self) -> bool {
         match self {
+            Matcher => true,
             ExploreRecursive {
                 current, sequence, ..
             } => {
@@ -425,11 +462,14 @@ fn select_next_entries(ipld: Ipld, selector: Selector) -> Vec<(Ipld, Selector)> 
     }
 }
 
-#[derive(Debug, Default)]
+type Reifier<L> = Box<dyn Fn(Path, &Ipld, &L) -> Option<Ipld> + Send + Sync>;
+
+#[derive(Default)]
 pub struct Progress<L> {
     pub loader: L,
     pub path: Path,
     pub last_block: Option<LastBlockInfo>,
+    pub reifiers: HashMap<String, Reifier<L>>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -447,8 +487,14 @@ where
             loader,
             path: Default::default(),
             last_block: None,
+            reifiers: Default::default(),
         }
     }
+
+    pub fn add_reifier(&mut self, name: String, r: Reifier<L>) {
+        self.reifiers.insert(name, r);
+    }
+
     #[async_recursion]
     pub async fn walk_adv<F>(
         &mut self,
@@ -475,6 +521,16 @@ where
 
             return Ok(());
         }
+        if let Selector::ExploreInterpretAs { next, reifier } = selector.clone() {
+            let path = self.path.clone();
+            let loader = &self.loader;
+            if let Some(Some(reified)) = self.reifiers.get(&reifier).map(|f| f(path, node, loader))
+            {
+                self.walk_adv(&reified, *next, callback).await?;
+                return Ok(());
+            }
+        }
+
         callback(self, node).map_err(Error::Custom)?;
 
         match node {
@@ -786,11 +842,24 @@ where
     }
 }
 
+/// turns a unixfs directory into a map indexed by link name
+pub fn unixfs_reifier<L: LinkLoader>(path: Path, node: &Ipld, loader: &L) -> Option<Ipld> {
+    if let Ok(pb_node) = PbNode::try_from(node) {
+        let mut map = BTreeMap::new();
+        for link in pb_node.links {
+            map.insert(link.name.clone(), link.into());
+        }
+        return Some(Ipld::StringMap(map));
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use blockstore::memory::MemoryDB as MemoryBlockStore;
     use hex;
+    use indexmap::indexmap;
     use libipld::block::Block;
     use libipld::cbor::DagCborCodec;
     use libipld::ipld;
@@ -908,11 +977,7 @@ mod tests {
             current: None,
         };
 
-        let mut progress = Progress {
-            loader,
-            path: Path::default(),
-            last_block: None,
-        };
+        let mut progress = Progress::new(loader);
 
         let index = Arc::new(Mutex::new(0));
         progress
@@ -956,11 +1021,7 @@ mod tests {
             }"#;
         let selector: Selector = serde_json::from_str(sel_data).unwrap();
 
-        let mut progress = Progress {
-            loader,
-            path: Path::default(),
-            last_block: None,
-        };
+        let mut progress = Progress::new(loader);
 
         let index = Arc::new(Mutex::new(0));
         progress
@@ -990,11 +1051,7 @@ mod tests {
         let sel_data = hex::decode("a16152a2616ca1646e6f6e65a0623a3ea16161a1613ea16140a0").unwrap();
         let selector = Selector::unmarshal_cbor(&sel_data).unwrap();
 
-        let mut progress = Progress {
-            loader,
-            path: Path::default(),
-            last_block: None,
-        };
+        let mut progress = Progress::new(loader);
 
         let index = Arc::new(Mutex::new(0));
         progress
@@ -1029,11 +1086,7 @@ mod tests {
             current: None,
         };
 
-        let mut progress = Progress {
-            loader,
-            path: Path::default(),
-            last_block: None,
-        };
+        let mut progress = Progress::new(loader);
 
         let index = Arc::new(Mutex::new(0));
         progress
@@ -1049,6 +1102,125 @@ mod tests {
 
         let current_idx = *index.lock().unwrap();
         assert_eq!(current_idx, 4)
+    }
+
+    #[async_std::test]
+    async fn explore_fields() {
+        let store = MemoryBlockStore::default();
+
+        let leafa = ipld!("alpha");
+        let leafa_block = Block::encode(DagCborCodec, Code::Sha2_256, &leafa).unwrap();
+        store.insert(&leafa_block).unwrap();
+
+        let middle_map = ipld!({
+            "foo": true,
+            "bar": false,
+            "nested": {
+                "alink": leafa_block.cid(),
+                "nonlink": "zoo",
+            },
+        });
+        let middle_map_block = Block::encode(DagCborCodec, Code::Sha2_256, &middle_map).unwrap();
+        store.insert(&middle_map_block).unwrap();
+
+        let selector = Selector::ExploreFields {
+            fields: indexmap! {
+                "foo".to_string() => Selector::Matcher,
+                "bar".to_string() => Selector::Matcher,
+            },
+        };
+
+        let expect: [ExpectVisit; 3] = [
+            ExpectVisit {
+                path: Path::from(""),
+            },
+            ExpectVisit {
+                path: Path::from("foo"),
+            },
+            ExpectVisit {
+                path: Path::from("bar"),
+            },
+        ];
+
+        let loader = StoreLoader { store };
+
+        let mut progress = Progress::new(loader);
+
+        let index = Arc::new(Mutex::new(0));
+        progress
+            .walk_adv(&middle_map, selector, &|prog,
+                                               _ipld|
+             -> Result<(), String> {
+                let mut idx = index.lock().unwrap();
+                let exp = &expect[*idx];
+                assert_eq!(prog.path, exp.path);
+                *idx += 1;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let current_idx = *index.lock().unwrap();
+        assert_eq!(current_idx, 3)
+    }
+
+    #[async_std::test]
+    async fn unixfs_reify() {
+        use libipld::multihash::MultihashDigest;
+        use libipld::pb::{DagPbCodec, PbNode};
+
+        let store = MemoryBlockStore::default();
+        let dir_data = hex::decode("12330a2212206aad27d7e2fc815cd15bf679535062565dc927a831547281fc0af9e5d7e67c74120b6166726963616e2e747874180812340a221220fd36ac5279964db0cba8f7fa45f8c4c44ef5e2ff55da85936a378c96c9c63204120c616d6572696361732e747874180812360a2212207564c20415869d77a8a40ca68a9158e397dd48bdff1325cdb23c5bcd181acd17120e6175737472616c69616e2e7478741808").unwrap();
+
+        let pb_node = PbNode::from_bytes(&dir_data).unwrap();
+
+        let node: Ipld = pb_node.into();
+        let mh = Code::Sha2_256.digest(&dir_data);
+        let cid = Cid::new_v1(DagPbCodec.into(), mh);
+        let block = Block::new_unchecked(cid, dir_data);
+        store.insert(&block).unwrap();
+
+        let loader = StoreLoader { store };
+
+        let mut progress = Progress::new(loader);
+        progress.add_reifier("unixfs".to_string(), Box::new(unixfs_reifier));
+
+        let selector = Selector::ExploreInterpretAs {
+            reifier: "unixfs".to_string(),
+            next: Box::new(Selector::ExploreFields {
+                fields: indexmap! {
+                    "african.txt".to_string() => Selector::Matcher,
+                    "australian.txt".to_string() => Selector::Matcher,
+                },
+            }),
+        };
+
+        let expect: [ExpectVisit; 3] = [
+            ExpectVisit {
+                path: Path::from(""),
+            },
+            ExpectVisit {
+                path: Path::from("african.txt"),
+            },
+            ExpectVisit {
+                path: Path::from("australian.txt"),
+            },
+        ];
+
+        let index = Arc::new(Mutex::new(0));
+        progress
+            .walk_adv(&node, selector, &|prog, ipld| -> Result<(), String> {
+                let mut idx = index.lock().unwrap();
+                let exp = &expect[*idx];
+                assert_eq!(prog.path, exp.path);
+                *idx += 1;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let current_idx = *index.lock().unwrap();
+        assert_eq!(current_idx, 3)
     }
 
     #[async_std::test]
@@ -1092,11 +1264,7 @@ mod tests {
         let sender = loader.sender();
         join!(
             async move {
-                let mut progress = Progress {
-                    loader,
-                    path: Path::default(),
-                    last_block: None,
-                };
+                let mut progress = Progress::new(loader);
 
                 progress
                     .walk_adv(&parent, selector, &|_prog, _ipld| -> Result<(), String> {
@@ -1171,11 +1339,7 @@ mod tests {
             current: None,
         };
 
-        let mut progress = Progress {
-            loader,
-            path: Path::default(),
-            last_block: None,
-        };
+        let mut progress = Progress::new(loader);
 
         let index = Arc::new(Mutex::new(0));
         progress

@@ -30,6 +30,7 @@ instant = "0.1.12"
 crossbeam-channel = "0.5.2"
 blockstore = { path = "../blockstore", default_features = false }
 filecoin = { path = "../filecoin", default_features = false }
+indexmap = { version = "1.8.0", features = ["serde"] }
 
 [build-dependencies]
 protoc-rust = "2.25.2"

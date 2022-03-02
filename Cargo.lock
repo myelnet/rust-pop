@@ -2023,6 +2023,7 @@ dependencies = [
  "futures",
  "futures-lite",
  "hex",
+ "indexmap",
  "instant",
  "integer-encoding 3.0.2",
  "libipld",
@@ -2371,6 +2372,7 @@ checksum = "282a6247722caba404c065016bbfa522806e51714c34f5dfc3e4a3a46fcb4223"
 dependencies = [
  "autocfg 1.1.0",
  "hashbrown 0.11.2",
+ "serde",
 ]
 
 [[package]]

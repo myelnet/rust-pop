@@ -214,7 +214,10 @@ where
                     });
 
                     let mut progress = Progress::new(loader);
-                    match progress.walk_adv(&node, selector, &|_, _| Ok(())).await {
+                    let result = progress.walk_adv(&node, selector, &|_, _| Ok(())).await;
+                    // drop progress to regain the builder
+                    drop(progress);
+                    match result {
                         Ok(()) => {
                             builder.completed();
                         }

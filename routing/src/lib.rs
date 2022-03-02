@@ -12,7 +12,7 @@ use libp2p::swarm::{
     NetworkBehaviour, NetworkBehaviourAction, NetworkBehaviourEventProcess, PollParameters,
 };
 use libp2p::{Multiaddr, NetworkBehaviour, PeerId};
-use network::{RoutingProposal, RoutingNetEvent, RoutingNetwork, EMPTY_QUEUE_SHRINK_THRESHOLD};
+use network::{RoutingNetEvent, RoutingNetwork, RoutingProposal, EMPTY_QUEUE_SHRINK_THRESHOLD};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::io;
@@ -33,6 +33,7 @@ pub enum RoutingEvent {
     FoundContent(Vec<u8>),
     HubTableUpdated,
     HubIndexUpdated,
+    RoutingTableUpdated,
 }
 
 #[derive(NetworkBehaviour)]
@@ -109,6 +110,7 @@ impl Routing {
 
     pub fn add_address(&mut self, peer_id: &PeerId, addr: Multiaddr) {
         self.hub_discovery.add_address(peer_id, addr);
+        self.content_routing.add_explicit_peer(peer_id);
     }
 
     fn addresses_of_peer(&mut self, peer_id: &PeerId) -> Vec<Multiaddr> {
@@ -136,7 +138,8 @@ impl Routing {
         new_entry.insert(root, peer_table);
         // expand table as new entries come in -- allows for async updates
         self.routing_table.extend(new_entry);
-        self.pending_events.push_back(RoutingEvent::HubIndexUpdated);
+        self.pending_events
+            .push_back(RoutingEvent::RoutingTableUpdated);
     }
 
     fn process_gossip_message(
@@ -231,9 +234,9 @@ impl NetworkBehaviourEventProcess<GossipsubEvent> for Routing {
                     id,
                     peer_id
                 );
-                self.process_gossip_message(peer_id, message);
+                self.process_gossip_message(peer_id, message).unwrap();
             }
-            _ => {}
+            _ => println!("gossip event: {:?}", event),
         }
     }
 }
@@ -364,6 +367,18 @@ mod tests {
                 }
             }
         }
+
+        async fn next_routing(&mut self) -> Option<RoutingEvent> {
+            loop {
+                let ev = self.swarm.next().await?;
+                if let SwarmEvent::Behaviour(event) = ev {
+                    match event {
+                        RoutingEvent::RoutingTableUpdated => return Some(event),
+                        _ => {}
+                    }
+                }
+            }
+        }
     }
 
     #[async_std::test]
@@ -416,10 +431,8 @@ mod tests {
         let peer_table: PeerTable = HashMap::from([(peer_id, multiaddr)]);
 
         let mut hub_peer = Peer::new(true, None);
-        let hub_id = hub_peer.peer_id;
-        let hub_addr = SmallVec::<[Multiaddr; 6]>::from(Vec::from([hub_peer.addr.clone()]));
-        let hub_table: PeerTable = HashMap::from([(hub_id, hub_addr)]);
-        let mut peer1 = Peer::new(false, Some(Arc::new(RwLock::new(hub_table))));
+        let mut peer1 = Peer::new(false, None);
+
         peer1
             .swarm()
             .behaviour_mut()
@@ -431,9 +444,12 @@ mod tests {
         peer1.add_address(&hub_peer);
         peer1.add_address(&peer2);
 
-        //  print logs for peer 2
+        //  print logs for hub peer
         let hub_table = hub_peer.get_content_table().clone();
-        hub_peer.spawn("hub");
+        let hubid = hub_peer.spawn("hub");
+
+        peer1.swarm().dial(hubid).unwrap();
+        peer1.next_discovery().await;
 
         // update remote hubs
         peer1.swarm().behaviour_mut().update_hubs();
@@ -445,6 +461,66 @@ mod tests {
         assert_eq!(
             *hub_table.read().unwrap(),
             *peer1.get_content_table().read().unwrap()
+        );
+    }
+    #[async_std::test]
+    async fn test_content_routing() {
+        let cid = Cid::try_from("bafy2bzaceafciokjlt5v5l53pftj6zcmulc2huy3fduwyqsm3zo5bzkau7muq")
+            .unwrap();
+        let content = CidCbor::from(cid);
+        let host_peer = Peer::new(true, None);
+        let multiaddr = SmallVec::<[Multiaddr; 6]>::from(Vec::from([host_peer.addr]));
+        let peer_id = host_peer.peer_id;
+        let peer_table: PeerTable = HashMap::from([(peer_id, multiaddr)]);
+
+        let mut hub_peer = Peer::new(true, None);
+        // Peer 1 has a content table that its going to push to hub peer
+        let mut peer1 = Peer::new(false, None);
+        peer1
+            .swarm()
+            .behaviour_mut()
+            .hub_indexing
+            .add_entry(content.clone(), peer_table);
+
+        //  peers 2 and 3 are unaware of the hub, but peer 1 and 4 are aware of it
+        let mut peer2 = Peer::new(false, None);
+        let mut peer3 = Peer::new(false, None);
+        let mut peer4 = Peer::new(false, None);
+
+        peer1.add_address(&hub_peer);
+        peer1.add_address(&peer2);
+        peer1.add_address(&peer3);
+        peer1.add_address(&peer4);
+
+        peer4.add_address(&hub_peer);
+
+        //  print logs for hub peer
+        let hub_table = hub_peer.get_content_table().clone();
+        let hubid = hub_peer.spawn("hub");
+
+        //  print logs for hub peer
+        peer1.swarm().dial(hubid).unwrap();
+        peer1.next_discovery().await;
+
+        // update remote hubs
+        peer1.swarm().behaviour_mut().update_hubs();
+        peer1.next_indexing().await;
+
+        assert_eq!(
+            *hub_table.read().unwrap(),
+            *peer1.get_content_table().read().unwrap()
+        );
+
+        //  print logs for hub peer
+        peer4.swarm().dial(hubid).unwrap();
+        peer4.next_discovery().await;
+        peer4.swarm().behaviour_mut().find_content(content).unwrap();
+        peer4.next_routing().await;
+
+        // assert the content table updated correctly
+        assert_eq!(
+            *hub_table.read().unwrap(),
+            peer4.swarm().behaviour_mut().routing_table
         );
     }
 }

@@ -19,25 +19,24 @@ use std::{
 };
 
 #[derive(Debug, Clone, PartialEq, Serialize_tuple, Deserialize_tuple, Default)]
-pub struct PeersforContent {
+pub struct RoutingProposal {
     pub root: CidCbor,
     pub peers: Option<SerializablePeerTable>,
 }
 
-impl Cbor for PeersforContent {}
+impl Cbor for RoutingProposal {}
 
-impl From<()> for PeersforContent {
+impl From<()> for RoutingProposal {
     fn from(_: ()) -> Self {
         Default::default()
     }
 }
 
-impl From<PeersforContent> for () {
-    fn from(_: PeersforContent) -> Self {
-    }
+impl From<RoutingProposal> for () {
+    fn from(_: RoutingProposal) -> Self {}
 }
 
-impl UpgradeInfo for PeersforContent {
+impl UpgradeInfo for RoutingProposal {
     type Info = &'static [u8];
     type InfoIter = iter::Once<Self::Info>;
 
@@ -62,7 +61,7 @@ impl<TSocket> InboundUpgrade<TSocket> for RoutingProtocol
 where
     TSocket: AsyncRead + AsyncWrite + Send + Unpin + 'static,
 {
-    type Output = PeersforContent;
+    type Output = RoutingProposal;
     type Error = io::Error;
     type Future = BoxFuture<'static, Result<Self::Output, Self::Error>>;
 
@@ -71,7 +70,7 @@ where
             let mut buf = Vec::new();
             socket.read_to_end(&mut buf).await?;
             socket.close().await?;
-            let message = PeersforContent::unmarshal_cbor(&buf).map_err(|_| {
+            let message = RoutingProposal::unmarshal_cbor(&buf).map_err(|_| {
                 io::Error::new(io::ErrorKind::Other, "Failed to decode CBOR message")
             })?;
             Ok(message)
@@ -79,7 +78,7 @@ where
     }
 }
 
-impl<TSocket> OutboundUpgrade<TSocket> for PeersforContent
+impl<TSocket> OutboundUpgrade<TSocket> for RoutingProposal
 where
     TSocket: AsyncRead + AsyncWrite + Send + Unpin + 'static,
 {
@@ -103,19 +102,19 @@ pub const EMPTY_QUEUE_SHRINK_THRESHOLD: usize = 100;
 
 #[derive(Debug)]
 pub enum RoutingNetEvent {
-    //  respond to gossip messages so there's no equivalent request here
-    Response(PeerId, PeersforContent),
+    //  responds to incoming gossip messages so there's no equivalent request here
+    Response(PeerId, RoutingProposal),
 }
 
 pub struct RoutingNetwork {
     pending_events: VecDeque<
         NetworkBehaviourAction<
             RoutingNetEvent,
-            OneShotHandler<RoutingProtocol, PeersforContent, PeersforContent>,
+            OneShotHandler<RoutingProtocol, RoutingProposal, RoutingProposal>,
         >,
     >,
     connected: HashMap<PeerId, SmallVec<[Connection; 2]>>,
-    pending_outbound_requests: HashMap<PeerId, SmallVec<[PeersforContent; 10]>>,
+    pending_outbound_requests: HashMap<PeerId, SmallVec<[RoutingProposal; 10]>>,
 }
 
 impl Default for RoutingNetwork {
@@ -133,7 +132,7 @@ impl RoutingNetwork {
         }
     }
 
-    pub fn send_message(&mut self, peer: &PeerId, message: PeersforContent) {
+    pub fn send_message(&mut self, peer: &PeerId, message: RoutingProposal) {
         if let Some(message) = self.try_send_message(peer, message) {
             self.pending_outbound_requests
                 .entry(*peer)
@@ -145,8 +144,8 @@ impl RoutingNetwork {
     fn try_send_message(
         &mut self,
         peer: &PeerId,
-        message: PeersforContent,
-    ) -> Option<PeersforContent> {
+        message: RoutingProposal,
+    ) -> Option<RoutingProposal> {
         if let Some(connections) = self.connected.get_mut(peer) {
             if connections.is_empty() {
                 return Some(message);
@@ -165,7 +164,7 @@ impl RoutingNetwork {
 }
 
 impl NetworkBehaviour for RoutingNetwork {
-    type ProtocolsHandler = OneShotHandler<RoutingProtocol, PeersforContent, PeersforContent>;
+    type ProtocolsHandler = OneShotHandler<RoutingProtocol, RoutingProposal, RoutingProposal>;
 
     type OutEvent = RoutingNetEvent;
 
@@ -292,5 +291,161 @@ struct Connection {
 impl Connection {
     fn new(id: ConnectionId, address: Option<Multiaddr>) -> Self {
         Self { id, address }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_std::net::{TcpListener, TcpStream};
+    use async_std::task;
+    use futures::prelude::*;
+    use hex;
+    use libipld::Cid;
+    use libp2p::core::muxing::StreamMuxerBox;
+    use libp2p::core::transport::Boxed;
+    use libp2p::identity;
+    use libp2p::noise::{Keypair, NoiseConfig, X25519Spec};
+    use libp2p::swarm::SwarmEvent;
+    use libp2p::tcp::TcpConfig;
+    use libp2p::yamux::YamuxConfig;
+    use libp2p::{PeerId, Swarm, Transport};
+    use std::time::Duration;
+
+    #[test]
+    fn it_decodes_proposal() {
+        let msg_data = hex::decode("82d82a5827000171a0e402200a2439495cfb5eafbb79669f644ca2c5a3d31b28e96c424cde5dd0e540a7d948f6").unwrap();
+
+        println!("msg_data {:?}", msg_data);
+
+        let msg = RoutingProposal::unmarshal_cbor(&msg_data).unwrap();
+
+        println!("request {:?}", msg);
+
+        // assert_eq!(msg.is_rq, true);
+
+        // let request = msg.request.unwrap();
+
+        let cid = Cid::try_from("bafy2bzaceafciokjlt5v5l53pftj6zcmulc2huy3fduwyqsm3zo5bzkau7muq")
+            .unwrap();
+        // We can recover the CID
+        assert_eq!(msg.root.to_cid().unwrap(), cid);
+    }
+
+    #[async_std::test]
+    async fn test_upgrade() {
+        use libp2p::core::upgrade;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener_addr = listener.local_addr().unwrap();
+
+        let server = async move {
+            let incoming = listener.incoming().into_future().await.0.unwrap().unwrap();
+            upgrade::apply_inbound(incoming, RoutingProtocol)
+                .await
+                .unwrap();
+        };
+
+        let client = async move {
+            let stream = TcpStream::connect(&listener_addr).await.unwrap();
+            upgrade::apply_outbound(stream, RoutingProposal::default(), upgrade::Version::V1)
+                .await
+                .unwrap();
+        };
+
+        future::select(Box::pin(server), Box::pin(client)).await;
+    }
+
+    fn mk_transport() -> (PeerId, Boxed<(PeerId, StreamMuxerBox)>) {
+        let id_key = identity::Keypair::generate_ed25519();
+        let peer_id = id_key.public().to_peer_id();
+        let dh_key = Keypair::<X25519Spec>::new()
+            .into_authentic(&id_key)
+            .unwrap();
+        let noise = NoiseConfig::xx(dh_key).into_authenticated();
+
+        let transport = TcpConfig::new()
+            .nodelay(true)
+            .upgrade(libp2p::core::upgrade::Version::V1)
+            .authenticate(noise)
+            .multiplex(YamuxConfig::default())
+            .timeout(Duration::from_secs(20))
+            .boxed();
+        (peer_id, transport)
+    }
+
+    struct Peer {
+        peer_id: PeerId,
+        addr: Multiaddr,
+        swarm: Swarm<RoutingNetwork>,
+    }
+
+    impl Peer {
+        fn new() -> Self {
+            let (peer_id, trans) = mk_transport();
+            let mut swarm = Swarm::new(trans, RoutingNetwork::new(), peer_id);
+            Swarm::listen_on(&mut swarm, "/ip4/127.0.0.1/tcp/0".parse().unwrap()).unwrap();
+            while swarm.next().now_or_never().is_some() {}
+            let addr = Swarm::listeners(&swarm).next().unwrap().clone();
+            Self {
+                peer_id,
+                addr,
+                swarm,
+            }
+        }
+
+        fn swarm(&mut self) -> &mut Swarm<RoutingNetwork> {
+            &mut self.swarm
+        }
+
+        fn spawn(mut self, _name: &'static str) -> PeerId {
+            let peer_id = self.peer_id;
+            task::spawn(async move {
+                loop {
+                    let event = self.swarm.next().await;
+                    println!("event {:?}", event);
+                }
+            });
+            peer_id
+        }
+
+        async fn next(&mut self) -> Option<RoutingNetEvent> {
+            loop {
+                let ev = self.swarm.next().await?;
+                if let SwarmEvent::Behaviour(event) = ev {
+                    return Some(event);
+                }
+            }
+        }
+    }
+
+    fn assert_complete_ok(event: Option<RoutingNetEvent>, root: Cid) {
+        if let Some(RoutingNetEvent::Response(_, resp)) = event {
+            assert_eq!(resp.root.to_cid().unwrap(), root);
+        } else {
+            panic!("{:?} should not exist", event);
+        }
+    }
+
+    #[async_std::test]
+    async fn send_message() {
+        let mut peer1 = Peer::new();
+        let mut peer2 = Peer::new();
+
+        peer2.swarm().dial(peer1.addr.clone()).unwrap();
+
+        let cid = Cid::default();
+
+        peer2.swarm().behaviour_mut().send_message(
+            &peer1.peer_id,
+            RoutingProposal {
+                root: CidCbor::from(cid),
+                peers: None,
+            },
+        );
+
+        peer2.spawn("peer2");
+
+        assert_complete_ok(peer1.next().await, cid);
     }
 }

@@ -12,7 +12,7 @@ use libp2p::swarm::{
     NetworkBehaviour, NetworkBehaviourAction, NetworkBehaviourEventProcess, PollParameters,
 };
 use libp2p::{Multiaddr, NetworkBehaviour, PeerId};
-use network::{PeersforContent, RoutingNetEvent, RoutingNetwork, EMPTY_QUEUE_SHRINK_THRESHOLD};
+use network::{RoutingProposal, RoutingNetEvent, RoutingNetwork, EMPTY_QUEUE_SHRINK_THRESHOLD};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::io;
@@ -154,7 +154,7 @@ impl Routing {
                 //  if content table contains the root cid, if not then do nothing
                 let table_read = self.hub_indexing.content_table.read().unwrap();
                 if let Some(peer_table) = table_read.get(&req.root) {
-                    let message = PeersforContent {
+                    let message = RoutingProposal {
                         root: req.root,
                         peers: Some(utils::peer_table_to_bytes(peer_table)),
                     };
@@ -242,7 +242,6 @@ impl NetworkBehaviourEventProcess<GossipsubEvent> for Routing {
 mod tests {
     use super::*;
     use async_std::task;
-    use dag_service::add;
     use futures::prelude::*;
     use libipld::Cid;
     use libp2p::core::muxing::StreamMuxerBox;
@@ -448,5 +447,4 @@ mod tests {
             *peer1.get_content_table().read().unwrap()
         );
     }
-
 }

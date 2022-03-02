@@ -22,7 +22,6 @@ use network::{
     EXTENSION_KEY,
 };
 use num_bigint::ToBigInt;
-use routing::{DiscoveryEvent, PeerDiscovery};
 use std::{
     collections::{HashMap, VecDeque},
     sync::Arc,
@@ -41,7 +40,6 @@ pub enum DataTransferEvent {
         data: Ipld,
     },
     Completed(ChannelId, Result<(), String>),
-    PeerTableUpdated,
 }
 
 #[derive(NetworkBehaviour)]
@@ -56,7 +54,6 @@ where
 {
     graphsync: Graphsync<S>,
     network: DataTransferNetwork,
-    peer_discovery: PeerDiscovery,
 
     #[behaviour(ignore)]
     peer_id: PeerId,
@@ -74,11 +71,9 @@ impl<S: 'static + BlockStore> DataTransfer<S>
 where
     Ipld: Decode<<S::Params as StoreParams>::Codecs>,
 {
-    pub fn new(
-        peer_id: PeerId,
-        mut graphsync: Graphsync<S>,
-        peer_discovery: PeerDiscovery,
-    ) -> Self {
+    pub fn new(peer_id: PeerId, mut graphsync: Graphsync<S>) -> Self {
+        let now_unix = instant::now() as u64;
+
         graphsync.register_incoming_request_hook(Arc::new(|_peer, gs_req| {
             let mut extensions = HashMap::new();
             if let Ok(rmsg) = TransferMessage::try_from(&gs_req.extensions) {
@@ -120,7 +115,6 @@ where
         Self {
             peer_id,
             graphsync,
-            peer_discovery,
             next_request_id: now_unix,
             network: DataTransferNetwork::new(),
             pending_events: VecDeque::default(),
@@ -379,13 +373,8 @@ where
         ch_id
     }
 
-    fn process_discovery_response(&mut self) {
-        self.pending_events
-            .push_back(DataTransferEvent::PeerTableUpdated);
-    }
-
     pub fn add_address(&mut self, peer_id: &PeerId, addr: Multiaddr) {
-        self.peer_discovery.add_address(peer_id, addr);
+        self.graphsync.add_address(peer_id, addr);
     }
 }
 
@@ -539,17 +528,6 @@ where
     }
 }
 
-impl<S: 'static + BlockStore> NetworkBehaviourEventProcess<DiscoveryEvent> for DataTransfer<S>
-where
-    Ipld: Decode<<S::Params as StoreParams>::Codecs>,
-{
-    fn inject_event(&mut self, event: DiscoveryEvent) {
-        match event {
-            DiscoveryEvent::ResponseReceived(_) => self.process_discovery_response(),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -599,8 +577,7 @@ mod tests {
             let (peer_id, trans) = mk_transport();
             let bs = Arc::new(MemoryBlockStore::default());
             let gs = Graphsync::new(Default::default(), bs.clone());
-            let pd = PeerDiscovery::new(Default::default(), peer_id);
-            let dt = DataTransfer::new(peer_id, gs, pd);
+            let dt = DataTransfer::new(peer_id, gs);
             let mut swarm = Swarm::new(trans, dt, peer_id);
             Swarm::listen_on(&mut swarm, "/ip4/127.0.0.1/tcp/0".parse().unwrap()).unwrap();
             while swarm.next().now_or_never().is_some() {}
@@ -639,7 +616,6 @@ mod tests {
                 let ev = self.swarm.next().await?;
                 if let SwarmEvent::Behaviour(event) = ev {
                     match event {
-                        DataTransferEvent::PeerTableUpdated => {}
                         _ => return Some(event),
                     }
                 } else {
@@ -647,59 +623,6 @@ mod tests {
                 }
             }
         }
-
-        async fn next_discovery(&mut self) -> Option<DataTransferEvent> {
-            loop {
-                let ev = self.swarm.next().await?;
-                if let SwarmEvent::Behaviour(event) = ev {
-                    match event {
-                        DataTransferEvent::PeerTableUpdated => return Some(event),
-                        _ => {}
-                    }
-                }
-            }
-        }
-    }
-
-    #[async_std::test]
-    async fn test_peer_discovery() {
-        let mut peer1 = Peer::new();
-        let mut peer2 = Peer::new();
-        let mut peer3 = Peer::new();
-
-        // peer 2 knows everyone
-        peer2.add_address(&peer1);
-        peer2.add_address(&peer3);
-        // peer 3 knows peer 2 only and itself
-        peer3.add_address(&peer2);
-        // peer 1 knows peer 2 only and itself
-        peer1.add_address(&peer2);
-
-        //  print logs for peer 2
-        let peer2id = peer2.spawn("peer2");
-
-        peer3.swarm().dial(peer2id).unwrap();
-        peer1.swarm().dial(peer2id).unwrap();
-
-        peer3.next_discovery().await;
-        peer1.next_discovery().await;
-
-        assert_eq!(
-            *peer3
-                .swarm()
-                .behaviour()
-                .peer_discovery
-                .peer_table
-                .read()
-                .unwrap(),
-            *peer1
-                .swarm()
-                .behaviour()
-                .peer_discovery
-                .peer_table
-                .read()
-                .unwrap()
-        );
     }
 
     #[async_std::test]

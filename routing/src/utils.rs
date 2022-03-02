@@ -1,5 +1,5 @@
-use crate::hub_discovery::{PeerTable, SerializablePeerTable};
-use crate::hub_indexing::{ContentTable, SerializableContentTable};
+use crate::discovery::{PeerTable, SerializablePeerTable};
+use crate::{Index, SerializableIndex};
 use filecoin::cid_helpers::CidCbor;
 use libipld::Cid;
 use libp2p::core::{Multiaddr, PeerId};
@@ -49,7 +49,7 @@ pub fn peer_table_from_bytes(p: &SerializablePeerTable) -> PeerTable {
         .collect()
 }
 
-pub fn content_table_to_bytes(c: &ContentTable) -> SerializableContentTable {
+pub fn index_to_bytes(c: &Index) -> SerializableIndex {
     c.iter()
         .map_while(|(cid, addresses)| {
             let peer_table = peer_table_to_bytes(addresses);
@@ -58,7 +58,7 @@ pub fn content_table_to_bytes(c: &ContentTable) -> SerializableContentTable {
         .collect()
 }
 
-pub fn content_table_from_bytes(c: &SerializableContentTable) -> ContentTable {
+pub fn index_from_bytes(c: &SerializableIndex) -> Index {
     c.iter()
         .map_while(|(cid, addresses)| {
             // check sent peer is valid
@@ -73,7 +73,7 @@ pub fn content_table_from_bytes(c: &SerializableContentTable) -> ContentTable {
         .collect()
 }
 
-pub fn content_routing_init(peer_id: PeerId, topic: Topic) -> Gossipsub {
+pub fn gossip_init(peer_id: PeerId, topic: Topic) -> Gossipsub {
     // We take current time as request id as request content may not be unique
     let message_id_fn = |_message: &GossipsubMessage| MessageId::from(instant::now().to_ne_bytes());
 

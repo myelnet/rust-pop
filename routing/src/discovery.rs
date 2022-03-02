@@ -1,8 +1,6 @@
-use crate::hub_discovery::{PeerTable, SerializablePeerTable};
-use crate::utils::{content_table_from_bytes, content_table_to_bytes};
+use crate::utils::{peer_table_from_bytes, peer_table_to_bytes};
 use async_std::io;
 use async_trait::async_trait;
-use filecoin::cid_helpers::CidCbor;
 use futures::io::{AsyncRead, AsyncWrite};
 use futures::prelude::*;
 use futures::task::{Context, Poll};
@@ -18,8 +16,8 @@ use libp2p::swarm::{
 };
 use serde_cbor::{from_slice, to_vec};
 use serde_tuple::{Deserialize_tuple, Serialize_tuple};
+use smallvec::SmallVec;
 use std::collections::HashMap;
-use std::error::Error;
 use std::sync::{
     atomic::{AtomicI32, Ordering},
     Arc, RwLock,
@@ -27,24 +25,24 @@ use std::sync::{
 use std::time::Duration;
 
 pub type RequestId = i32;
-pub type ContentTable = HashMap<CidCbor, PeerTable>;
-pub type SerializableContentTable = HashMap<Vec<u8>, SerializablePeerTable>;
+pub type PeerTable = HashMap<PeerId, SmallVec<[Multiaddr; 6]>>;
+pub type SerializablePeerTable = HashMap<Vec<u8>, Vec<Vec<u8>>>;
 
 #[derive(Debug, Clone)]
-pub struct HubIndexingProtocol;
+pub struct HubDiscoveryProtocol;
 
-impl ProtocolName for HubIndexingProtocol {
+impl ProtocolName for HubDiscoveryProtocol {
     fn protocol_name(&self) -> &[u8] {
-        b"/myel/hub-indexing/0.1"
+        b"/myel/hub-discovery/0.1"
     }
 }
 
 #[derive(Clone)]
-pub struct IndexingCodec {
+pub struct DiscoveryCodec {
     max_msg_size: usize,
 }
 
-impl Default for IndexingCodec {
+impl Default for DiscoveryCodec {
     fn default() -> Self {
         Self {
             max_msg_size: 1000000,
@@ -53,10 +51,10 @@ impl Default for IndexingCodec {
 }
 
 #[async_trait]
-impl RequestResponseCodec for IndexingCodec {
-    type Protocol = HubIndexingProtocol;
-    type Response = IndexingResponse;
-    type Request = IndexingRequest;
+impl RequestResponseCodec for DiscoveryCodec {
+    type Protocol = HubDiscoveryProtocol;
+    type Response = DiscoveryResponse;
+    type Request = DiscoveryRequest;
 
     async fn read_request<T>(&mut self, _: &Self::Protocol, io: &mut T) -> io::Result<Self::Request>
     where
@@ -124,8 +122,8 @@ impl RequestResponseCodec for IndexingCodec {
 }
 
 #[derive(Debug)]
-pub enum IndexingEvent {
-    ResponseReceived(IndexingResponse),
+pub enum DiscoveryEvent {
+    ResponseReceived(DiscoveryResponse),
 }
 
 #[derive(Clone)]
@@ -152,40 +150,39 @@ impl Default for Config {
 }
 
 #[derive(Debug, PartialEq, Clone, Serialize_tuple, Deserialize_tuple)]
-pub struct IndexingRequest {
+pub struct DiscoveryRequest {
     pub id: RequestId,
-    pub content_table: SerializableContentTable,
+    pub hub: bool,
 }
 
 #[derive(Debug, PartialEq, Clone, Serialize_tuple, Deserialize_tuple)]
-pub struct IndexingResponse {
+pub struct DiscoveryResponse {
     pub id: RequestId,
+    pub addresses: SerializablePeerTable,
 }
 
-pub struct HubIndexing {
+pub struct HubDiscovery {
     //  we implement our own id_counter (instead of libp2p's) to ensure the request / response messages are CBOR encodable
     id_counter: Arc<AtomicI32>,
-    inner: RequestResponse<IndexingCodec>,
-    pub content_table: Arc<RwLock<ContentTable>>,
-    hub_table: Arc<RwLock<PeerTable>>,
+    inner: RequestResponse<DiscoveryCodec>,
+    pub hub_table: Arc<RwLock<PeerTable>>,
+    peer_id: PeerId,
+    pub multiaddr: SmallVec<[Multiaddr; 6]>,
+    hub: bool,
 }
 
-impl HubIndexing {
-    pub fn new(config: Config, hub: bool, hub_table: Option<Arc<RwLock<PeerTable>>>) -> Self {
-        // if node is a hub can support inbound and outbound requests -- i.e can sync with other hubs and receive
-        //  updates from other nodes
-        let support = if hub {
-            ProtocolSupport::Full
-        // if node is not a hub then we can only make outbound requests and reject inbound requests
-        } else {
-            ProtocolSupport::Outbound
-        };
-        let protocols = std::iter::once((HubIndexingProtocol, support));
+impl HubDiscovery {
+    pub fn new(
+        config: Config,
+        peer_id: PeerId,
+        hub: bool,
+        hub_table: Option<Arc<RwLock<PeerTable>>>,
+    ) -> Self {
+        let protocols = std::iter::once((HubDiscoveryProtocol, ProtocolSupport::Full));
         let mut rr_config = RequestResponseConfig::default();
         rr_config.set_connection_keep_alive(config.connection_keep_alive);
         rr_config.set_request_timeout(config.request_timeout);
-        let inner = RequestResponse::new(IndexingCodec::default(), protocols, rr_config);
-        let content_table = Arc::new(RwLock::new(HashMap::new()));
+        let inner = RequestResponse::new(DiscoveryCodec::default(), protocols, rr_config);
 
         // if no hub table was passed then initialize a dummy one (mainly for testing purposes)
         let hub_table: Arc<RwLock<PeerTable>> =
@@ -193,48 +190,40 @@ impl HubIndexing {
 
         Self {
             id_counter: Arc::new(AtomicI32::new(1)),
+            multiaddr: SmallVec::new(),
             inner,
             hub_table,
-            content_table,
+            peer_id,
+            hub,
         }
     }
-
-    pub fn add_entry(&mut self, cid: CidCbor, peer_table: PeerTable) {
-        self.content_table.write().unwrap().insert(cid, peer_table);
-    }
-
+    // only hubs should track leaf nodes, they do so using the inner behaviour's table
     pub fn add_address(&mut self, peer: &PeerId, address: Multiaddr) {
         self.inner.add_address(peer, address);
     }
 
     /// Removes an address of a peer previously added via `add_address`.
+    // only hubs should track leaf nodes, they do so using the inner behaviour's table
     pub fn remove_address(&mut self, peer: &PeerId, address: &Multiaddr) {
-        self.inner.remove_address(peer, address);
+        if self.hub {
+            self.inner.remove_address(peer, address);
+        }
     }
 
-    pub fn update(&mut self) -> Vec<RequestId> {
-        // send content table to all hubs -- currently is very naive and simply sends the whole table
-        // TODO: only send additions and deletions
-        let mut req_ids = Vec::new();
-        for peer_id in self.hub_table.read().unwrap().keys() {
-            let id = self.id_counter.fetch_add(1, Ordering::Relaxed);
-            let content = content_table_to_bytes(&self.content_table.read().unwrap());
-            self.inner.send_request(
-                peer_id,
-                IndexingRequest {
-                    id,
-                    content_table: content,
-                },
-            );
-            req_ids.push(id);
-        }
-        req_ids
+    // want this to be private as we want connections to trigger table swaps. There could be
+    //  a situation where call to the request function itself triggers a connection
+    // and then we have duplicate requests being made
+    fn request(&mut self, peer_id: &PeerId) -> RequestId {
+        let id = self.id_counter.fetch_add(1, Ordering::Relaxed);
+        self.inner
+            .send_request(peer_id, DiscoveryRequest { id, hub: self.hub });
+        id
     }
 }
 
-impl NetworkBehaviour for HubIndexing {
-    type ProtocolsHandler = <RequestResponse<IndexingCodec> as NetworkBehaviour>::ProtocolsHandler;
-    type OutEvent = IndexingEvent;
+impl NetworkBehaviour for HubDiscovery {
+    type ProtocolsHandler = <RequestResponse<DiscoveryCodec> as NetworkBehaviour>::ProtocolsHandler;
+    type OutEvent = DiscoveryEvent;
 
     fn new_handler(&mut self) -> Self::ProtocolsHandler {
         self.inner.new_handler()
@@ -245,6 +234,8 @@ impl NetworkBehaviour for HubIndexing {
     }
 
     fn inject_connected(&mut self, peer_id: &PeerId) {
+        // when connecting ask for hub table
+        self.request(peer_id);
         self.inner.inject_connected(peer_id)
     }
 
@@ -282,32 +273,40 @@ impl NetworkBehaviour for HubIndexing {
         error: &DialError,
     ) {
         let req_res = handler;
+
+        let mut lock = self.hub_table.write().unwrap();
+        // if is in table then will be removed
+        if let Some(p) = peer_id {
+            lock.remove(&p);
+        }
+
         self.inner.inject_dial_failure(peer_id, req_res, error)
     }
 
-    fn inject_new_listen_addr(&mut self, id: ListenerId, addr: &Multiaddr) {
+    fn inject_new_listen_addr(&mut self, _id: ListenerId, addr: &Multiaddr) {
         // include self in peer table for syncing
-        self.inner.inject_new_listen_addr(id, addr)
+        self.multiaddr.push(addr.clone());
+        if self.hub {
+            self.hub_table
+                .write()
+                .unwrap()
+                .entry(self.peer_id)
+                .or_default()
+                .push(addr.clone());
+        }
     }
 
-    fn inject_expired_listen_addr(&mut self, id: ListenerId, addr: &Multiaddr) {
-        self.inner.inject_expired_listen_addr(id, addr)
-    }
-
-    fn inject_new_external_addr(&mut self, addr: &Multiaddr) {
-        self.inner.inject_new_external_addr(addr)
-    }
-
-    fn inject_expired_external_addr(&mut self, addr: &Multiaddr) {
-        self.inner.inject_expired_external_addr(addr)
-    }
-
-    fn inject_listener_error(&mut self, id: ListenerId, err: &(dyn Error + 'static)) {
-        self.inner.inject_listener_error(id, err)
-    }
-
-    fn inject_listener_closed(&mut self, id: ListenerId, reason: Result<(), &std::io::Error>) {
-        self.inner.inject_listener_closed(id, reason)
+    fn inject_expired_listen_addr(&mut self, _id: ListenerId, addr: &Multiaddr) {
+        // include self in peer table for syncing
+        self.multiaddr.retain(|x| x.clone() != addr.clone());
+        if self.hub {
+            self.hub_table
+                .write()
+                .unwrap()
+                .entry(self.peer_id)
+                .or_default()
+                .retain(|x| x.clone() != addr.clone());
+        }
     }
 
     fn inject_event(
@@ -363,21 +362,26 @@ impl NetworkBehaviour for HubIndexing {
                         request,
                         channel,
                     } => {
-                        let new_content = content_table_from_bytes(&request.clone().content_table);
-                        //  update our local content table,
-                        //  extend overwrites colliding keys (we assume inbound information is most up to date)
-                        self.content_table.write().unwrap().extend(new_content);
-                        let msg = IndexingResponse { id: request.id };
-                        // send response so we know the request was successful -- if we don't receive a response
-                        // we can prune hubs from our peer table etc...
+                        let new_addresses = peer_table_to_bytes(&self.hub_table.read().unwrap());
+
+                        let msg = DiscoveryResponse {
+                            id: request.id,
+                            addresses: new_addresses,
+                        };
                         self.inner.send_response(channel, msg).unwrap();
                     }
                     RequestResponseMessage::Response {
                         request_id: _,
                         response,
                     } => {
+                        //  addresses only get returned on a successful response
+                        let new_addresses = peer_table_from_bytes(&response.addresses);
+                        //  update our local peer table
+                        //  extend overwrites colliding keys (we assume inbound information is most up to date)
+                        self.hub_table.write().unwrap().extend(new_addresses);
+
                         return Poll::Ready(NetworkBehaviourAction::GenerateEvent(
-                            IndexingEvent::ResponseReceived(response),
+                            DiscoveryEvent::ResponseReceived(response),
                         ));
                     }
                 },
@@ -387,7 +391,7 @@ impl NetworkBehaviour for HubIndexing {
                     error,
                 } => {
                     println!(
-                        "peer Indexing outbound failure {} {} {:?}",
+                        "hub discovery outbound failure {} {} {:?}",
                         peer, request_id, error
                     );
                 }
@@ -397,7 +401,7 @@ impl NetworkBehaviour for HubIndexing {
                     error,
                 } => {
                     println!(
-                        "peer Indexing inbound failure {} {} {:?}",
+                        "hub discovery inbound failure {} {} {:?}",
                         peer, request_id, error
                     );
                 }
@@ -416,7 +420,6 @@ impl NetworkBehaviour for HubIndexing {
 mod tests {
     use super::*;
     use async_std::task;
-    use libipld::Cid;
     use libp2p::core::muxing::StreamMuxerBox;
     use libp2p::core::transport::Boxed;
     use libp2p::identity;
@@ -426,24 +429,10 @@ mod tests {
     use libp2p::yamux::YamuxConfig;
     use libp2p::{Multiaddr, PeerId, Swarm, Transport};
     use serde_cbor::{from_slice, to_vec};
-    use smallvec::SmallVec;
 
     #[test]
     fn request_serialization() {
-        let content = "12D3KooWET6WqHULAHLXVLnid8gFzyqEhKRQupt5hMWuqw9gwv2s"
-            .as_bytes()
-            .to_vec();
-        let multiaddr = Vec::from(["/ip4/127.0.0.1/tcp/0".as_bytes().to_vec()]);
-        let peer = "/ip4/127.0.0.1/tcp/0".as_bytes().to_vec();
-        let mut addresses = HashMap::new();
-        addresses.insert(peer, multiaddr);
-        let mut content_table = HashMap::new();
-        content_table.insert(content, addresses);
-
-        let req = IndexingRequest {
-            id: 1,
-            content_table,
-        };
+        let req = DiscoveryRequest { id: 1, hub: true };
 
         let msgc = req.clone();
         let msg_encoded = to_vec(&req).unwrap();
@@ -455,7 +444,11 @@ mod tests {
 
     #[test]
     fn response_serialization() {
-        let resp = IndexingResponse { id: 1 };
+        let multiaddr = Vec::from(["/ip4/127.0.0.1/tcp/0".as_bytes().to_vec()]);
+        let peer = "/ip4/127.0.0.1/tcp/0".as_bytes().to_vec();
+        let mut addresses = HashMap::new();
+        addresses.insert(peer, multiaddr);
+        let resp = DiscoveryResponse { id: 1, addresses };
 
         let msgc = resp.clone();
         let msg_encoded = to_vec(&resp).unwrap();
@@ -486,19 +479,15 @@ mod tests {
     struct Peer {
         peer_id: PeerId,
         addr: Vec<Multiaddr>,
-        swarm: Swarm<HubIndexing>,
+        swarm: Swarm<HubDiscovery>,
     }
 
     impl Peer {
-        fn new(
-            num_addreses: usize,
-            is_hub: bool,
-            hub_table: Option<Arc<RwLock<PeerTable>>>,
-        ) -> Self {
+        fn new(num_addreses: usize, is_hub: bool) -> Self {
             let (peer_id, trans) = mk_transport();
             let mut swarm = Swarm::new(
                 trans,
-                HubIndexing::new(Config::default(), is_hub, hub_table),
+                HubDiscovery::new(Config::default(), peer_id, is_hub, None),
                 peer_id,
             );
             for _i in 0..num_addreses {
@@ -514,8 +503,8 @@ mod tests {
             return peer;
         }
 
-        fn get_content_table(&mut self) -> Arc<RwLock<ContentTable>> {
-            return self.swarm.behaviour_mut().content_table.clone();
+        fn get_hub_table(&mut self) -> Arc<RwLock<PeerTable>> {
+            return self.swarm.behaviour_mut().hub_table.clone();
         }
 
         fn add_address(&mut self, peer: &Peer) {
@@ -524,7 +513,7 @@ mod tests {
             }
         }
 
-        fn swarm(&mut self) -> &mut Swarm<HubIndexing> {
+        fn swarm(&mut self) -> &mut Swarm<HubDiscovery> {
             &mut self.swarm
         }
 
@@ -532,13 +521,14 @@ mod tests {
             let peer_id = self.peer_id;
             task::spawn(async move {
                 loop {
-                    let _event = self.swarm.next().await;
+                    let event = self.swarm.next().await;
+                    println!("event {:?}", event);
                 }
             });
             peer_id
         }
 
-        async fn next(&mut self) -> Option<IndexingEvent> {
+        async fn next(&mut self) -> Option<DiscoveryEvent> {
             loop {
                 let ev = self.swarm.next().await?;
                 if let SwarmEvent::Behaviour(event) = ev {
@@ -548,8 +538,8 @@ mod tests {
         }
     }
 
-    fn assert_response_ok(event: Option<IndexingEvent>, id: RequestId) {
-        if let Some(IndexingEvent::ResponseReceived(responses)) = event {
+    fn assert_response_ok(event: Option<DiscoveryEvent>, id: RequestId) {
+        if let Some(DiscoveryEvent::ResponseReceived(responses)) = event {
             assert_eq!(responses.id, id);
         } else {
             panic!("{:?} is not a response event", event);
@@ -557,48 +547,46 @@ mod tests {
     }
 
     #[async_std::test]
-    async fn test_index_update() {
-        let cid = Cid::try_from("bafy2bzaceafciokjlt5v5l53pftj6zcmulc2huy3fduwyqsm3zo5bzkau7muq")
-            .unwrap();
-        let content = CidCbor::from(cid);
-        let host_peer = Peer::new(1, true, None);
-        let multiaddr = SmallVec::<[Multiaddr; 6]>::from(host_peer.addr);
-        let peer_id = host_peer.peer_id;
-        let peer_table: PeerTable = HashMap::from([(peer_id, multiaddr)]);
+    async fn test_request() {
+        //  will have empty hub table as not a hub
+        let mut peer1 = Peer::new(7, false);
+        // will have themselves in hub table
+        let peer2 = Peer::new(1, true);
+        let mut peer3 = Peer::new(3, true);
 
-        let mut hub_peer = Peer::new(3, true, None);
-        let hub_id = hub_peer.peer_id;
-        let hub_addr = SmallVec::<[Multiaddr; 6]>::from(hub_peer.addr.clone());
-        let hub_table: PeerTable = HashMap::from([(hub_id, hub_addr)]);
-        let mut peer1 = Peer::new(7, false, Some(Arc::new(RwLock::new(hub_table))));
-        peer1.swarm().behaviour_mut().add_entry(content, peer_table);
+        println!("before {:?}", peer3.get_hub_table().read().unwrap());
+        println!("before {:?}", peer1.get_hub_table().read().unwrap());
 
-        let mut peer2 = Peer::new(3, false, None);
-
-        println!("before {:?}", peer1.get_content_table().read().unwrap());
-        println!("before {:?}", peer2.get_content_table().read().unwrap());
-
-        peer1.add_address(&hub_peer);
+        // peer 3 knows peer 2 only and itself
+        peer3.add_address(&peer2);
+        // peer 1 knows peer 3 only and itself
         peer1.add_address(&peer2);
 
         //  print logs for peer 2
-        let hub_table = hub_peer.get_content_table().clone();
-        hub_peer.spawn("hub");
+        let peer2id = peer2.spawn("peer2");
 
-        // update remote hubs
-        peer1.swarm().behaviour_mut().update();
-
-        println!("after {:?}", peer2.get_content_table().read().unwrap());
-        println!("after {:?}", peer1.get_content_table().read().unwrap());
-
+        peer3.swarm().dial(peer2id).unwrap();
+        assert_response_ok(peer3.next().await, 1);
+        peer1.swarm().dial(peer2id).unwrap();
         assert_response_ok(peer1.next().await, 1);
 
-        // assert peer 2 table did not update
-        assert!(peer2.get_content_table().read().unwrap().is_empty());
+        println!("after {:?}", peer3.get_hub_table().read().unwrap());
+        println!("after {:?}", peer1.get_hub_table().read().unwrap());
 
-        assert_eq!(
-            *hub_table.read().unwrap(),
-            *peer1.get_content_table().read().unwrap()
-        );
+        let table1 = peer1.get_hub_table();
+        let lock1 = table1.read().unwrap();
+
+        let table3 = peer3.get_hub_table();
+        let lock3 = table3.read().unwrap();
+
+        let mut k1: Vec<&PeerId> = lock1.keys().collect();
+        let mut k3: Vec<&PeerId> = lock3.keys().collect();
+
+        assert_eq!(k1.sort(), k3.sort());
+
+        let mut v1: Vec<&SmallVec<[Multiaddr; 6]>> = lock1.values().collect();
+        let mut v3: Vec<&SmallVec<[Multiaddr; 6]>> = lock3.values().collect();
+
+        assert_eq!(v1.sort(), v3.sort());
     }
 }

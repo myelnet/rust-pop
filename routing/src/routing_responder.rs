@@ -1,4 +1,4 @@
-use crate::hub_discovery::SerializablePeerTable;
+use crate::discovery::SerializablePeerTable;
 use filecoin::{cid_helpers::CidCbor, types::Cbor};
 use futures::future::BoxFuture;
 use futures::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};

@@ -1,24 +1,37 @@
-mod hub_discovery;
-mod hub_indexing;
-mod network;
+mod discovery;
+mod routing_responder;
 mod utils;
+use blockstore::types::BlockStore;
+use data_transfer::{DataTransfer, DataTransferEvent, DealParams};
+use discovery::Config as DiscoveryConfig;
+use discovery::{DiscoveryEvent, HubDiscovery, PeerTable, SerializablePeerTable};
 use filecoin::{cid_helpers::CidCbor, types::Cbor};
-use hub_discovery::Config as DiscoveryConfig;
-use hub_discovery::{DiscoveryEvent, HubDiscovery, PeerTable};
-use hub_indexing::Config as IndexingConfig;
-use hub_indexing::{ContentTable, HubIndexing, IndexingEvent};
+use graphsync::traversal::{RecursionLimit, Selector};
+use libipld::codec::Decode;
+use libipld::store::StoreParams;
+use libipld::{Cid, Ipld};
 use libp2p::gossipsub::{Gossipsub, GossipsubEvent, GossipsubMessage, IdentTopic};
 use libp2p::swarm::{
     NetworkBehaviour, NetworkBehaviourAction, NetworkBehaviourEventProcess, PollParameters,
 };
 use libp2p::{Multiaddr, NetworkBehaviour, PeerId};
-use network::{RoutingNetEvent, RoutingNetwork, RoutingProposal, EMPTY_QUEUE_SHRINK_THRESHOLD};
+use routing_responder::{
+    RoutingNetEvent, RoutingNetwork, RoutingProposal, EMPTY_QUEUE_SHRINK_THRESHOLD,
+};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io;
 use std::sync::{Arc, RwLock};
 use std::task::{Context, Poll};
-use utils::content_routing_init;
+use utils::gossip_init;
+
+pub type Index = HashMap<CidCbor, PeerTable>;
+pub type LocalIndex = HashSet<CidCbor>;
+pub type SerializableIndex = HashMap<Vec<u8>, SerializablePeerTable>;
+pub type SerializableLocalIndex = HashSet<Vec<u8>>;
+
+pub const ROUTING_TOPIC: &str = "myel/content-routing";
+pub const SYNCING_TOPIC: &str = "myel/index-syncing";
 
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct ContentRequest {
@@ -27,10 +40,18 @@ pub struct ContentRequest {
 }
 impl Cbor for ContentRequest {}
 
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
+pub struct SyncRequest {
+    pub multiaddresses: Vec<Multiaddr>,
+    pub index_root: CidCbor,
+}
+impl Cbor for SyncRequest {}
+
 #[derive(Debug)]
 pub enum RoutingEvent {
-    RequestSent(Vec<u8>),
+    ContentRequestBroadcast(Vec<u8>),
     FoundContent(Vec<u8>),
+    SyncRequestBroadcast(Vec<u8>),
     HubTableUpdated,
     HubIndexUpdated,
     RoutingTableUpdated,
@@ -38,11 +59,15 @@ pub enum RoutingEvent {
 
 #[derive(NetworkBehaviour)]
 #[behaviour(out_event = "RoutingEvent", poll_method = "poll", event_process = true)]
-pub struct Routing {
-    hub_discovery: HubDiscovery,
-    hub_indexing: HubIndexing,
-    content_routing: Gossipsub,
-    routing_network: RoutingNetwork,
+pub struct Routing<S: 'static + BlockStore>
+where
+    Ipld: Decode<<S::Params as StoreParams>::Codecs>,
+{
+    discovery: HubDiscovery,
+    syncing_broadcaster: Gossipsub,
+    syncing_responder: DataTransfer<S>,
+    routing_broadcaster: Gossipsub,
+    routing_responder: RoutingNetwork,
 
     #[behaviour(ignore)]
     peer_id: PeerId,
@@ -50,48 +75,71 @@ pub struct Routing {
     is_hub: bool,
     #[behaviour(ignore)]
     pending_events: VecDeque<RoutingEvent>,
+    // a map of who has the content we made requests for
     #[behaviour(ignore)]
-    multiaddresses: Arc<Vec<Multiaddr>>,
-    #[behaviour(ignore)]
-    routing_table: ContentTable,
+    routing_table: Index,
 }
 
-impl Routing {
-    pub fn new(peer_id: PeerId, is_hub: bool, hub_table: Option<Arc<RwLock<PeerTable>>>) -> Self {
+impl<S: 'static + BlockStore> Routing<S>
+where
+    Ipld: Decode<<S::Params as StoreParams>::Codecs>,
+{
+    pub fn new(
+        peer_id: PeerId,
+        is_hub: bool,
+        syncing_responder: DataTransfer<S>,
+        hub_table: Option<Arc<RwLock<PeerTable>>>,
+    ) -> Self {
         // if no hub table was passed then initialize a dummy one (mainly for testing purposes)
         let hub_table: Arc<RwLock<PeerTable>> =
             hub_table.unwrap_or_else(|| Arc::new(RwLock::new(HashMap::new())));
-        let hub_discovery = HubDiscovery::new(
+        let discovery = HubDiscovery::new(
             DiscoveryConfig::default(),
             peer_id,
             is_hub,
             Some(hub_table.clone()),
         );
-        let hub_indexing = HubIndexing::new(IndexingConfig::default(), is_hub, Some(hub_table));
         //  topic with identity hash
-        let content_routing =
-            content_routing_init(peer_id, IdentTopic::new("myel/content-routing"));
+        let routing_broadcaster = gossip_init(peer_id, IdentTopic::new(ROUTING_TOPIC));
+        let syncing_broadcaster = gossip_init(peer_id, IdentTopic::new(SYNCING_TOPIC));
 
         Self {
             peer_id,
             is_hub,
-            hub_discovery,
-            hub_indexing,
-            content_routing,
-            routing_network: RoutingNetwork::new(),
+            discovery,
+            syncing_broadcaster,
+            syncing_responder,
+            routing_broadcaster,
+            routing_responder: RoutingNetwork::new(),
             pending_events: VecDeque::default(),
-            multiaddresses: Arc::new(Vec::new()),
             routing_table: HashMap::new(),
         }
     }
 
-    pub fn update_hubs(&mut self) {
-        self.hub_indexing.update();
+    pub fn broadcast_update(&mut self, index_root: CidCbor) -> Result<(), io::Error> {
+        let msg = SyncRequest {
+            multiaddresses: self.discovery.multiaddr.to_vec(),
+            index_root: index_root.clone(),
+        }
+        .marshal_cbor()
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+        // Because Topic is not thread safe (the hasher it uses can't be safely shared across threads)
+        // we create a new instantiation of the Topic for each publication, in most examples Topic is
+        // cloned anyway
+        let msg_id = self
+            .routing_broadcaster
+            .publish(IdentTopic::new(SYNCING_TOPIC), msg)
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+        self.pending_events
+            .push_back(RoutingEvent::SyncRequestBroadcast(
+                index_root.bytes().clone(),
+            ));
+        Ok(())
     }
 
     pub fn find_content(&mut self, root: CidCbor) -> Result<(), io::Error> {
         let msg = ContentRequest {
-            multiaddresses: self.multiaddresses.to_vec(),
+            multiaddresses: self.discovery.multiaddr.to_vec(),
             root,
         }
         .marshal_cbor()
@@ -100,29 +148,26 @@ impl Routing {
         // we create a new instantiation of the Topic for each publication, in most examples Topic is
         // cloned anyway
         let msg_id = self
-            .content_routing
-            .publish(IdentTopic::new("myel/content-routing"), msg)
+            .routing_broadcaster
+            .publish(IdentTopic::new(ROUTING_TOPIC), msg)
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
         self.pending_events
-            .push_back(RoutingEvent::RequestSent(msg_id.0));
+            .push_back(RoutingEvent::ContentRequestBroadcast(msg_id.0));
         Ok(())
     }
 
     pub fn add_address(&mut self, peer_id: &PeerId, addr: Multiaddr) {
-        self.hub_discovery.add_address(peer_id, addr);
-        self.content_routing.add_explicit_peer(peer_id);
+        self.discovery.add_address(peer_id, addr);
+        self.routing_broadcaster.add_explicit_peer(peer_id);
+        self.syncing_broadcaster.add_explicit_peer(peer_id);
     }
 
     fn addresses_of_peer(&mut self, peer_id: &PeerId) -> Vec<Multiaddr> {
-        self.hub_discovery.addresses_of_peer(peer_id)
+        self.discovery.addresses_of_peer(peer_id)
     }
 
-    fn process_discovery_response(&mut self) {
-        self.pending_events.push_back(RoutingEvent::HubTableUpdated);
-    }
-
-    fn process_indexing_response(&mut self) {
-        self.pending_events.push_back(RoutingEvent::HubIndexUpdated);
+    fn insert_routing_entry(&mut self, root: CidCbor, peers: PeerTable) {
+        self.routing_table.insert(root, peers);
     }
 
     fn delete_routing_entry(&mut self, root: &CidCbor) {
@@ -131,6 +176,10 @@ impl Routing {
 
     fn reset_routing_table(&mut self) {
         self.routing_table = HashMap::new();
+    }
+
+    fn process_discovery_response(&mut self) {
+        self.pending_events.push_back(RoutingEvent::HubTableUpdated);
     }
 
     fn process_routing_response(&mut self, root: CidCbor, peer_table: PeerTable) {
@@ -142,7 +191,7 @@ impl Routing {
             .push_back(RoutingEvent::RoutingTableUpdated);
     }
 
-    fn process_gossip_message(
+    fn process_routing_request(
         &mut self,
         peer_id: PeerId,
         message: GossipsubMessage,
@@ -155,18 +204,45 @@ impl Routing {
             //  if the sent Cid is valid
             if let Some(r) = req.root.to_cid() {
                 //  if content table contains the root cid, if not then do nothing
-                let table_read = self.hub_indexing.content_table.read().unwrap();
-                if let Some(peer_table) = table_read.get(&req.root) {
+                if let Some(peer_table) = self.routing_table.get(&req.root) {
                     let message = RoutingProposal {
                         root: req.root,
                         peers: Some(utils::peer_table_to_bytes(peer_table)),
                     };
-                    self.routing_network.send_message(&peer_id, message);
+                    self.routing_responder.send_message(&peer_id, message);
                     self.pending_events
                         .push_back(RoutingEvent::FoundContent(r.to_bytes()));
                 }
             } else {
                 return Err(io::Error::new(io::ErrorKind::Other, "invalid cid"));
+            }
+        }
+
+        Ok(())
+    }
+
+    fn process_sync_request(
+        &mut self,
+        peer_id: PeerId,
+        message: GossipsubMessage,
+    ) -> Result<(), io::Error> {
+        // only hubs should respond
+        if self.is_hub {
+            let req = SyncRequest::unmarshal_cbor(&message.data)
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+
+            let selector = Selector::ExploreRecursive {
+                limit: RecursionLimit::None,
+                sequence: Box::new(Selector::ExploreAll {
+                    next: Box::new(Selector::ExploreRecursiveEdge),
+                }),
+                current: None,
+            };
+
+            if let Some(cid) = req.index_root.to_cid() {
+                let id = self
+                    .syncing_responder
+                    .pull(peer_id, cid, selector, DealParams::default());
             }
         }
 
@@ -192,7 +268,10 @@ impl Routing {
     }
 }
 
-impl NetworkBehaviourEventProcess<DiscoveryEvent> for Routing {
+impl<S: 'static + BlockStore> NetworkBehaviourEventProcess<DiscoveryEvent> for Routing<S>
+where
+    Ipld: Decode<<S::Params as StoreParams>::Codecs>,
+{
     fn inject_event(&mut self, event: DiscoveryEvent) {
         match event {
             DiscoveryEvent::ResponseReceived(_) => self.process_discovery_response(),
@@ -200,7 +279,21 @@ impl NetworkBehaviourEventProcess<DiscoveryEvent> for Routing {
     }
 }
 
-impl NetworkBehaviourEventProcess<RoutingNetEvent> for Routing {
+impl<S: 'static + BlockStore> NetworkBehaviourEventProcess<DataTransferEvent> for Routing<S>
+where
+    Ipld: Decode<<S::Params as StoreParams>::Codecs>,
+{
+    fn inject_event(&mut self, event: DataTransferEvent) {
+        match event {
+            _ => {}
+        }
+    }
+}
+
+impl<S: 'static + BlockStore> NetworkBehaviourEventProcess<RoutingNetEvent> for Routing<S>
+where
+    Ipld: Decode<<S::Params as StoreParams>::Codecs>,
+{
     fn inject_event(&mut self, event: RoutingNetEvent) {
         match event {
             RoutingNetEvent::Response(_, resp) => {
@@ -212,15 +305,10 @@ impl NetworkBehaviourEventProcess<RoutingNetEvent> for Routing {
     }
 }
 
-impl NetworkBehaviourEventProcess<IndexingEvent> for Routing {
-    fn inject_event(&mut self, event: IndexingEvent) {
-        match event {
-            IndexingEvent::ResponseReceived(_) => self.process_indexing_response(),
-        }
-    }
-}
-
-impl NetworkBehaviourEventProcess<GossipsubEvent> for Routing {
+impl<S: 'static + BlockStore> NetworkBehaviourEventProcess<GossipsubEvent> for Routing<S>
+where
+    Ipld: Decode<<S::Params as StoreParams>::Codecs>,
+{
     fn inject_event(&mut self, event: GossipsubEvent) {
         match event {
             GossipsubEvent::Message {
@@ -234,7 +322,13 @@ impl NetworkBehaviourEventProcess<GossipsubEvent> for Routing {
                     id,
                     peer_id
                 );
-                self.process_gossip_message(peer_id, message).unwrap();
+                if let Some(s) = message.source {
+                    if message.topic == IdentTopic::new(ROUTING_TOPIC).hash() {
+                        self.process_routing_request(s, message).unwrap();
+                    } else if message.topic == IdentTopic::new(SYNCING_TOPIC).hash() {
+                        self.process_sync_request(s, message).unwrap();
+                    }
+                }
             }
             _ => println!("gossip event: {:?}", event),
         }
@@ -245,7 +339,9 @@ impl NetworkBehaviourEventProcess<GossipsubEvent> for Routing {
 mod tests {
     use super::*;
     use async_std::task;
+    use blockstore::memory::MemoryDB as MemoryBlockStore;
     use futures::prelude::*;
+    use graphsync::Graphsync;
     use libipld::Cid;
     use libp2p::core::muxing::StreamMuxerBox;
     use libp2p::core::transport::Boxed;
@@ -279,13 +375,17 @@ mod tests {
     struct Peer {
         peer_id: PeerId,
         addr: Multiaddr,
-        swarm: Swarm<Routing>,
+        swarm: Swarm<Routing<MemoryBlockStore>>,
+        store: Arc<MemoryBlockStore>,
     }
 
     impl Peer {
         fn new(is_hub: bool, hub_table: Option<Arc<RwLock<PeerTable>>>) -> Self {
             let (peer_id, trans) = mk_transport();
-            let rt = Routing::new(peer_id, is_hub, hub_table);
+            let bs = Arc::new(MemoryBlockStore::default());
+            let gs = Graphsync::new(Default::default(), bs.clone());
+            let dt = DataTransfer::new(peer_id, gs);
+            let rt = Routing::new(peer_id, is_hub, dt, hub_table);
             let mut swarm = Swarm::new(trans, rt, peer_id);
             Swarm::listen_on(&mut swarm, "/ip4/127.0.0.1/tcp/0".parse().unwrap()).unwrap();
             while swarm.next().now_or_never().is_some() {}
@@ -294,20 +394,16 @@ mod tests {
                 peer_id,
                 addr,
                 swarm,
+                store: bs,
             }
         }
 
         fn get_hub_table(&mut self) -> Arc<RwLock<PeerTable>> {
-            return self.swarm.behaviour_mut().hub_discovery.hub_table.clone();
+            return self.swarm.behaviour_mut().discovery.hub_table.clone();
         }
 
-        fn get_content_table(&mut self) -> Arc<RwLock<ContentTable>> {
-            return self
-                .swarm
-                .behaviour_mut()
-                .hub_indexing
-                .content_table
-                .clone();
+        fn get_index(&mut self) -> Index {
+            return self.swarm.behaviour_mut().routing_table.clone();
         }
 
         fn add_address(&mut self, peer: &Peer) {
@@ -316,7 +412,7 @@ mod tests {
                 .add_address(&peer.peer_id, peer.addr.clone());
         }
 
-        fn swarm(&mut self) -> &mut Swarm<Routing> {
+        fn swarm(&mut self) -> &mut Swarm<Routing<MemoryBlockStore>> {
             &mut self.swarm
         }
 
@@ -436,8 +532,7 @@ mod tests {
         peer1
             .swarm()
             .behaviour_mut()
-            .hub_indexing
-            .add_entry(content, peer_table);
+            .insert_routing_entry(content, peer_table);
 
         let mut peer2 = Peer::new(false, None);
 
@@ -445,26 +540,23 @@ mod tests {
         peer1.add_address(&peer2);
 
         //  print logs for hub peer
-        let hub_table = hub_peer.get_content_table().clone();
+        let hub_table = hub_peer.get_index().clone();
         let hubid = hub_peer.spawn("hub");
 
         peer1.swarm().dial(hubid).unwrap();
         peer1.next_discovery().await;
 
         // update remote hubs
-        peer1.swarm().behaviour_mut().update_hubs();
+        // peer1.swarm().behaviour_mut().broadcast_update();
         peer1.next_indexing().await;
 
         // assert peer 2 table did not update
-        assert!(peer2.get_content_table().read().unwrap().is_empty());
+        assert!(peer2.get_index().is_empty());
 
-        assert_eq!(
-            *hub_table.read().unwrap(),
-            *peer1.get_content_table().read().unwrap()
-        );
+        assert_eq!(hub_table, peer1.get_index());
     }
     #[async_std::test]
-    async fn test_content_routing() {
+    async fn test_routing_broadcaster() {
         let cid = Cid::try_from("bafy2bzaceafciokjlt5v5l53pftj6zcmulc2huy3fduwyqsm3zo5bzkau7muq")
             .unwrap();
         let content = CidCbor::from(cid);
@@ -479,8 +571,7 @@ mod tests {
         peer1
             .swarm()
             .behaviour_mut()
-            .hub_indexing
-            .add_entry(content.clone(), peer_table);
+            .insert_routing_entry(content.clone(), peer_table);
 
         //  peers 2 and 3 are unaware of the hub, but peer 1 and 4 are aware of it
         let mut peer2 = Peer::new(false, None);
@@ -495,7 +586,7 @@ mod tests {
         peer4.add_address(&hub_peer);
 
         //  print logs for hub peer
-        let hub_table = hub_peer.get_content_table().clone();
+        let hub_table = hub_peer.get_index().clone();
         let hubid = hub_peer.spawn("hub");
 
         //  print logs for hub peer
@@ -503,13 +594,10 @@ mod tests {
         peer1.next_discovery().await;
 
         // update remote hubs
-        peer1.swarm().behaviour_mut().update_hubs();
+        // peer1.swarm().behaviour_mut().broadcast_update();
         peer1.next_indexing().await;
 
-        assert_eq!(
-            *hub_table.read().unwrap(),
-            *peer1.get_content_table().read().unwrap()
-        );
+        assert_eq!(hub_table, peer1.get_index());
 
         //  print logs for hub peer
         peer4.swarm().dial(hubid).unwrap();
@@ -518,9 +606,6 @@ mod tests {
         peer4.next_routing().await;
 
         // assert the content table updated correctly
-        assert_eq!(
-            *hub_table.read().unwrap(),
-            peer4.swarm().behaviour_mut().routing_table
-        );
+        assert_eq!(hub_table, peer4.get_index());
     }
 }

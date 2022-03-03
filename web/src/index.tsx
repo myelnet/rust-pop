@@ -55,31 +55,46 @@ function Spinner() {
   );
 }
 
+class Client {
+  node: any;
+  pool: any;
+  constructor() {
+    //@ts-ignore
+    const { Node, WorkerPool } = wasm_bindgen;
+    this.node = new Node();
+    this.pool = new WorkerPool(2);
+  }
+  fetch(path: string, maddr: string): Promise<Response> {
+    const parts = maddr.split("/p2p/");
+    return this.node.spawn_request(
+      {
+        maddress: parts[0],
+        peerId: parts[1],
+        cid: path,
+      },
+      this.pool
+    );
+  }
+}
+
 function App() {
   const [root, setRoot] = useState(localStorage.getItem(CID_KEY) ?? "");
   const [maddr, setMaddr] = useState(localStorage.getItem(ADDR_KEY) ?? "");
   const [img, setImg] = useState("");
   const [vid, setVid] = useState("");
   const [loading, setLoading] = useState(false);
-  const [wasmLoaded, setWasmLoaded] = useState(false);
+  const [client, setClient] = useState<Client | null>(null);
 
   const disabled = !root || !maddr || loading;
 
   function sendRequest() {
-    if (disabled) {
+    if (disabled || !client) {
       return;
     }
     setLoading(true);
     const start = performance.now();
-    //@ts-ignore
-    const { request } = wasm_bindgen;
-    const parts = maddr.split("/p2p/");
-    request({
-      logLevel: "info",
-      maddress: parts[0],
-      peerId: parts[1],
-      cid: root,
-    })
+    client
+      .fetch(root, maddr)
       .then((res) => res.blob())
       .then((blob) => {
         const url = URL.createObjectURL(blob);
@@ -104,20 +119,9 @@ function App() {
     if (wasm_bindgen) {
       // @ts-ignore
       wasm_bindgen("pop_bg.wasm").then(() => {
-        setWasmLoaded(true);
+        setClient(new Client());
       });
     }
-    //@ts-ignore
-    // const { DagService, WorkerPool } = wasm_bindgen;
-    // const pool = new WorkerPool(1);
-    // const dag = new DagService();
-    // dag
-    //   .string_to_block("hellot world", pool)
-    //   .then(console.log)
-    //   .catch(console.error);
-    // })
-    // .catch(console.error);
-    // }
   }, []);
   return (
     <div className="app">
@@ -153,7 +157,7 @@ function App() {
       <button className="btn" onClick={sendRequest} disabled={disabled}>
         request
       </button>
-      <p className="p">{wasmLoaded && "wasm loaded"}</p>
+      <p className="p">{!!client && "wasm loaded"}</p>
     </div>
   );
 }

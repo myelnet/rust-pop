@@ -25,7 +25,7 @@ pub fn add<S: BlockStore>(store: Arc<S>, data: &[u8]) -> Result<Option<Cid>, Str
 
     let mut root: Option<Cid> = None;
     for (cid, bytes) in blocks {
-        root = Some(cid.clone());
+        root = Some(cid);
         let block = Block::<S::Params>::new_unchecked(cid, bytes);
         store.insert(&block).map_err(|e| e.to_string())?;
     }
@@ -64,11 +64,11 @@ pub fn add_from_read<S: BlockStore, F: Read>(
     let blocks = adder.finish();
     let mut root: Option<(Cid, u64)> = None;
     for (cid, bytes) in blocks {
-        root = Some((cid.clone(), size as u64));
+        root = Some((cid, size as u64));
         let block = Block::<S::Params>::new_unchecked(cid, bytes);
         store.insert(&block).map_err(|e| e.to_string())?;
     }
-    return Ok(root);
+    Ok(root)
 }
 
 pub async fn add_from_stream<S: BlockStore>(
@@ -99,7 +99,7 @@ pub async fn add_from_stream<S: BlockStore>(
     let blocks = adder.finish();
     let mut root: Option<Cid> = None;
     for (cid, bytes) in blocks {
-        root = Some(cid.clone());
+        root = Some(cid);
         let block = Block::<S::Params>::new_unchecked(cid, bytes);
         store.insert(&block).map_err(|e| e.to_string())?;
     }
@@ -122,7 +122,7 @@ pub fn cat<S: BlockStore>(store: Arc<S>, root: Cid) -> Result<Vec<u8>, String> {
 
     while let Some(visit) = step {
         let (first, _) = visit.pending_links();
-        let block = store.get(&first).map_err(|e| e.to_string())?;
+        let block = store.get(first).map_err(|e| e.to_string())?;
 
         let (content, next_step) = visit
             .continue_walk(block.data(), &mut None)
@@ -150,7 +150,7 @@ pub fn cat_to_write<S: BlockStore, F: Write>(
 
     while let Some(visit) = step {
         let (first, _) = visit.pending_links();
-        let block = store.get(&first).map_err(|e| e.to_string())?;
+        let block = store.get(first).map_err(|e| e.to_string())?;
 
         let (content, next_step) = visit
             .continue_walk(block.data(), &mut None)
@@ -178,7 +178,7 @@ impl<R: Read> Read for Entry<R> {
 pub fn add_entries<S: BlockStore, R: Read>(
     store: Arc<S>,
     mut entries: Vec<Entry<R>>,
-) -> Result<Option<Cid>, String> {
+) -> Result<(Cid, u64), String> {
     let mut options = TreeOptions::default();
     options.wrap_with_directory();
     let mut builder = BufferingTreeBuilder::new(options);
@@ -190,14 +190,19 @@ pub fn add_entries<S: BlockStore, R: Read>(
         }
     }
     let mut iter = builder.build();
-    let mut root: Option<Cid> = None;
-    while let Some(res) = iter.next_borrowed() {
-        let TreeNode { cid, block, .. } = res.map_err(|e| e.to_string())?;
+    // should be creating a single directory so no need to iterate
+    if let Some(res) = iter.next_borrowed() {
+        let TreeNode {
+            cid,
+            block,
+            total_size,
+            ..
+        } = res.map_err(|e| e.to_string())?;
         let block = Block::<S::Params>::new_unchecked(*cid, block.to_vec());
         store.insert(&block).map_err(|e| e.to_string())?;
-        root = Some(*cid);
+        return Ok((*cid, total_size));
     }
-    Ok(root)
+    Err("Failed to create directory".to_string())
 }
 
 #[cfg(test)]
@@ -240,6 +245,6 @@ mod tests {
             })
         }
         let store = Arc::new(MemoryDB::default());
-        let _root = add_entries(store, entries).unwrap().unwrap();
+        let (_root, _size) = add_entries(store, entries).unwrap();
     }
 }

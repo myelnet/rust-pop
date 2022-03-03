@@ -1155,7 +1155,7 @@ mod tests {
             })
         }
 
-        let root = add_entries(store.clone(), entries).unwrap().unwrap();
+        let (root, _size) = add_entries(store.clone(), entries).unwrap();
 
         let (_, selector) = unixfs_path_selector(format!("{}/file-2", root.to_string())).unwrap();
 

@@ -1,8 +1,8 @@
 use async_std::task;
 use blockstore::types::BlockStore;
-use dag_service;
+use dag_service::{self, add_entries, Entry};
 use data_transfer::{DataTransfer, DealParams};
-use graphsync::traversal::{RecursionLimit, Selector};
+use graphsync::traversal::unixfs_path_selector;
 use libipld::codec::Decode;
 use libipld::store::StoreParams;
 use libipld::{Cid, Ipld};
@@ -13,10 +13,10 @@ use libp2p::{
     dns, identity, mplex, noise, tcp, websocket, Multiaddr, PeerId, Swarm, Transport,
 };
 use parking_lot::Mutex;
-use std::fs::File;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
+use std::{fs, io};
 use warp::{http, reject::Reject, Rejection};
 
 #[derive(Debug, Clone)]
@@ -75,13 +75,57 @@ pub async fn read_file<B: BlockStore>(
 where
     Ipld: Decode<<<B as BlockStore>::Params as StoreParams>::Codecs>,
 {
-    let mut f = File::open(path)
+    let metadata = fs::metadata(path.clone())
         .map_err(|e| warp::reject::custom(Failure::InvalidPath { err: e.to_string() }))?;
-    let root = dag_service::add_from_read(store.clone(), &mut f)
-        .map_err(|e| warp::reject::custom(Failure::ReadFailure { err: e.to_string() }))?;
-    let resp = format!("added file {:?} to blockstore", root.unwrap().to_string());
-    println!("{:?}", resp);
-    Ok(warp::reply::with_status(resp, http::StatusCode::CREATED))
+    if metadata.is_file() {
+        let mut f = fs::File::open(path)
+            .map_err(|e| warp::reject::custom(Failure::InvalidPath { err: e.to_string() }))?;
+        let result = dag_service::add_from_read(store.clone(), &mut f)
+            .map_err(|e| warp::reject::custom(Failure::ReadFailure { err: e.to_string() }))?;
+        return result
+            .and_then(|(root, size)| {
+                // map the result to another result containing a simple string
+                Some(format!(
+                    "added file {:?} ({}bytes) to blockstore",
+                    root, size
+                ))
+            })
+            .map(|resp| warp::reply::with_status(resp, http::StatusCode::CREATED))
+            .ok_or(warp::reject::not_found());
+    }
+    if metadata.is_dir() {
+        return fs::read_dir(path)
+            .and_then(|paths| {
+                // if reading the directory is successful open all the file entries
+                // if one of the file fails to open we just ignore it
+                let files: Vec<(String, fs::File)> = paths
+                    .filter_map(|p| {
+                        p.and_then(|e| {
+                            let file = fs::File::open(e.path())?;
+                            Ok((e.file_name().into_string().unwrap(), file))
+                        })
+                        .ok()
+                    })
+                    .collect();
+                let (cid, size) = add_entries(
+                    store,
+                    files
+                        .iter()
+                        .map(|(n, r)| Entry {
+                            name: n.to_string(),
+                            reader: r,
+                        })
+                        .collect(),
+                )
+                .map_err(|s| io::Error::new(io::ErrorKind::Other, s))?;
+                Ok(warp::reply::with_status(
+                    format!("added dir {:?} ({}bytes) to blockstore", cid, size),
+                    http::StatusCode::CREATED,
+                ))
+            })
+            .map_err(|e| warp::reject::custom(Failure::ReadFailure { err: e.to_string() }));
+    }
+    Err(warp::reject::not_found())
 }
 
 pub async fn export_file<B: BlockStore>(
@@ -94,7 +138,7 @@ where
 {
     let cid = Cid::try_from(key)
         .map_err(|e| warp::reject::custom(Failure::InvalidCid { err: e.to_string() }))?;
-    let file = File::create(path).unwrap();
+    let file = fs::File::create(path).unwrap();
     dag_service::cat_to_write(store.clone(), cid, file)
         .map_err(|e| warp::reject::custom(Failure::WriteFailure { err: e.to_string() }))?;
     let resp = format!("loaded file {:?} from blockstore", cid.to_string());
@@ -110,16 +154,10 @@ pub async fn retrieve_file<B: 'static + BlockStore>(
 where
     Ipld: Decode<<<B as BlockStore>::Params as StoreParams>::Codecs>,
 {
-    let selector = Selector::ExploreRecursive {
-        limit: RecursionLimit::None,
-        sequence: Box::new(Selector::ExploreAll {
-            next: Box::new(Selector::ExploreRecursiveEdge),
-        }),
-        current: None,
-    };
-
-    let cid = Cid::try_from(key)
-        .map_err(|e| warp::reject::custom(Failure::InvalidCid { err: e.to_string() }))?;
+    let (cid, selector) =
+        unixfs_path_selector(key).ok_or(warp::reject::custom(Failure::InvalidCid {
+            err: "Failed to parse ipfs path".to_string(),
+        }))?;
     let peer = PeerId::from_str(&peer)
         .map_err(|e| warp::reject::custom(Failure::InvalidPeerId { err: e.to_string() }))?;
     let multiaddr = Multiaddr::try_from(multiaddr)

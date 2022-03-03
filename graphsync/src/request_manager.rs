@@ -120,12 +120,13 @@ where
 
         for block in blocks.iter() {
             for (_, res) in msg.responses.iter() {
-                let metadata: Option<Vec<MetadataItem>> = res
-                    .extensions
-                    .get(METADATA_EXTENSION)
-                    .map(|data| from_slice(&data[..]).ok())
-                    .flatten();
-                log::info!("metadata {:?}", metadata);
+                // TODO
+                // let metadata: Option<Vec<MetadataItem>> = res
+                //     .extensions
+                //     .get(METADATA_EXTENSION)
+                //     .map(|data| from_slice(&data[..]).ok())
+                //     .flatten();
+                // log::info!("metadata {:?}", metadata);
                 if let Some(sender) = self.ongoing.lock().unwrap().get(&res.id) {
                     sender.try_send(block.clone()).unwrap();
                 }

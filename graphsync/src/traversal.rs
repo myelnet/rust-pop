@@ -16,7 +16,7 @@ use protobuf::ProtobufError;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_cbor::{error::Error as CborError, from_slice, to_vec};
 use smallvec::SmallVec;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 use std::io::Error as StdError;
 use std::sync::Arc;
@@ -853,7 +853,8 @@ where
 }
 
 pub fn unixfs_path_selector(path: String) -> Option<(Cid, Selector)> {
-    let segments: Vec<&str> = path.split("/").collect();
+    let segments: Vec<&str> = path.split('/').collect();
+    // defaults to a full traversal
     let mut selector = Selector::ExploreRecursive {
         limit: RecursionLimit::None,
         sequence: Box::new(Selector::ExploreAll {
@@ -1551,7 +1552,7 @@ mod tests {
             })
         }
         let store = Arc::new(MemoryBlockStore::default());
-        let root = add_entries(store.clone(), entries).unwrap().unwrap();
+        let (root, _size) = add_entries(store.clone(), entries).unwrap();
 
         let (root2, selector) =
             unixfs_path_selector(format!("{}/file-2", root.to_string())).unwrap();

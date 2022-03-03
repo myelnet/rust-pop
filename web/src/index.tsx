@@ -72,9 +72,9 @@ function App() {
     setLoading(true);
     const start = performance.now();
     //@ts-ignore
-    const { request_bg } = wasm_bindgen;
+    const { request } = wasm_bindgen;
     const parts = maddr.split("/p2p/");
-    request_bg({
+    request({
       logLevel: "info",
       maddress: parts[0],
       peerId: parts[1],

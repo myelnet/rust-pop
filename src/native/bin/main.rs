@@ -1,6 +1,6 @@
 use blockstore::db::Db as BlockstoreDB;
 use blockstore::lfu::LfuBlockstore;
-use clap::{App, Arg};
+use clap::{Arg, Command};
 // use libipld::Cid;
 // // use libp2p::{Multiaddr, PeerId};
 use pop::{Node, NodeConfig};
@@ -10,32 +10,34 @@ use std::error::Error;
 
 #[async_std::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    let app = App::new("PoP")
+    let app = Command::new("PoP")
         .author("Myel")
         .version("0.0.1")
         .about("Runs a cache provider node on the Myel network")
         .subcommand(
-            App::new("start").override_help("starts a pop node").arg(
-                Arg::new("peers")
-                    .short('p')
-                    .long("peers")
-                    .help("peer multi-addresses to connect to from start"),
-            ),
-        )
-        .subcommand(
-            App::new("add")
-                .override_help("adds a local file to pop node blockstore")
+            Command::new("start")
+                .override_help("starts a pop node")
                 .arg(
-                    Arg::new("file")
-                        .short('f')
-                        .takes_value(true)
-                        .long("file")
-                        .required(true)
-                        .help("file to add to node blockstore"),
+                    Arg::new("peers")
+                        .short('p')
+                        .long("peers")
+                        .help("peer multi-addresses to connect to from start"),
                 ),
         )
         .subcommand(
-            App::new("export")
+            Command::new("add")
+                .override_help("adds a local file to pop node blockstore")
+                .arg(
+                    Arg::new("path")
+                        .short('p')
+                        .takes_value(true)
+                        .long("pathname")
+                        .required(true)
+                        .help("path of the file or directory to add to node blockstore"),
+                ),
+        )
+        .subcommand(
+            Command::new("export")
                 .override_help("gets a file from blockstore")
                 .arg(
                     Arg::new("cid")
@@ -55,15 +57,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 ),
         )
         .subcommand(
-            App::new("retrieve")
+            Command::new("retrieve")
                 .override_help("gets a file from blockstore")
                 .arg(
-                    Arg::new("cid")
-                        .short('c')
+                    Arg::new("path")
+                        .short('p')
                         .takes_value(true)
-                        .long("cid")
+                        .long("ipfspath")
                         .required(true)
-                        .help("path to save file to"),
+                        .help("ipfs path to resolve the content"),
                 )
                 .arg(
                     Arg::new("peer")
@@ -90,7 +92,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Some("add") => {
             let flags = matches.subcommand().unwrap().1;
             //  can safely unwrap subcommand because we have just checked its name
-            add(flags.values_of("file").unwrap().collect()).await
+            add(flags.values_of("path").unwrap().collect()).await
         }
         Some("export") => {
             let flags = matches.subcommand().unwrap().1;
@@ -103,7 +105,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Some("retrieve") => {
             let flags = matches.subcommand().unwrap().1;
             retrieve(
-                flags.values_of("cid").unwrap().collect(),
+                flags.values_of("path").unwrap().collect(),
                 flags.values_of("peer").unwrap().collect(),
                 flags.values_of("multiaddr").unwrap().collect(),
             )
@@ -136,9 +138,9 @@ async fn export(cid: String, path: String) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-async fn retrieve(cid: String, peer: String, multiaddr: String) -> Result<(), Box<dyn Error>> {
+async fn retrieve(path: String, peer: String, multiaddr: String) -> Result<(), Box<dyn Error>> {
     let client = reqwest::Client::new();
-    let map = HashMap::from([("cid", cid), ("peer", peer), ("multiaddr", multiaddr)]);
+    let map = HashMap::from([("path", path), ("peer", peer), ("multiaddr", multiaddr)]);
     let resp = client
         .post("http://127.0.0.1:27403/retrieve")
         .json(&map)
@@ -149,7 +151,7 @@ async fn retrieve(cid: String, peer: String, multiaddr: String) -> Result<(), Bo
 }
 
 async fn start() -> Result<(), Box<dyn Error>> {
-    let bs = LfuBlockstore::new(0, BlockstoreDB::open("path")?)?;
+    let bs = LfuBlockstore::new(0, BlockstoreDB::open("blocks")?)?;
     let config = NodeConfig {
         listening_multiaddr: Some("/ip4/0.0.0.0/tcp/0/ws".parse()?),
         blockstore: bs,

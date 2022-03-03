@@ -1,5 +1,8 @@
 use super::traversal::{AsyncLoader, Error, Progress, Selector};
-use super::{Extensions, GraphsyncMessage, GraphsyncRequest, Prefix, RequestId};
+use super::{
+    Extensions, GraphsyncMessage, GraphsyncRequest, MetadataItem, Prefix, RequestId,
+    METADATA_EXTENSION,
+};
 use async_std::channel::{bounded, Receiver, Sender};
 use async_std::task::{Context, Poll};
 use blockstore::types::BlockStore;
@@ -9,6 +12,7 @@ use libipld::codec::Decode;
 use libipld::store::StoreParams;
 use libipld::{Block, Cid, Ipld};
 use libp2p::core::PeerId;
+use serde_cbor::from_slice;
 use std::sync::{
     atomic::{AtomicI32, Ordering},
     Arc, Mutex,
@@ -116,6 +120,13 @@ where
 
         for block in blocks.iter() {
             for (_, res) in msg.responses.iter() {
+                // TODO
+                // let metadata: Option<Vec<MetadataItem>> = res
+                //     .extensions
+                //     .get(METADATA_EXTENSION)
+                //     .map(|data| from_slice(&data[..]).ok())
+                //     .flatten();
+                // log::info!("metadata {:?}", metadata);
                 if let Some(sender) = self.ongoing.lock().unwrap().get(&res.id) {
                     sender.try_send(block.clone()).unwrap();
                 }

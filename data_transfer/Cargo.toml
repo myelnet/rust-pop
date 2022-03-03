@@ -31,6 +31,7 @@ instant = "0.1.12"
 routing = { path = "../routing" }
 utf16_lit = "2.0.2"
 byteorder = "1.4.3"
+log = { version = "0.4.14" }
 
 [dev-dependencies]
 hex = "0.4.3"

@@ -281,7 +281,7 @@ impl UpgradeInfo for TransferProtocol {
     type InfoIter = iter::Once<Self::Info>;
 
     fn protocol_info(&self) -> Self::InfoIter {
-        iter::once(b"/fil/datatransfer/1.1.0")
+        iter::once(b"/fil/datatransfer/1.2.0")
     }
 }
 
@@ -311,7 +311,7 @@ impl UpgradeInfo for TransferMessage {
     type InfoIter = iter::Once<Self::Info>;
 
     fn protocol_info(&self) -> Self::InfoIter {
-        iter::once(b"/fil/datatransfer/1.1.0")
+        iter::once(b"/fil/datatransfer/1.2.0")
     }
 }
 

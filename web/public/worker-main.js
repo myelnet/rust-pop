@@ -11,6 +11,6 @@ self.onmessage = (event) => {
 
   self.onmessage = async (event) => {
     await initialized;
-    wasm_bindgen.request(event.data);
+    wasm_bindgen.bg_request(event.data);
   };
 };

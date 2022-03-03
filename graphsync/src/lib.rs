@@ -767,6 +767,7 @@ mod tests {
     use super::*;
     use async_std::task;
     use blockstore::memory::MemoryDB as MemoryBlockStore;
+    use blockstore::types::DBStore;
     use futures::prelude::*;
     use hex;
     use libipld::cbor::DagCborCodec;
@@ -858,23 +859,17 @@ mod tests {
         (peer_id, transport)
     }
 
-    struct Peer<B: 'static + BlockStore>
-    where
-        Ipld: Decode<<<B>::Params as StoreParams>::Codecs>,
-    {
+    struct Peer {
         peer_id: PeerId,
         addr: Multiaddr,
-        store: Arc<B>,
-        swarm: Swarm<Graphsync<B>>,
+        store: Arc<MemoryBlockStore>,
+        swarm: Swarm<Graphsync<MemoryBlockStore>>,
     }
 
-    impl<B: BlockStore> Peer<B>
-    where
-        Ipld: Decode<<<B>::Params as StoreParams>::Codecs>,
-    {
-        fn new(bs: B) -> Self {
+    impl Peer {
+        fn new() -> Self {
             let (peer_id, trans) = mk_transport();
-            let store = Arc::new(bs);
+            let store = Arc::new(MemoryBlockStore::default());
             let mut swarm = Swarm::new(
                 trans,
                 Graphsync::new(Config::default(), store.clone()),
@@ -891,13 +886,13 @@ mod tests {
             }
         }
 
-        fn add_address(&mut self, peer: &Peer<B>) {
+        fn add_address(&mut self, peer: &Peer) {
             self.swarm
                 .behaviour_mut()
                 .add_address(&peer.peer_id, peer.addr.clone());
         }
 
-        fn swarm(&mut self) -> &mut Swarm<Graphsync<B>> {
+        fn swarm(&mut self) -> &mut Swarm<Graphsync<MemoryBlockStore>> {
             &mut self.swarm
         }
 
@@ -953,8 +948,8 @@ mod tests {
 
     #[async_std::test]
     async fn test_request() {
-        let peer1 = Peer::new(MemoryBlockStore::default());
-        let mut peer2 = Peer::new(MemoryBlockStore::default());
+        let peer1 = Peer::new();
+        let mut peer2 = Peer::new();
         peer2.add_address(&peer1);
 
         let store = peer1.store.clone();
@@ -1016,8 +1011,8 @@ mod tests {
 
     #[async_std::test]
     async fn test_request_entries() {
-        let peer1 = Peer::new(MemoryBlockStore::default());
-        let mut peer2 = Peer::new(MemoryBlockStore::default());
+        let peer1 = Peer::new();
+        let mut peer2 = Peer::new();
         peer2.add_address(&peer1);
 
         let store = peer1.store.clone();
@@ -1070,8 +1065,8 @@ mod tests {
         use dag_service::{add, cat};
         use rand::prelude::*;
 
-        let peer1 = Peer::new(MemoryBlockStore::default());
-        let mut peer2 = Peer::new(MemoryBlockStore::default());
+        let peer1 = Peer::new();
+        let mut peer2 = Peer::new();
         peer2.add_address(&peer1);
 
         let store = peer1.store.clone();
@@ -1131,5 +1126,81 @@ mod tests {
 
         let buf = cat(store, cid).unwrap();
         assert_eq!(&buf, &data);
+    }
+
+    #[async_std::test]
+    async fn unixfs_path_transfer() {
+        use super::traversal::unixfs_path_selector;
+        use dag_service::{add_entries, cat, Entry};
+        use rand::prelude::*;
+
+        let peer1 = Peer::new();
+        let mut peer2 = Peer::new();
+        peer2.add_address(&peer1);
+
+        let store = peer1.store.clone();
+
+        // generate 4MiB of random bytes
+        let mut files = Vec::new();
+        let mut entries = Vec::new();
+        for _ in 0..4 {
+            let mut data = vec![0u8; 1024 * 1024];
+            rand::thread_rng().fill_bytes(&mut data);
+            files.push(data);
+        }
+        for (i, data) in files.iter().enumerate() {
+            entries.push(Entry {
+                name: format!("file-{}", i),
+                reader: &data[..],
+            })
+        }
+
+        let root = add_entries(store.clone(), entries).unwrap().unwrap();
+
+        let (_, selector) = unixfs_path_selector(format!("{}/file-2", root.to_string())).unwrap();
+
+        let peer1 = peer1.spawn("peer1");
+
+        let id =
+            peer2
+                .swarm()
+                .behaviour_mut()
+                .request(peer1, root, selector, Extensions::default());
+
+        let mut n = 0;
+        let mut cid: Option<Cid> = None;
+        loop {
+            if let Some(event) = peer2.next().await {
+                match event {
+                    GraphsyncEvent::Progress {
+                        req_id, size, link, ..
+                    } => {
+                        if link != root && cid.is_none() {
+                            cid = Some(link);
+                        }
+                        assert_eq!(req_id, id);
+                        n += 1;
+                    }
+                    GraphsyncEvent::ResponseReceived(_, _responses) => {}
+                    GraphsyncEvent::Complete(rid, Ok(())) => {
+                        assert_eq!(rid, id);
+                        break;
+                    }
+                    _ => {
+                        panic!("transfer failed {:?}", event);
+                    }
+                }
+            } else {
+                break;
+            }
+        }
+
+        let store = peer2.store.clone();
+
+        let buf = cat(store.clone(), cid.unwrap()).unwrap();
+        assert_eq!(&buf, &files[2]);
+
+        // chec the blockstore only contains that one file
+        assert_eq!(store.total_size().unwrap(), 1049052);
     }
 }

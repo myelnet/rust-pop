@@ -1306,6 +1306,7 @@ dependencies = [
  "instant",
  "libipld",
  "libp2p",
+ "log",
  "rand 0.7.3",
  "routing",
  "serde",
@@ -2028,6 +2029,7 @@ dependencies = [
  "integer-encoding 3.0.2",
  "libipld",
  "libp2p",
+ "log",
  "pprof",
  "protobuf",
  "protoc-rust",
@@ -2036,6 +2038,7 @@ dependencies = [
  "serde_json",
  "smallvec",
  "thiserror",
+ "unixfs-v1",
 ]
 
 [[package]]

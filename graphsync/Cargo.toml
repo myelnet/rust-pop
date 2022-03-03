@@ -31,6 +31,8 @@ crossbeam-channel = "0.5.2"
 blockstore = { path = "../blockstore", default_features = false }
 filecoin = { path = "../filecoin", default_features = false }
 indexmap = { version = "1.8.0", features = ["serde"] }
+unixfs-v1 = "0.2.1"
+log = { version = "0.4.14" }
 
 [build-dependencies]
 protoc-rust = "2.25.2"

@@ -44,7 +44,7 @@ impl DBStore for MemoryDB {
     }
 
     fn total_size(&self) -> Result<usize, Error> {
-        Ok(mem::size_of_val(&self.db.read()))
+        Ok(self.db.read().values().map(|v| v.len()).sum())
     }
 
     fn write<K, V>(&self, key: K, value: V) -> Result<(), Error>

@@ -7,7 +7,7 @@ use blockstore::types::BlockStore;
 use data_transfer::{mimesniff::detect_content_type, DataTransfer, DataTransferEvent, DealParams};
 use futures::channel::{mpsc, oneshot};
 use futures::StreamExt;
-use graphsync::traversal::{RecursionLimit, Selector};
+use graphsync::traversal::unixfs_path_selector;
 use graphsync::{Config as GraphsyncConfig, Graphsync};
 use js_sys::{Promise, Uint8Array};
 use libipld::{cbor::DagCborCodec, multihash::Code, Block, Cid, Ipld};
@@ -143,7 +143,9 @@ pub async fn bg_request(js_params: JsValue) -> Result<(), JsValue> {
 
     let maddr: Multiaddr = params.maddress.parse().map_err(js_err)?;
     let peer_id = PeerId::from_str(&params.peer_id).map_err(js_err)?;
-    let cid = Cid::try_from(params.cid).map_err(js_err)?;
+
+    let (cid, selector) =
+        unixfs_path_selector(params.cid).ok_or(JsValue::from_str("invalid cid path"))?;
 
     let store = Arc::new(CacheStore::default());
 
@@ -166,14 +168,6 @@ pub async fn bg_request(js_params: JsValue) -> Result<(), JsValue> {
         .build();
 
     swarm.behaviour_mut().add_address(&peer_id, maddr);
-
-    let selector = Selector::ExploreRecursive {
-        limit: RecursionLimit::None,
-        sequence: Box::new(Selector::ExploreAll {
-            next: Box::new(Selector::ExploreRecursiveEdge),
-        }),
-        current: None,
-    };
 
     let params = DealParams {
         selector: Some(selector.clone()),

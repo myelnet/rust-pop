@@ -4,12 +4,12 @@ use async_std::channel::{bounded, Receiver, Sender};
 use async_trait::async_trait;
 use blockstore::{errors::Error as BsError, types::BlockStore};
 use fnv::FnvHashMap;
-use indexmap::{self, IndexMap};
+use indexmap::{indexmap, IndexMap};
 use libipld::cid::Error as CidError;
 use libipld::codec::Decode;
 use libipld::ipld::{Ipld, IpldIndex};
 use libipld::multihash::Error as MultihashError;
-use libipld::pb::{PbLink, PbNode};
+use libipld::pb::PbNode;
 use libipld::store::StoreParams;
 use libipld::{Block, Cid};
 use protobuf::ProtobufError;
@@ -22,6 +22,7 @@ use std::io::Error as StdError;
 use std::sync::Arc;
 use std::vec;
 use thiserror::Error;
+use unixfs_v1::{UnixFs, UnixFsType};
 use Selector::*;
 
 pub trait Cbor: Serialize + DeserializeOwned {
@@ -462,14 +463,11 @@ fn select_next_entries(ipld: Ipld, selector: Selector) -> Vec<(Ipld, Selector)> 
     }
 }
 
-type Reifier<L> = Box<dyn Fn(Path, &Ipld, &L) -> Option<Ipld> + Send + Sync>;
-
 #[derive(Default)]
 pub struct Progress<L> {
     pub loader: L,
     pub path: Path,
     pub last_block: Option<LastBlockInfo>,
-    pub reifiers: HashMap<String, Reifier<L>>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -487,12 +485,7 @@ where
             loader,
             path: Default::default(),
             last_block: None,
-            reifiers: Default::default(),
         }
-    }
-
-    pub fn add_reifier(&mut self, name: String, r: Reifier<L>) {
-        self.reifiers.insert(name, r);
     }
 
     #[async_recursion]
@@ -522,12 +515,12 @@ where
             return Ok(());
         }
         if let Selector::ExploreInterpretAs { next, reifier } = selector.clone() {
-            let path = self.path.clone();
-            let loader = &self.loader;
-            if let Some(Some(reified)) = self.reifiers.get(&reifier).map(|f| f(path, node, loader))
-            {
-                self.walk_adv(&reified, *next, callback).await?;
-                return Ok(());
+            // only handle unixfs us case until a different one is needed
+            if &reifier == "unixfs" {
+                if let Some(reified) = self.unixfs_reifier(node) {
+                    self.walk_adv(&reified, *next, callback).await?;
+                    return Ok(());
+                }
             }
         }
 
@@ -587,6 +580,23 @@ where
         }
 
         Ok(())
+    }
+
+    /// turns a unixfs directory into a map indexed by link name
+    pub fn unixfs_reifier(&self, node: &Ipld) -> Option<Ipld> {
+        let pb_node = PbNode::try_from(node).ok()?;
+        let unixfs = UnixFs::try_from(Some(&pb_node.data[..])).ok()?;
+        match unixfs.Type {
+            // we only care about directories for now
+            UnixFsType::Directory => {
+                let mut map = BTreeMap::new();
+                for link in pb_node.links {
+                    map.insert(link.name.clone(), link.into());
+                }
+                Some(Ipld::StringMap(map))
+            }
+            _ => None,
+        }
     }
 }
 
@@ -842,16 +852,31 @@ where
     }
 }
 
-/// turns a unixfs directory into a map indexed by link name
-pub fn unixfs_reifier<L: LinkLoader>(path: Path, node: &Ipld, loader: &L) -> Option<Ipld> {
-    if let Ok(pb_node) = PbNode::try_from(node) {
-        let mut map = BTreeMap::new();
-        for link in pb_node.links {
-            map.insert(link.name.clone(), link.into());
-        }
-        return Some(Ipld::StringMap(map));
+pub fn unixfs_path_selector(path: String) -> Option<(Cid, Selector)> {
+    let segments: Vec<&str> = path.split("/").collect();
+    let mut selector = Selector::ExploreRecursive {
+        limit: RecursionLimit::None,
+        sequence: Box::new(Selector::ExploreAll {
+            next: Box::new(Selector::ExploreRecursiveEdge),
+        }),
+        current: None,
+    };
+    let root = Cid::try_from(segments[0]).ok()?;
+    if segments.len() == 1 {
+        return Some((root, selector));
     }
-    None
+    // ignore the first one which was the root CID
+    for seg in segments[1..].iter().rev() {
+        selector = Selector::ExploreInterpretAs {
+            reifier: "unixfs".to_string(),
+            next: Box::new(Selector::ExploreFields {
+                fields: indexmap! {
+                    seg.to_string() => selector,
+                },
+            }),
+        };
+    }
+    Some((root, selector))
 }
 
 #[cfg(test)]
@@ -1170,7 +1195,7 @@ mod tests {
         use libipld::pb::{DagPbCodec, PbNode};
 
         let store = MemoryBlockStore::default();
-        let dir_data = hex::decode("12330a2212206aad27d7e2fc815cd15bf679535062565dc927a831547281fc0af9e5d7e67c74120b6166726963616e2e747874180812340a221220fd36ac5279964db0cba8f7fa45f8c4c44ef5e2ff55da85936a378c96c9c63204120c616d6572696361732e747874180812360a2212207564c20415869d77a8a40ca68a9158e397dd48bdff1325cdb23c5bcd181acd17120e6175737472616c69616e2e7478741808").unwrap();
+        let dir_data = hex::decode("123c0a260170a0e402204fdb7b734f1a8e6aad79163bee342eabac33b9c9c1f040de73e434a8f6cd3e8b120e64617461313834333736353338331880d00f123c0a260170a0e4022085963faa5a61907902d8ad3fdd59b34b5ceede02b134dfcdb1fd7ec668420485120e64617461323033313338373538321880d00f123c0a260170a0e40220e8e7253e6e9334d189433988d962bd9ba7bb75feb6c2216e505c65d356e0811f120e64617461323239393838353637321880d00f0a020801").unwrap();
 
         let pb_node = PbNode::from_bytes(&dir_data).unwrap();
 
@@ -1183,14 +1208,13 @@ mod tests {
         let loader = StoreLoader { store };
 
         let mut progress = Progress::new(loader);
-        progress.add_reifier("unixfs".to_string(), Box::new(unixfs_reifier));
 
         let selector = Selector::ExploreInterpretAs {
             reifier: "unixfs".to_string(),
             next: Box::new(Selector::ExploreFields {
                 fields: indexmap! {
-                    "african.txt".to_string() => Selector::Matcher,
-                    "australian.txt".to_string() => Selector::Matcher,
+                    "data2031387582".to_string() => Selector::Matcher,
+                    "data2299885672".to_string() => Selector::Matcher,
                 },
             }),
         };
@@ -1200,16 +1224,16 @@ mod tests {
                 path: Path::from(""),
             },
             ExpectVisit {
-                path: Path::from("african.txt"),
+                path: Path::from("data2031387582"),
             },
             ExpectVisit {
-                path: Path::from("australian.txt"),
+                path: Path::from("data2299885672"),
             },
         ];
 
         let index = Arc::new(Mutex::new(0));
         progress
-            .walk_adv(&node, selector, &|prog, ipld| -> Result<(), String> {
+            .walk_adv(&node, selector, &|prog, _ipld| -> Result<(), String> {
                 let mut idx = index.lock().unwrap();
                 let exp = &expect[*idx];
                 assert_eq!(prog.path, exp.path);
@@ -1462,5 +1486,122 @@ mod tests {
 
         let end = it.next();
         assert_eq!(end, None);
+    }
+
+    #[test]
+    fn test_path_selector() {
+        let (_root, selector) = unixfs_path_selector(
+            "bafyreifyxnmuzxinphg5hbqbbr6etcodug3g7o5dxhkfiejvekzq6ohd5u/directory/Mexico.jpeg"
+                .to_string(),
+        )
+        .unwrap();
+        let inner = Selector::ExploreRecursive {
+            limit: RecursionLimit::None,
+            sequence: Box::new(Selector::ExploreAll {
+                next: Box::new(Selector::ExploreRecursiveEdge),
+            }),
+            current: None,
+        };
+        let middle = Selector::ExploreInterpretAs {
+            reifier: "unixfs".to_string(),
+            next: Box::new(Selector::ExploreFields {
+                fields: indexmap! {
+                    "Mexico.jpeg".to_string() => inner,
+                },
+            }),
+        };
+        let expected = Selector::ExploreInterpretAs {
+            reifier: "unixfs".to_string(),
+            next: Box::new(Selector::ExploreFields {
+                fields: indexmap! {
+                    "directory".to_string() => middle,
+                },
+            }),
+        };
+        assert_eq!(selector, expected);
+
+        // go ipld prime generated selector
+        let encoded = hex::decode("a1617ea2613ea16166a162663ea16774657374696e67a16152a2616ca1646e6f6e65a0623a3ea16161a1613ea16140a062617366756e69786673").unwrap();
+
+        let sel = Selector::unmarshal_cbor(&encoded).unwrap();
+
+        let (_root, esel) = unixfs_path_selector(
+            "bafyreifyxnmuzxinphg5hbqbbr6etcodug3g7o5dxhkfiejvekzq6ohd5u/testing".to_string(),
+        )
+        .unwrap();
+        assert_eq!(esel, sel);
+    }
+
+    #[async_std::test]
+    async fn traverse_unixfs_path() {
+        use dag_service::{add_entries, Entry};
+        use rand::prelude::*;
+
+        let mut files = Vec::new();
+        let mut entries = Vec::new();
+        for i in 0..4 {
+            let mut data = vec![0u8; i * 1024];
+            rand::thread_rng().fill_bytes(&mut data);
+            files.push(data);
+        }
+        for (i, data) in files.iter().enumerate() {
+            entries.push(Entry {
+                name: format!("file-{}", i),
+                reader: &data[..],
+            })
+        }
+        let store = Arc::new(MemoryBlockStore::default());
+        let root = add_entries(store.clone(), entries).unwrap().unwrap();
+
+        let (root2, selector) =
+            unixfs_path_selector(format!("{}/file-2", root.to_string())).unwrap();
+        assert_eq!(root2, root);
+
+        let loader = BlockCallbackLoader::new(store, |_, _| Ok(()));
+
+        let mut progress = Progress::new(loader);
+
+        let expect: [ExpectVisit; 7] = [
+            ExpectVisit {
+                path: Path::from(""),
+            },
+            ExpectVisit {
+                path: Path::from("file-2"),
+            },
+            ExpectVisit {
+                path: Path::from("file-2/Hash"),
+            },
+            ExpectVisit {
+                path: Path::from("file-2/Hash/Data"),
+            },
+            ExpectVisit {
+                path: Path::from("file-2/Hash/Links"),
+            },
+            ExpectVisit {
+                path: Path::from("file-2/Name"),
+            },
+            ExpectVisit {
+                path: Path::from("file-2/Tsize"),
+            },
+        ];
+
+        let index = Arc::new(Mutex::new(0));
+        progress
+            .walk_adv(
+                &Ipld::Link(root),
+                selector,
+                &|prog, _ipld| -> Result<(), String> {
+                    let mut idx = index.lock().unwrap();
+                    let exp = &expect[*idx];
+                    assert_eq!(prog.path, exp.path);
+                    *idx += 1;
+                    Ok(())
+                },
+            )
+            .await
+            .unwrap();
+
+        let current_idx = *index.lock().unwrap();
+        assert_eq!(current_idx, 7)
     }
 }

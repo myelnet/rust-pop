@@ -2,6 +2,7 @@ use libipld::cid::multihash::{Code, MultihashDigest};
 use libipld::Cid;
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 use serde_cbor::tags::Tagged;
+use std::fmt;
 
 /// Cbor [Cid] codec.
 pub const DAG_CBOR: u64 = 0x71;
@@ -66,6 +67,16 @@ impl From<Cid> for CidCbor {
     fn from(cid: Cid) -> Self {
         Self {
             bytes: cid.to_bytes(),
+        }
+    }
+}
+
+impl fmt::Display for CidCbor {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(cid) = self.to_cid() {
+            write!(f, "{}", cid)
+        } else {
+            write!(f, "Invalid Cid")
         }
     }
 }

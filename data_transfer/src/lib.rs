@@ -2,7 +2,7 @@ mod fsm;
 pub mod mimesniff;
 mod network;
 
-pub use network::{PullParams, PushParams};
+pub use network::{PullParams, PushParams, ChannelId};
 
 use blockstore::types::BlockStore;
 use filecoin::{cid_helpers::CidCbor, types::Cbor};
@@ -17,7 +17,7 @@ use libp2p::swarm::{
 };
 use libp2p::{Multiaddr, NetworkBehaviour, PeerId};
 use network::{
-    ChannelId, DataTransferNetwork, DealProposal, DealResponse, DealStatus, DtNetEvent,
+    DataTransferNetwork, DealProposal, DealResponse, DealStatus, DtNetEvent,
     MessageType, TransferMessage, TransferRequest, TransferResponse, EMPTY_QUEUE_SHRINK_THRESHOLD,
     EXTENSION_KEY,
 };

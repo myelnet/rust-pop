@@ -1,8 +1,9 @@
 mod discovery;
-mod routing_responder;
+mod routing;
 mod utils;
+use bimap::BiMap;
 use blockstore::types::BlockStore;
-use data_transfer::{DataTransfer, DataTransferEvent, DealParams};
+use data_transfer::{ChannelId, DataTransfer, DataTransferEvent, DealParams};
 use discovery::Config as DiscoveryConfig;
 use discovery::{DiscoveryEvent, HubDiscovery, PeerTable, SerializablePeerTable};
 use filecoin::{cid_helpers::CidCbor, types::Cbor};
@@ -15,9 +16,7 @@ use libp2p::swarm::{
     NetworkBehaviour, NetworkBehaviourAction, NetworkBehaviourEventProcess, PollParameters,
 };
 use libp2p::{Multiaddr, NetworkBehaviour, PeerId};
-use routing_responder::{
-    RoutingNetEvent, RoutingNetwork, RoutingProposal, EMPTY_QUEUE_SHRINK_THRESHOLD,
-};
+use routing::{RoutingNetEvent, RoutingNetwork, RoutingProposal, EMPTY_QUEUE_SHRINK_THRESHOLD};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io;
@@ -78,6 +77,14 @@ where
     // a map of who has the content we made requests for
     #[behaviour(ignore)]
     routing_table: Index,
+    // A map of cids we want to route to.
+    #[behaviour(ignore)]
+    pending_cids: HashSet<CidCbor>,
+    #[behaviour(ignore)]
+    pending_cid_requests: BiMap<CidCbor, ChannelId>,
+    // A bidirectional map of index cids we have made data-transfer requests for.
+    #[behaviour(ignore)]
+    pending_index_requests: BiMap<CidCbor, ChannelId>,
 }
 
 impl<S: 'static + BlockStore> Routing<S>
@@ -113,6 +120,9 @@ where
             routing_responder: RoutingNetwork::new(),
             pending_events: VecDeque::default(),
             routing_table: HashMap::new(),
+            pending_cids: HashSet::new(),
+            pending_cid_requests: BiMap::new(),
+            pending_index_requests: BiMap::new(),
         }
     }
 
@@ -140,19 +150,44 @@ where
     pub fn find_content(&mut self, root: CidCbor) -> Result<(), io::Error> {
         let msg = ContentRequest {
             multiaddresses: self.discovery.multiaddr.to_vec(),
-            root,
+            root: root.clone(),
         }
         .marshal_cbor()
         .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
-        // Because Topic is not thread safe (the hasher it uses can't be safely shared across threads)
-        // we create a new instantiation of the Topic for each publication, in most examples Topic is
-        // cloned anyway
-        let msg_id = self
-            .routing_broadcaster
-            .publish(IdentTopic::new(ROUTING_TOPIC), msg)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
-        self.pending_events
-            .push_back(RoutingEvent::ContentRequestBroadcast(msg_id.0));
+
+        //  mark that we are actively interested in content
+        self.pending_cids.insert(root.clone());
+        // false flags that we haven't made a request for the content yet
+        let mut sent_request = false;
+        if let None = self.pending_cid_requests.get_by_left(&root) {
+            if let Some(peer_table) = self.routing_table.get(&root) {
+                if !peer_table.is_empty() {
+                    if let Some(r) = root.to_cid() {
+                        match self.fetch_from_random_peer(peer_table.clone(), r) {
+                            Ok(ch) => {
+                                sent_request = true;
+                                self.pending_cid_requests.insert(root.clone(), ch);
+                            }
+                            Err(e) => println!("{}", e),
+                        }
+                    }
+                }
+            }
+        } else {
+            // we've already made a data-transfer request for the content
+            sent_request = true
+        }
+        if !sent_request {
+            // Because Topic is not thread safe (the hasher it uses can't be safely shared across threads)
+            // we create a new instantiation of the Topic for each publication, in most examples Topic is
+            // cloned anyway
+            self.routing_broadcaster
+                .publish(IdentTopic::new(ROUTING_TOPIC), msg)
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+            self.pending_events
+                .push_back(RoutingEvent::ContentRequestBroadcast(root.bytes().clone()));
+        }
+
         Ok(())
     }
 
@@ -178,17 +213,90 @@ where
         self.routing_table = HashMap::new();
     }
 
+    fn process_transfer_completion(&mut self, ch: ChannelId, res: Result<(), String>) {
+        match res {
+            Ok(_) => {
+                if let Some(cid) = self.pending_cid_requests.get_by_right(&ch) {
+                    //  we indicate that we're no longer interested in the CID so that if we get new routing responses from hubs
+                    //  we simply update our routing table butdon't fire off another request
+                    self.pending_cids.remove(cid);
+                } else if self.pending_index_requests.contains_right(&ch) {
+                    //  do something when a request for an index CID succeeded
+                }
+                //  can safely remove from both as no error is thrown if the element is not found
+                self.pending_cid_requests.remove_by_right(&ch);
+                self.pending_index_requests.remove_by_right(&ch);
+            }
+            Err(e) => {
+                if self.pending_cid_requests.contains_right(&ch) {
+                    self.pending_cid_requests.remove_by_right(&ch);
+                    //  do something when a request for a CID failed eg. may want to restart transfer
+                    //  with a new peer
+                } else if self.pending_index_requests.contains_right(&ch) {
+                    self.pending_index_requests.remove_by_right(&ch);
+                    //  do something when a request for an index CID failed
+                }
+            }
+        }
+    }
+
     fn process_discovery_response(&mut self) {
         self.pending_events.push_back(RoutingEvent::HubTableUpdated);
     }
 
-    fn process_routing_response(&mut self, root: CidCbor, peer_table: PeerTable) {
+    fn fetch_content(&mut self, peer_id: PeerId, cid: Cid) -> Result<ChannelId, String> {
+        let selector = Selector::ExploreRecursive {
+            limit: RecursionLimit::None,
+            sequence: Box::new(Selector::ExploreAll {
+                next: Box::new(Selector::ExploreRecursiveEdge),
+            }),
+            current: None,
+        };
+
+        self.syncing_responder
+            .pull(peer_id, cid, selector, DealParams::default())
+    }
+
+    fn fetch_from_random_peer(
+        &mut self,
+        peer_table: PeerTable,
+        cid: Cid,
+    ) -> Result<ChannelId, String> {
+        for peer in peer_table.keys().next() {
+            for addr in peer_table.get(peer).unwrap() {
+                self.add_address(peer, addr.clone());
+            }
+            match self.fetch_content(peer.clone(), cid) {
+                Ok(ch) => return Ok(ch),
+                Err(e) => println!("Failed to fetch {:?} from {:?}", cid, peer),
+            }
+        }
+        return Err("failed to fetch from all peers".to_string());
+    }
+
+    fn process_routing_response(&mut self, peer_table: PeerTable, root: CidCbor) {
         let mut new_entry = HashMap::new();
-        new_entry.insert(root, peer_table);
+        new_entry.insert(root.clone(), peer_table.clone());
         // expand table as new entries come in -- allows for async updates
         self.routing_table.extend(new_entry);
         self.pending_events
             .push_back(RoutingEvent::RoutingTableUpdated);
+        // check we are still interested in a CID (i.e a transfer for it has no succesfully completed yet)
+        if self.pending_cids.contains(&root) {
+            //  check no transfer channel has been set up yet
+            if let None = self.pending_cid_requests.get_by_left(&root) {
+                //  if the sent Cid is valid
+                if let Some(r) = root.to_cid() {
+                    match self.fetch_from_random_peer(peer_table, r) {
+                        Ok(ch) => {
+                            // flag that a request for the cid has now been made
+                            self.pending_cid_requests.insert(root, ch);
+                        }
+                        Err(e) => println!("{}", e),
+                    }
+                }
+            }
+        }
     }
 
     fn process_routing_request(
@@ -231,18 +339,16 @@ where
             let req = SyncRequest::unmarshal_cbor(&message.data)
                 .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
 
-            let selector = Selector::ExploreRecursive {
-                limit: RecursionLimit::None,
-                sequence: Box::new(Selector::ExploreAll {
-                    next: Box::new(Selector::ExploreRecursiveEdge),
-                }),
-                current: None,
-            };
-
             if let Some(cid) = req.index_root.to_cid() {
-                let id = self
-                    .syncing_responder
-                    .pull(peer_id, cid, selector, DealParams::default());
+                if let None = self.pending_index_requests.get_by_left(&req.index_root) {
+                    match self.fetch_content(peer_id, cid) {
+                        Ok(ch) => {
+                            // we make note that we've made a request for this index
+                            self.pending_index_requests.insert(req.index_root, ch);
+                        }
+                        Err(e) => println!("{}", e),
+                    }
+                }
             }
         }
 
@@ -285,7 +391,10 @@ where
 {
     fn inject_event(&mut self, event: DataTransferEvent) {
         match event {
-            _ => {}
+            DataTransferEvent::Started(ch) => {}
+            DataTransferEvent::Accepted(ch) => {}
+            DataTransferEvent::Progress(ch) => {}
+            DataTransferEvent::Completed(ch, res) => self.process_transfer_completion(ch, res),
         }
     }
 }
@@ -298,7 +407,7 @@ where
         match event {
             RoutingNetEvent::Response(_, resp) => {
                 if let Some(peers) = resp.peers {
-                    self.process_routing_response(resp.root, utils::peer_table_from_bytes(&peers))
+                    self.process_routing_response(utils::peer_table_from_bytes(&peers), resp.root)
                 }
             }
         }

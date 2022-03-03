@@ -4785,6 +4785,7 @@ version = "0.1.0"
 dependencies = [
  "async-std",
  "async-trait",
+ "bimap",
  "blockstore",
  "criterion",
  "cs_serde_cbor",

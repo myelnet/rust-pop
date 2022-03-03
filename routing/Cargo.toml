@@ -31,7 +31,7 @@ filecoin = { path = "../filecoin", default_features = false }
 lazy_static = "1.4.0"
 blockstore = { path = "../blockstore", default_features = false }
 graphsync = { path = "../graphsync", default_features = false }
-
+bimap = "0.6.2"
 
 
 [build-dependencies]

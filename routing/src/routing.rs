@@ -88,10 +88,10 @@ where
 
     fn upgrade_outbound(self, mut socket: TSocket, _info: Self::Info) -> Self::Future {
         Box::pin(async move {
-            let mut buf = self
+            let buf = self
                 .marshal_cbor()
                 .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
-            socket.write_all(&mut buf).await?;
+            socket.write_all(&buf).await?;
             socket.close().await?;
             Ok(())
         })

@@ -8,6 +8,7 @@ members = [
   "blockstore",
   "data_transfer",
   "routing",
+
 ]
 
 [package]
@@ -17,7 +18,7 @@ edition = "2021"
 
 [[bin]]
 name = "pop"
-path = "src/native/bin/main.rs"
+path = "main.rs"
 required-features = ["native"]
 
 

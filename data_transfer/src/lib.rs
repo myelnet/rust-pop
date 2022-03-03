@@ -17,8 +17,8 @@ use libp2p::swarm::{
 };
 use libp2p::{Multiaddr, NetworkBehaviour, PeerId};
 use network::{
-    DataTransferNetwork, DealProposal, DealResponse, DealStatus, DtNetEvent,
-    MessageType, TransferMessage, TransferRequest, TransferResponse, EMPTY_QUEUE_SHRINK_THRESHOLD,
+    DataTransferNetwork, DealProposal, DealResponse, DealStatus, DtNetEvent, MessageType,
+    TransferMessage, TransferRequest, TransferResponse, EMPTY_QUEUE_SHRINK_THRESHOLD,
     EXTENSION_KEY,
 };
 use num_bigint::ToBigInt;

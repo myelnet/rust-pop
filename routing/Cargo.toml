@@ -32,6 +32,8 @@ lazy_static = "1.4.0"
 blockstore = { path = "../blockstore", default_features = false }
 graphsync = { path = "../graphsync", default_features = false }
 bimap = "0.6.2"
+dag_service = { path = "../dag_service" }
+serde_repr = "0.1"
 
 
 [build-dependencies]
@@ -39,7 +41,6 @@ protoc-rust = "2.25.2"
 
 [dev-dependencies]
 serde_json = "1.0"
-dag_service = { path = "../dag_service" }
 criterion = { version = "0.3", features = ["async_futures", "async_std"] }
 
 

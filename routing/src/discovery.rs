@@ -1,6 +1,7 @@
 use crate::utils::{peer_table_from_bytes, peer_table_to_bytes};
 use async_std::io;
 use async_trait::async_trait;
+use filecoin::cid_helpers::CidCbor;
 use futures::io::{AsyncRead, AsyncWrite};
 use futures::prelude::*;
 use futures::task::{Context, Poll};
@@ -157,8 +158,10 @@ pub struct DiscoveryRequest {
 
 #[derive(Debug, PartialEq, Clone, Serialize_tuple, Deserialize_tuple)]
 pub struct DiscoveryResponse {
+    pub source: Vec<u8>,
     pub id: RequestId,
     pub addresses: SerializablePeerTable,
+    pub index_root: Option<CidCbor>,
 }
 
 pub struct HubDiscovery {
@@ -169,15 +172,11 @@ pub struct HubDiscovery {
     peer_id: PeerId,
     pub multiaddr: SmallVec<[Multiaddr; 6]>,
     hub: bool,
+    index_root: Option<CidCbor>,
 }
 
 impl HubDiscovery {
-    pub fn new(
-        config: Config,
-        peer_id: PeerId,
-        hub: bool,
-        hub_table: Option<Arc<RwLock<PeerTable>>>,
-    ) -> Self {
+    pub fn new(config: Config, peer_id: PeerId, hub: bool, index_root: Option<CidCbor>) -> Self {
         let protocols = std::iter::once((HubDiscoveryProtocol, ProtocolSupport::Full));
         let mut rr_config = RequestResponseConfig::default();
         rr_config.set_connection_keep_alive(config.connection_keep_alive);
@@ -185,8 +184,7 @@ impl HubDiscovery {
         let inner = RequestResponse::new(DiscoveryCodec::default(), protocols, rr_config);
 
         // if no hub table was passed then initialize a dummy one (mainly for testing purposes)
-        let hub_table: Arc<RwLock<PeerTable>> =
-            hub_table.unwrap_or_else(|| Arc::new(RwLock::new(HashMap::new())));
+        let hub_table = Arc::new(RwLock::new(HashMap::new()));
 
         Self {
             id_counter: Arc::new(AtomicI32::new(1)),
@@ -195,6 +193,7 @@ impl HubDiscovery {
             hub_table,
             peer_id,
             hub,
+            index_root,
         }
     }
     // only hubs should track leaf nodes, they do so using the inner behaviour's table
@@ -208,6 +207,10 @@ impl HubDiscovery {
         if self.hub {
             self.inner.remove_address(peer, address);
         }
+    }
+
+    pub fn update_index_root(&mut self, root: CidCbor) {
+        self.index_root = Some(root);
     }
 
     // want this to be private as we want connections to trigger table swaps. There could be
@@ -365,8 +368,10 @@ impl NetworkBehaviour for HubDiscovery {
                         let new_addresses = peer_table_to_bytes(&self.hub_table.read().unwrap());
 
                         let msg = DiscoveryResponse {
+                            source: self.peer_id.to_bytes(),
                             id: request.id,
                             addresses: new_addresses,
+                            index_root: self.index_root.clone(),
                         };
                         self.inner.send_response(channel, msg).unwrap();
                     }
@@ -447,8 +452,13 @@ mod tests {
         let multiaddr = Vec::from(["/ip4/127.0.0.1/tcp/0".as_bytes().to_vec()]);
         let peer = "/ip4/127.0.0.1/tcp/0".as_bytes().to_vec();
         let mut addresses = HashMap::new();
-        addresses.insert(peer, multiaddr);
-        let resp = DiscoveryResponse { id: 1, addresses };
+        addresses.insert(peer.clone(), multiaddr);
+        let resp = DiscoveryResponse {
+            source: peer,
+            id: 1,
+            addresses,
+            index_root: None,
+        };
 
         let msgc = resp.clone();
         let msg_encoded = to_vec(&resp).unwrap();

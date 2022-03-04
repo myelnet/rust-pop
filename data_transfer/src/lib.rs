@@ -410,6 +410,7 @@ where
                     // if we're the requester it means we're done pushing the content
                     if ch_id.initiator == self.peer_id.to_base58() {
                         if let Channel::Accepted { deal_id, .. } = ch {
+                            println!("sending final response");
                             let voucher = DealResponse::Push {
                                 id: deal_id,
                                 status: DealStatus::Completed,

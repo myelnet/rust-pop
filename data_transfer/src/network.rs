@@ -9,8 +9,9 @@ use libp2p::core::{
     UpgradeInfo,
 };
 use libp2p::swarm::{
-    IntoProtocolsHandler, NetworkBehaviour, NetworkBehaviourAction, NotifyHandler, OneShotHandler,
-    PollParameters, ProtocolsHandler,
+    dial_opts::{self, DialOpts},
+    DialError, IntoProtocolsHandler, NetworkBehaviour, NetworkBehaviourAction, NotifyHandler,
+    OneShotHandler, PollParameters, ProtocolsHandler,
 };
 use num_bigint::bigint_ser;
 use num_bigint::{BigInt, ToBigInt};
@@ -83,11 +84,6 @@ pub struct TransferRequest {
 impl Default for TransferRequest {
     fn default() -> Self {
         let cid = CidCbor::from(Cid::default());
-        let voucher = DealProposal {
-            payload_cid: cid.clone(),
-            id: 1,
-            params: Default::default(),
-        };
         Self {
             root: cid,
             mtype: MessageType::New,
@@ -101,8 +97,8 @@ impl Default for TransferRequest {
                 }),
                 current: None,
             },
-            voucher: Some(voucher),
-            voucher_type: DealProposal::voucher_type(),
+            voucher: None,
+            voucher_type: String::new(),
             transfer_id: 1,
             restart_channel: Default::default(),
         }
@@ -209,18 +205,32 @@ pub enum DealStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct DealProposal {
-    #[serde(rename = "PayloadCID")]
-    pub payload_cid: CidCbor,
-    #[serde(rename = "ID")]
-    pub id: u64,
-    #[serde(rename = "Params")]
-    pub params: DealParams,
+#[serde(untagged)]
+pub enum DealProposal {
+    Pull {
+        #[serde(rename = "PayloadCID")]
+        payload_cid: CidCbor,
+        #[serde(rename = "ID")]
+        id: u64,
+        #[serde(rename = "Params")]
+        params: DealParams,
+    },
+    Push {
+        #[serde(rename = "PayloadCID")]
+        payload_cid: CidCbor,
+        #[serde(rename = "ID")]
+        id: u64,
+        #[serde(rename = "Params")]
+        params: PushParams,
+    },
 }
 
 impl DealProposal {
-    pub fn voucher_type() -> String {
-        "RetrievalDealProposal/1".to_string()
+    pub fn voucher_type(&self) -> String {
+        match self {
+            Self::Pull { .. } => "RetrievalDealProposal/1".to_string(),
+            Self::Push { .. } => "PushProposal/1".to_string(),
+        }
     }
 }
 
@@ -252,22 +262,46 @@ impl Default for DealParams {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "PascalCase")]
+pub struct PushParams {
+    pub size: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct DealResponse {
-    #[serde(rename = "ID")]
-    pub id: u64,
-    #[serde(rename = "Status")]
-    pub status: DealStatus,
-    #[serde(rename = "PaymentOwed")]
-    #[serde(with = "bigint_ser")]
-    pub payment_owed: BigInt,
-    #[serde(rename = "Message")]
-    pub message: String,
+#[serde(untagged)]
+pub enum DealResponse {
+    // response to a push request
+    Push {
+        #[serde(rename = "ID")]
+        id: u64,
+        #[serde(rename = "Status")]
+        status: DealStatus,
+        #[serde(rename = "Message")]
+        message: String,
+        #[serde(rename = "Secret")]
+        secret: String,
+    },
+    // response to a pull request
+    Pull {
+        #[serde(rename = "ID")]
+        id: u64,
+        #[serde(rename = "Status")]
+        status: DealStatus,
+        #[serde(rename = "PaymentOwed")]
+        #[serde(with = "bigint_ser")]
+        payment_owed: BigInt,
+        #[serde(rename = "Message")]
+        message: String,
+    },
 }
 
 impl DealResponse {
-    pub fn voucher_type() -> String {
-        "RetrievalDealResponse/1".to_string()
+    pub fn voucher_type(&self) -> String {
+        match self {
+            Self::Pull { .. } => "RetrievalDealResponse/1".to_string(),
+            Self::Push { .. } => "PushResponse/1".to_string(),
+        }
     }
 }
 
@@ -351,6 +385,7 @@ pub struct DataTransferNetwork {
         >,
     >,
     connected: HashMap<PeerId, SmallVec<[Connection; 2]>>,
+    addresses: HashMap<PeerId, SmallVec<[Multiaddr; 2]>>,
     pending_outbound_requests: HashMap<PeerId, SmallVec<[TransferMessage; 10]>>,
 }
 
@@ -366,11 +401,19 @@ impl DataTransferNetwork {
             pending_events: VecDeque::new(),
             connected: HashMap::new(),
             pending_outbound_requests: HashMap::new(),
+            addresses: HashMap::new(),
         }
     }
 
     pub fn send_message(&mut self, peer: &PeerId, message: TransferMessage) {
         if let Some(message) = self.try_send_message(peer, message) {
+            let handler = self.new_handler();
+            self.pending_events.push_back(NetworkBehaviourAction::Dial {
+                opts: DialOpts::peer_id(*peer)
+                    .condition(dial_opts::PeerCondition::Disconnected)
+                    .build(),
+                handler,
+            });
             self.pending_outbound_requests
                 .entry(*peer)
                 .or_default()
@@ -398,6 +441,22 @@ impl DataTransferNetwork {
             Some(message)
         }
     }
+
+    pub fn add_address(&mut self, peer: &PeerId, address: Multiaddr) {
+        self.addresses.entry(*peer).or_default().push(address);
+    }
+
+    /// Removes an address of a peer previously added via `add_address`.
+    pub fn remove_address(&mut self, peer: &PeerId, address: &Multiaddr) {
+        let mut last = false;
+        if let Some(addresses) = self.addresses.get_mut(peer) {
+            addresses.retain(|a| a != address);
+            last = addresses.is_empty();
+        }
+        if last {
+            self.addresses.remove(peer);
+        }
+    }
 }
 
 impl NetworkBehaviour for DataTransferNetwork {
@@ -413,6 +472,9 @@ impl NetworkBehaviour for DataTransferNetwork {
         let mut addresses = Vec::new();
         if let Some(connections) = self.connected.get(peer) {
             addresses.extend(connections.iter().filter_map(|c| c.address.clone()));
+        }
+        if let Some(more) = self.addresses.get(peer) {
+            addresses.extend(more.into_iter().cloned());
         }
         addresses
     }
@@ -522,6 +584,17 @@ impl NetworkBehaviour for DataTransferNetwork {
         self.connected.remove(peer);
     }
 
+    fn inject_dial_failure(
+        &mut self,
+        peer: Option<PeerId>,
+        _: Self::ProtocolsHandler,
+        _: &DialError,
+    ) {
+        if let Some(peer) = peer {
+            self.pending_outbound_requests.remove(&peer);
+        }
+    }
+
     fn poll(
         &mut self,
         _: &mut Context<'_>,
@@ -593,7 +666,11 @@ mod tests {
 
         let response = msg.response.unwrap();
         assert_eq!(response.mtype, MessageType::Complete);
-        assert_eq!(response.voucher.unwrap().status, DealStatus::Completed);
+        if let Some(DealResponse::Pull { status, .. }) = response.voucher {
+            assert_eq!(status, DealStatus::Completed);
+        } else {
+            panic!("decoded wrong voucher {:?}", response.voucher);
+        }
     }
 
     #[async_std::test]
@@ -708,7 +785,10 @@ mod tests {
         let mut peer1 = Peer::new();
         let mut peer2 = Peer::new();
 
-        peer2.swarm().dial(peer1.addr.clone()).unwrap();
+        peer2
+            .swarm()
+            .behaviour_mut()
+            .add_address(&peer1.peer_id, peer1.addr.clone());
 
         let cid = Cid::default();
 

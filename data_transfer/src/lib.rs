@@ -18,8 +18,8 @@ use libp2p::swarm::{
 use libp2p::{Multiaddr, NetworkBehaviour, PeerId};
 use network::{
     ChannelId, DataTransferNetwork, DealProposal, DealResponse, DealStatus, DtNetEvent,
-    MessageType, TransferMessage, TransferRequest, TransferResponse, EMPTY_QUEUE_SHRINK_THRESHOLD,
-    EXTENSION_KEY,
+    MessageType, PushParams, TransferMessage, TransferRequest, TransferResponse,
+    EMPTY_QUEUE_SHRINK_THRESHOLD, EXTENSION_KEY,
 };
 use num_bigint::ToBigInt;
 use routing::{DiscoveryEvent, PeerDiscovery};
@@ -82,29 +82,34 @@ where
         graphsync.register_incoming_request_hook(Arc::new(|_peer, gs_req| {
             let mut extensions = HashMap::new();
             if let Ok(rmsg) = TransferMessage::try_from(&gs_req.extensions) {
-                let req = rmsg
-                    .request
-                    .expect("Expected incoming request to have a request");
-                let vch = req.voucher.expect("Expected request to have a voucher");
-                let voucher = DealResponse {
-                    id: vch.id,
-                    status: DealStatus::Accepted,
-                    message: "".to_string(),
-                    payment_owed: (0_isize).to_bigint().unwrap(),
-                };
-                let tmsg = TransferMessage {
-                    is_rq: false,
-                    request: None,
-                    response: Some(TransferResponse {
-                        mtype: MessageType::New,
-                        accepted: true,
-                        paused: false,
-                        transfer_id: req.transfer_id,
-                        voucher: Some(voucher),
-                        voucher_type: DealResponse::voucher_type(),
-                    }),
-                };
-                extensions.insert(EXTENSION_KEY.to_string(), tmsg.marshal_cbor().unwrap());
+                if rmsg.is_rq {
+                    let req = rmsg
+                        .request
+                        .expect("Expected incoming message to have a request");
+                    if let DealProposal::Pull { id, .. } =
+                        req.voucher.expect("Expected request to have a voucher")
+                    {
+                        let voucher = DealResponse::Pull {
+                            id,
+                            status: DealStatus::Accepted,
+                            message: "".to_string(),
+                            payment_owed: (0_isize).to_bigint().unwrap(),
+                        };
+                        let tmsg = TransferMessage {
+                            is_rq: false,
+                            request: None,
+                            response: Some(TransferResponse {
+                                mtype: MessageType::New,
+                                accepted: true,
+                                paused: false,
+                                transfer_id: req.transfer_id,
+                                voucher_type: voucher.voucher_type(),
+                                voucher: Some(voucher),
+                            }),
+                        };
+                        extensions.insert(EXTENSION_KEY.to_string(), tmsg.marshal_cbor().unwrap());
+                    }
+                }
                 (true, extensions)
             } else {
                 (false, extensions)
@@ -133,7 +138,7 @@ where
     ) -> Result<ChannelId, String> {
         let cid = CidCbor::from(root);
         let request_id = self.next_request_id();
-        let voucher = DealProposal {
+        let voucher = DealProposal::Pull {
             id: request_id,
             payload_cid: cid.clone(),
             params,
@@ -147,8 +152,8 @@ where
                 partial: false,
                 pull: true,
                 selector: selector.clone(),
+                voucher_type: voucher.voucher_type(),
                 voucher: Some(voucher),
-                voucher_type: DealProposal::voucher_type(),
                 transfer_id: request_id,
                 restart_channel: Default::default(),
             }),
@@ -160,6 +165,48 @@ where
         let rq_id = self.graphsync.request(peer_id, root, selector, extensions);
         let ch_id = self.channel_id(request_id, peer_id);
         self.channel_ids.insert(rq_id, ch_id.clone());
+        self.channels.insert(
+            ch_id.clone(),
+            Channel::New {
+                id: ch_id.clone(),
+                deal_id: request_id,
+            },
+        );
+        Ok(ch_id)
+    }
+
+    pub fn push(
+        &mut self,
+        peer_id: PeerId,
+        root: Cid,
+        selector: Selector,
+        params: PushParams,
+    ) -> Result<ChannelId, String> {
+        let cid = CidCbor::from(root);
+        let request_id = self.next_request_id();
+        let voucher = DealProposal::Push {
+            id: request_id,
+            payload_cid: cid.clone(),
+            params,
+        };
+        let message = TransferMessage {
+            is_rq: true,
+            request: Some(TransferRequest {
+                root: cid,
+                mtype: MessageType::New,
+                pause: false,
+                partial: false,
+                pull: false,
+                selector: selector.clone(),
+                voucher_type: voucher.voucher_type(),
+                voucher: Some(voucher),
+                transfer_id: request_id,
+                restart_channel: Default::default(),
+            }),
+            response: None,
+        };
+        self.network.send_message(&peer_id, message);
+        let ch_id = self.channel_id(request_id, peer_id);
         self.channels.insert(
             ch_id.clone(),
             Channel::New {
@@ -212,49 +259,111 @@ where
 
     fn process_request(&mut self, peer: PeerId, request: TransferRequest) -> ChannelId {
         let ch_id = self.channel_id(request.transfer_id, peer);
-        self.channels.insert(
-            ch_id.clone(),
-            Channel::New {
-                id: ch_id.clone(),
-                deal_id: request
-                    .voucher
-                    .expect("Expected request to contain voucher")
-                    .id,
-            },
-        );
+        match request.voucher {
+            Some(DealProposal::Pull { id, .. }) => {
+                self.channels.insert(
+                    ch_id.clone(),
+                    Channel::New {
+                        id: ch_id.clone(),
+                        deal_id: id,
+                    },
+                );
+            }
+            Some(DealProposal::Push { id, .. }) => {
+                self.channels.insert(
+                    ch_id.clone(),
+                    Channel::New {
+                        id: ch_id.clone(),
+                        deal_id: id,
+                    },
+                );
+                if let Some(cid) = request.root.to_cid() {
+                    let mut extensions = HashMap::new();
+                    let voucher = DealResponse::Push {
+                        id,
+                        status: DealStatus::Accepted,
+                        message: "".to_string(),
+                        secret: "".to_string(),
+                    };
+                    let tmsg = TransferMessage {
+                        is_rq: false,
+                        request: None,
+                        response: Some(TransferResponse {
+                            mtype: MessageType::New,
+                            accepted: true,
+                            paused: false,
+                            transfer_id: request.transfer_id,
+                            voucher_type: voucher.voucher_type(),
+                            voucher: Some(voucher),
+                        }),
+                    };
+                    extensions.insert(EXTENSION_KEY.to_string(), tmsg.marshal_cbor().unwrap());
+                    // in the case pf a push request, the responder initiates the graphsync request
+                    let rq_id = self
+                        .graphsync
+                        .request(peer, cid, request.selector, extensions);
+                    self.channel_ids.insert(rq_id, ch_id.clone());
+                }
+            }
+            _ => {}
+        }
         ch_id
     }
 
-    fn process_response(&mut self, peer: PeerId, response: TransferResponse) {
+    fn process_response(&mut self, peer: PeerId, response: TransferResponse) -> ChannelId {
         let ch_id = self.channel_id(response.transfer_id, peer);
         if response.accepted {
-            if let Some(voucher) = response.voucher {
-                match voucher.status {
-                    DealStatus::Accepted => {
+            match response.voucher {
+                Some(DealResponse::Pull { status, .. }) => {
+                    match status {
+                        // if it's the response for a pull request, it was attached to the first graphsync
+                        // message.
+                        DealStatus::Accepted => {
+                            let ch = self
+                                .channels
+                                .remove(&ch_id)
+                                .expect("Expected channel to be created before accepted");
+                            let next_state = ch.transition(ChannelEvent::Accepted);
+                            self.channels.insert(ch_id.clone(), next_state.clone());
+                            self.pending_events.push_back(next_state.into());
+                        }
+                        // the completion response for a pull request is sent separately after the
+                        // transfer is completed.
+                        DealStatus::Completed => {
+                            let ch = self
+                                .channels
+                                .remove(&ch_id)
+                                .expect("Expected channel to be created before response");
+                            let next_state = ch.transition(ChannelEvent::Completed);
+                            self.channels.insert(ch_id.clone(), next_state.clone());
+                            self.pending_events.push_back(next_state.into());
+                        }
+                        _ => {}
+                    }
+                }
+                Some(DealResponse::Push { status, .. }) => {
+                    // the response for a push request is sent as attachment to the graphsync
+                    // request.
+                    if let DealStatus::Accepted = status {
                         let ch = self
                             .channels
                             .remove(&ch_id)
                             .expect("Expected channel to be created before accepted");
                         let next_state = ch.transition(ChannelEvent::Accepted);
-                        self.channels.insert(ch_id, next_state.clone());
+                        self.channels.insert(ch_id.clone(), next_state.clone());
                         self.pending_events.push_back(next_state.into());
                     }
-                    DealStatus::Completed => {
-                        let ch = self
-                            .channels
-                            .remove(&ch_id)
-                            .expect("Expected channel to be created before response");
-                        let next_state = ch.transition(ChannelEvent::Completed);
-                        self.channels.insert(ch_id, next_state.clone());
-                        self.pending_events.push_back(next_state.into());
-                    }
-                    _ => {}
+                    // the completed response is not needed here as we assume once all the
+                    // blocks are sent that the push request was completed.
                 }
+                // response is invalid as it didn't contain a voucher
+                _ => {}
             }
         } else {
             log::info!("response {:?}", response);
             unimplemented!("TODO");
         }
+        ch_id
     }
 
     fn process_discovery_response(&mut self) {
@@ -275,40 +384,79 @@ where
         match event {
             GraphsyncEvent::RequestAccepted(peer, req) => {
                 if let Ok(msg) = TransferMessage::try_from(&req.extensions) {
-                    let ch_id = self.process_request(
-                        peer,
-                        msg.request
-                            .expect("Expected graphsync request to contain request"),
-                    );
-                    self.channel_ids.insert(req.id, ch_id);
+                    if msg.is_rq {
+                        let ch_id = self.process_request(
+                            peer,
+                            msg.request
+                                .expect("Expected graphsync request to contain request"),
+                        );
+                        self.channel_ids.insert(req.id, ch_id);
+                    } else {
+                        let ch_id = self.process_response(
+                            peer,
+                            msg.response
+                                .expect("Expected graphsync request to contain response"),
+                        );
+                        self.channel_ids.insert(req.id, ch_id);
+                    }
                 }
             }
             GraphsyncEvent::ResponseCompleted(peer, req_ids) => {
                 for id in req_ids {
+                    // we are removing the channel here
                     let (ch_id, ch) = self.get_channel_by_req_id(id).expect(
                         "Expected channel to be created before graphsync response is completed",
                     );
-
-                    if let Channel::New { deal_id, .. } = ch {
-                        let voucher = DealResponse {
-                            id: deal_id,
-                            status: DealStatus::Completed,
-                            message: "Thanks for doing business with us".to_string(),
-                            payment_owed: (0_isize).to_bigint().unwrap(),
+                    // if we're the requester it means we're done pushing the content
+                    if ch_id.initiator == self.peer_id.to_base58() {
+                        if let Channel::Accepted { deal_id, .. } = ch {
+                            let voucher = DealResponse::Push {
+                                id: deal_id,
+                                status: DealStatus::Completed,
+                                message: "".to_string(),
+                                secret: "".to_string(),
+                            };
+                            let tmsg = TransferMessage {
+                                is_rq: false,
+                                request: None,
+                                response: Some(TransferResponse {
+                                    mtype: MessageType::Complete,
+                                    accepted: true,
+                                    paused: false,
+                                    transfer_id: ch_id.id,
+                                    voucher_type: voucher.voucher_type(),
+                                    voucher: Some(voucher),
+                                }),
+                            };
+                            self.network.send_message(&peer, tmsg);
+                        }
+                        let next_state = Channel::Completed {
+                            id: ch_id,
+                            received: 0,
                         };
-                        let tmsg = TransferMessage {
-                            is_rq: false,
-                            request: None,
-                            response: Some(TransferResponse {
-                                mtype: MessageType::Complete,
-                                accepted: true,
-                                paused: false,
-                                transfer_id: ch_id.id,
-                                voucher: Some(voucher),
-                                voucher_type: DealResponse::voucher_type(),
-                            }),
-                        };
-                        self.network.send_message(&peer, tmsg);
+                        self.pending_events.push_back(next_state.into());
+                    } else {
+                        if let Channel::New { deal_id, .. } = ch {
+                            let voucher = DealResponse::Pull {
+                                id: deal_id,
+                                status: DealStatus::Completed,
+                                message: "Thanks for doing business with us".to_string(),
+                                payment_owed: (0_isize).to_bigint().unwrap(),
+                            };
+                            let tmsg = TransferMessage {
+                                is_rq: false,
+                                request: None,
+                                response: Some(TransferResponse {
+                                    mtype: MessageType::Complete,
+                                    accepted: true,
+                                    paused: false,
+                                    transfer_id: ch_id.id,
+                                    voucher_type: voucher.voucher_type(),
+                                    voucher: Some(voucher),
+                                }),
+                            };
+                            self.network.send_message(&peer, tmsg);
+                        }
                     }
                 }
             }
@@ -391,7 +539,7 @@ mod tests {
     use super::*;
     use async_std::task;
     use blockstore::memory::MemoryDB as MemoryBlockStore;
-    use dag_service::add;
+    use dag_service::{add, cat};
     use futures::prelude::*;
     use graphsync::traversal::RecursionLimit;
     use libp2p::core::muxing::StreamMuxerBox;
@@ -585,5 +733,84 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[async_std::test]
+    async fn test_push() {
+        use futures::join;
+
+        let mut peer1 = Peer::new();
+        let mut peer2 = Peer::new();
+        peer2.add_address(&peer1);
+
+        let store = peer2.store.clone();
+
+        // generate 4MiB of random bytes
+        const FILE_SIZE: usize = 4 * 1024 * 1024;
+        let mut data = vec![0u8; FILE_SIZE];
+        rand::thread_rng().fill_bytes(&mut data);
+
+        let root = add(store.clone(), &data).unwrap();
+
+        let selector = Selector::ExploreRecursive {
+            limit: RecursionLimit::None,
+            sequence: Box::new(Selector::ExploreAll {
+                next: Box::new(Selector::ExploreRecursiveEdge),
+            }),
+            current: None,
+        };
+
+        let cid = root.unwrap();
+        let pid1 = peer1.peer_id;
+
+        join!(
+            async {
+                loop {
+                    if let Some(event) = &peer1.next().await {
+                        match event {
+                            DataTransferEvent::Started(_) => {}
+                            DataTransferEvent::Accepted(_) => {}
+                            DataTransferEvent::Progress(_) => {}
+                            DataTransferEvent::Block { .. } => {}
+                            DataTransferEvent::Completed(_chid, Ok(())) => {
+                                break;
+                            }
+                            e => {
+                                panic!("unexpected event {:?}", e);
+                            }
+                        }
+                    }
+                }
+            },
+            async {
+                let id = peer2
+                    .swarm()
+                    .behaviour_mut()
+                    .push(pid1, cid, selector, PushParams::default())
+                    .unwrap();
+
+                loop {
+                    if let Some(event) = peer2.next().await {
+                        match event {
+                            DataTransferEvent::Started(_) => {}
+                            DataTransferEvent::Accepted(_) => {}
+                            DataTransferEvent::Progress(_) => {}
+                            DataTransferEvent::Block { .. } => {}
+                            DataTransferEvent::Completed(chid, Ok(())) => {
+                                assert_eq!(chid, id);
+                                break;
+                            }
+                            e => {
+                                panic!("unexpected event {:?}", e);
+                            }
+                        }
+                    }
+                }
+            },
+        );
+        let pstore = peer1.store.clone();
+
+        let buf = cat(pstore, cid).unwrap();
+        assert_eq!(&buf, &data);
     }
 }

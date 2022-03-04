@@ -72,7 +72,7 @@ pub enum RoutingEvent {
 
 #[derive(NetworkBehaviour)]
 #[behaviour(out_event = "RoutingEvent", poll_method = "poll", event_process = true)]
-pub struct Routing<S: 'static + BlockStore>
+pub struct Pop<S: 'static + BlockStore>
 where
     Ipld: Decode<<S::Params as StoreParams>::Codecs>,
 {
@@ -104,7 +104,7 @@ where
     store: Arc<S>,
 }
 
-impl<S: 'static + BlockStore> Routing<S>
+impl<S: 'static + BlockStore> Pop<S>
 where
     Ipld: Decode<<S::Params as StoreParams>::Codecs>,
 {
@@ -473,7 +473,7 @@ where
     }
 }
 
-impl<S: 'static + BlockStore> NetworkBehaviourEventProcess<DiscoveryEvent> for Routing<S>
+impl<S: 'static + BlockStore> NetworkBehaviourEventProcess<DiscoveryEvent> for Pop<S>
 where
     Ipld: Decode<<S::Params as StoreParams>::Codecs>,
 {
@@ -486,7 +486,7 @@ where
     }
 }
 
-impl<S: 'static + BlockStore> NetworkBehaviourEventProcess<DataTransferEvent> for Routing<S>
+impl<S: 'static + BlockStore> NetworkBehaviourEventProcess<DataTransferEvent> for Pop<S>
 where
     Ipld: Decode<<S::Params as StoreParams>::Codecs>,
 {
@@ -500,7 +500,7 @@ where
     }
 }
 
-impl<S: 'static + BlockStore> NetworkBehaviourEventProcess<RoutingNetEvent> for Routing<S>
+impl<S: 'static + BlockStore> NetworkBehaviourEventProcess<RoutingNetEvent> for Pop<S>
 where
     Ipld: Decode<<S::Params as StoreParams>::Codecs>,
 {
@@ -517,7 +517,7 @@ where
     }
 }
 
-impl<S: 'static + BlockStore> NetworkBehaviourEventProcess<GossipsubEvent> for Routing<S>
+impl<S: 'static + BlockStore> NetworkBehaviourEventProcess<GossipsubEvent> for Pop<S>
 where
     Ipld: Decode<<S::Params as StoreParams>::Codecs>,
 {
@@ -588,7 +588,7 @@ mod tests {
     struct Peer {
         peer_id: PeerId,
         addr: Multiaddr,
-        swarm: Swarm<Routing<MemoryBlockStore>>,
+        swarm: Swarm<Pop<MemoryBlockStore>>,
     }
 
     impl Peer {
@@ -597,7 +597,7 @@ mod tests {
             let bs = Arc::new(MemoryBlockStore::default());
             let gs = Graphsync::new(Default::default(), bs.clone());
             let dt = DataTransfer::new(peer_id, gs);
-            let rt = Routing::new(peer_id, is_hub, dt, bs.clone(), None);
+            let rt = Pop::new(peer_id, is_hub, dt, bs.clone(), None);
             let mut swarm = Swarm::new(trans, rt, peer_id);
             Swarm::listen_on(&mut swarm, "/ip4/127.0.0.1/tcp/0".parse().unwrap()).unwrap();
             while swarm.next().now_or_never().is_some() {}
@@ -672,7 +672,7 @@ mod tests {
             entry
         }
 
-        fn swarm(&mut self) -> &mut Swarm<Routing<MemoryBlockStore>> {
+        fn swarm(&mut self) -> &mut Swarm<Pop<MemoryBlockStore>> {
             &mut self.swarm
         }
 

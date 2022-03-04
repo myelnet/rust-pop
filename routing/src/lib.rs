@@ -166,6 +166,45 @@ where
         Ok(())
     }
 
+    pub fn add_address(&mut self, peer_id: &PeerId, addr: Multiaddr) {
+        self.discovery.add_address(peer_id, addr);
+        self.broadcaster.add_explicit_peer(peer_id);
+    }
+
+    fn addresses_of_peer(&mut self, peer_id: &PeerId) -> Vec<Multiaddr> {
+        self.discovery.addresses_of_peer(peer_id)
+    }
+
+    fn fetch_content(&mut self, peer_id: PeerId, cid: Cid) -> Result<ChannelId, String> {
+        let selector = Selector::ExploreRecursive {
+            limit: RecursionLimit::None,
+            sequence: Box::new(Selector::ExploreAll {
+                next: Box::new(Selector::ExploreRecursiveEdge),
+            }),
+            current: None,
+        };
+
+        self.data_transfer
+            .pull(peer_id, cid, selector, DealParams::default())
+    }
+
+    fn fetch_from_random_peer(&mut self, cid: Cid) -> Result<ChannelId, String> {
+        let table = self.routing_table.clone();
+        let lock = table.read().unwrap();
+        if let Some(peer_table) = lock.get(&cid) {
+            for peer in peer_table.keys() {
+                for addr in peer_table.get(peer).unwrap() {
+                    self.add_address(peer, addr.clone());
+                }
+                match self.fetch_content(*peer, cid) {
+                    Ok(ch) => return Ok(ch),
+                    Err(e) => println!("Failed to fetch {:?} from {:?}", cid, peer),
+                }
+            }
+        }
+        Err("failed to fetch from all peers".to_string())
+    }
+
     pub fn find_content(&mut self, root: Cid) -> Result<(), String> {
         let msg = ContentRequest {
             multiaddresses: self.discovery.multiaddr.to_vec(),
@@ -206,15 +245,6 @@ where
         }
 
         Ok(())
-    }
-
-    pub fn add_address(&mut self, peer_id: &PeerId, addr: Multiaddr) {
-        self.discovery.add_address(peer_id, addr);
-        self.broadcaster.add_explicit_peer(peer_id);
-    }
-
-    fn addresses_of_peer(&mut self, peer_id: &PeerId) -> Vec<Multiaddr> {
-        self.discovery.addresses_of_peer(peer_id)
     }
 
     fn insert_routing_entry(
@@ -347,36 +377,6 @@ where
         }
     }
 
-    fn fetch_content(&mut self, peer_id: PeerId, cid: Cid) -> Result<ChannelId, String> {
-        let selector = Selector::ExploreRecursive {
-            limit: RecursionLimit::None,
-            sequence: Box::new(Selector::ExploreAll {
-                next: Box::new(Selector::ExploreRecursiveEdge),
-            }),
-            current: None,
-        };
-
-        self.data_transfer
-            .pull(peer_id, cid, selector, DealParams::default())
-    }
-
-    fn fetch_from_random_peer(&mut self, cid: Cid) -> Result<ChannelId, String> {
-        let table = self.routing_table.clone();
-        let lock = table.read().unwrap();
-        if let Some(peer_table) = lock.get(&cid) {
-            for peer in peer_table.keys() {
-                for addr in peer_table.get(peer).unwrap() {
-                    self.add_address(peer, addr.clone());
-                }
-                match self.fetch_content(*peer, cid) {
-                    Ok(ch) => return Ok(ch),
-                    Err(e) => println!("Failed to fetch {:?} from {:?}", cid, peer),
-                }
-            }
-        }
-        Err("failed to fetch from all peers".to_string())
-    }
-
     fn process_routing_response(&mut self, peer_table: PeerTable, root: Cid) {
         // expand table as new entries come in
         let mut new_entry = HashMap::new();
@@ -406,19 +406,13 @@ where
         &mut self,
         peer_id: PeerId,
         message: GossipsubMessage,
-    ) -> Result<(), io::Error> {
+    ) -> Result<(), String> {
         // only hubs should respond
         if self.is_hub {
-            let req = ContentRequest::unmarshal_cbor(&message.data)
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
-
+            let req = ContentRequest::unmarshal_cbor(&message.data).map_err(|e| e.to_string())?;
             //  if the sent Cid is valid
             if let Some(r) = req.root.to_cid() {
-                if !self
-                    .store
-                    .contains(&r)
-                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?
-                {
+                if !self.store.contains(&r).map_err(|e| e.to_string())? {
                     //  if routing table contains the root cid, if not then do nothing
                     if let Some(peer_table) = self.routing_table.read().unwrap().get(&r) {
                         let message = RoutingProposal {
@@ -430,7 +424,7 @@ where
                             .push_back(RoutingEvent::FoundContent(r.to_string()));
                     }
                 } else {
-                    return Err(io::Error::new(io::ErrorKind::Other, "invalid cid"));
+                    return Err("invalid cid".to_string());
                 }
             }
         }

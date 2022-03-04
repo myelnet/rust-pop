@@ -207,9 +207,7 @@ where
 
     pub fn add_address(&mut self, peer_id: &PeerId, addr: Multiaddr) {
         self.discovery.add_address(peer_id, addr);
-        // self.broadcaster.add_explicit_peer(peer_id);
-        // issues here
-        // self.broadcaster.add_explicit_peer(peer_id);
+        self.broadcaster.add_explicit_peer(peer_id);
     }
 
     fn addresses_of_peer(&mut self, peer_id: &PeerId) -> Vec<Multiaddr> {
@@ -246,6 +244,9 @@ where
                 if let Some(c) = cid.to_cid() {
                     if let Some(peer_table) = lock.get_mut(&c) {
                         peer_table.remove(&peer_id);
+                        if peer_table.is_empty() {
+                            lock.remove(&c);
+                        }
                     }
                 }
                 // quit if a single CID is invalid, this can be relaxed
@@ -526,6 +527,7 @@ where
                     }
                 }
             }
+            GossipsubEvent::Subscribed { .. } => {}
             _ => println!("gossip event: {:?}", event),
         }
     }
@@ -606,13 +608,32 @@ mod tests {
                 .add_address(&peer.peer_id, peer.addr.clone());
         }
 
-        fn fake_index(&mut self) -> RoutingTableEntry {
-            let cid =
-                Cid::try_from("bafy2bzaceafciokjlt5v5l53pftj6zcmulc2huy3fduwyqsm3zo5bzkau7muq")
-                    .unwrap();
+        fn push_update(&mut self, content: Vec<&str>, msg: MessageType) -> Vec<CidCbor> {
+            let mut cids = Vec::new();
+            for c in content {
+                cids.push(CidCbor::from(
+                    Cid::try_from("bafy2bzaceafciokjlt5v5l53pftj6zcmulc2huy3fduwyqsm3zo5bzkau7muq")
+                        .unwrap(),
+                ));
+            }
+            self.swarm()
+                .behaviour_mut()
+                .broadcast_update(cids.clone(), msg)
+                .unwrap();
+            cids
+        }
+
+        fn fake_index(&mut self, content: Vec<&str>) -> RoutingTableEntry {
+            let mut cids = Vec::new();
+            for c in content {
+                cids.push(CidCbor::from(
+                    Cid::try_from("bafy2bzaceafciokjlt5v5l53pftj6zcmulc2huy3fduwyqsm3zo5bzkau7muq")
+                        .unwrap(),
+                ));
+            }
             let entry = RoutingTableEntry {
                 multiaddresses: Vec::from([self.addr.clone()]),
-                cids: Vec::from([CidCbor::from(cid)]),
+                cids,
                 update: MessageType::Insertion,
             };
 
@@ -658,13 +679,25 @@ mod tests {
             }
         }
 
+        async fn next_sync(&mut self) -> Option<RoutingEvent> {
+            loop {
+                let ev = self.swarm.next().await?;
+                if let SwarmEvent::Behaviour(event) = ev {
+                    match event {
+                        RoutingEvent::SyncRequestBroadcast => return Some(event),
+                        _ => println!("{:?}", event),
+                    }
+                }
+            }
+        }
+
         async fn next_discovery(&mut self) -> Option<RoutingEvent> {
             loop {
                 let ev = self.swarm.next().await?;
                 if let SwarmEvent::Behaviour(event) = ev {
                     match event {
                         RoutingEvent::HubTableUpdated => return Some(event),
-                        _ => {}
+                        _ => println!("{:?}", event),
                     }
                 }
             }
@@ -676,7 +709,7 @@ mod tests {
                 if let SwarmEvent::Behaviour(event) = ev {
                     match event {
                         RoutingEvent::HubIndexUpdated => return Some(event),
-                        _ => {}
+                        _ => println!("{:?}", event),
                     }
                 }
             }
@@ -702,33 +735,27 @@ mod tests {
 
         // will have themselves in hub table
         let mut peer2 = Peer::new(false);
-        let entry = peer2.fake_index();
-        // let mut peer3 = Peer::new(true);
-        //
-        // // peer 3 knows peer 2 and itself
-        // peer3.add_address(&peer2);
-        // // peer 1 knows peer 2 and itself
+        let entry = peer2.fake_index(Vec::from([
+            "bafy2bzaceafciokjlt5v5l53pftj6zcmulc2huy3fduwyqsm3zo5bzkau7muq",
+        ]));
+
         peer1.add_address(&peer2);
-        //
-        // //  print logs for peer 2
+
         let hub_routing_table = peer1.get_routing_table().clone();
 
         let peer2id = peer2.spawn("peer2");
-        //
-        // peer3.swarm().dial(peer2id).unwrap();
+
+        peer1.next_discovery().await;
+
         let dial = peer1.swarm().dial(peer2id);
 
         println!("dial {:?}", dial);
 
         assert!(dial.is_ok());
-        //
-        // peer3.next_discovery().await;
-        peer1.next_discovery().await;
-        //
-
-        let cid = &entry.cids.first().unwrap().to_cid().unwrap();
 
         peer1.next_indexing().await;
+
+        let cid = &entry.cids.first().unwrap().to_cid().unwrap();
 
         assert!(hub_routing_table.read().unwrap().contains_key(cid));
 
@@ -752,45 +779,74 @@ mod tests {
         );
     }
 
-    // #[async_std::test]
-    // async fn test_index_update() {
-    //     let cid = Cid::try_from("bafy2bzaceafciokjlt5v5l53pftj6zcmulc2huy3fduwyqsm3zo5bzkau7muq")
-    //         .unwrap();
-    //     let content = CidCbor::from(cid);
-    //     let host_peer = Peer::new(true);
-    //     let multiaddr = SmallVec::<[Multiaddr; 6]>::from(Vec::from([host_peer.addr]));
-    //     let peer_id = host_peer.peer_id;
-    //     let peer_table: PeerTable = HashMap::from([(peer_id, multiaddr)]);
-    //
-    //     let mut hub_peer = Peer::new(true);
-    //     let mut peer1 = Peer::new(false);
-    //
-    //     // peer1
-    //     //     .swarm()
-    //     //     .behaviour_mut()
-    //     //     .insert_routing_entry(content, peer_table);
-    //
-    //     let mut peer2 = Peer::new(false);
-    //
-    //     peer1.add_address(&hub_peer);
-    //     peer1.add_address(&peer2);
-    //
-    //     //  print logs for hub peer
-    //     let hub_table = hub_peer.get_index().clone();
-    //     let hubid = hub_peer.spawn("hub");
-    //
-    //     peer1.swarm().dial(hubid).unwrap();
-    //     peer1.next_discovery().await;
-    //
-    //     // update remote hubs
-    //     // peer1.swarm().behaviour_mut().broadcast_update();
-    //     peer1.next_indexing().await;
-    //
-    //     // assert peer 2 table did not update
-    //     assert!(peer2.get_index().is_empty());
-    //
-    //     assert_eq!(hub_table, peer1.get_index());
-    // }
+    #[async_std::test]
+    async fn test_can_update_index() {
+        //  will have empty hub table as not a hub
+        let mut peer1 = Peer::new(false);
+
+        // will have themselves in hub table
+        let mut peer2 = Peer::new(true);
+
+        peer1.add_address(&peer2);
+        //
+        // //  print logs for peer 2
+        let hub_routing_table = peer2.get_routing_table().clone();
+        let peer2id = peer2.spawn("peer2");
+
+        std::thread::sleep(std::time::Duration::from_millis(1000));
+        //
+        // peer3.swarm().dial(peer2id).unwrap();
+        peer1.swarm().dial(peer2id).unwrap();
+
+        peer1.next_discovery().await;
+
+        let cids = peer1.push_update(
+            Vec::from(["bafy2bzaceafciokjlt5v5l53pftj6zcmulc2huy3fduwyqsm3zo5bzkau7muq"]),
+            MessageType::Insertion,
+        );
+
+        peer1.next_sync().await;
+
+        std::thread::sleep(std::time::Duration::from_millis(1000));
+
+        let cid = &cids.first().unwrap().to_cid().unwrap();
+
+        assert!(hub_routing_table.read().unwrap().contains_key(cid));
+
+        assert!(hub_routing_table
+            .read()
+            .unwrap()
+            .get(cid)
+            .unwrap()
+            .contains_key(&peer1.peer_id));
+
+        assert_eq!(
+            hub_routing_table
+                .read()
+                .unwrap()
+                .get(cid)
+                .unwrap()
+                .get(&peer1.peer_id)
+                .unwrap()
+                .clone(),
+            SmallVec::<[Multiaddr; 6]>::from(
+                peer1.swarm().behaviour_mut().discovery.multiaddr.to_vec()
+            )
+        );
+
+        let cids = peer1.push_update(
+            Vec::from(["bafy2bzaceafciokjlt5v5l53pftj6zcmulc2huy3fduwyqsm3zo5bzkau7muq"]),
+            MessageType::Deletion,
+        );
+
+        peer1.next_sync().await;
+
+        std::thread::sleep(std::time::Duration::from_millis(1000));
+
+        assert!(hub_routing_table.read().unwrap().is_empty())
+    }
+
+    
     // #[async_std::test]
     // async fn test_broadcaster() {
     //     let cid = Cid::try_from("bafy2bzaceafciokjlt5v5l53pftj6zcmulc2huy3fduwyqsm3zo5bzkau7muq")

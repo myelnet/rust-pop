@@ -76,7 +76,7 @@ pub fn peer_table_from_bytes(p: &SerializablePeerTable) -> PeerTable {
 //         .collect()
 // }
 
-pub fn gossip_init(peer_id: PeerId, topic: Topic) -> Gossipsub {
+pub fn gossip_init(peer_id: PeerId, topics: Vec<Topic>) -> Gossipsub {
     // We take current time as request id as request content may not be unique
     let message_id_fn = |_message: &GossipsubMessage| MessageId::from(instant::now().to_ne_bytes());
 
@@ -93,7 +93,8 @@ pub fn gossip_init(peer_id: PeerId, topic: Topic) -> Gossipsub {
         Gossipsub::new(MessageAuthenticity::Author(peer_id), gossipsub_config)
             .expect("Correct configuration");
 
-    // subscribes to our topic
-    content_routing.subscribe(&topic).unwrap();
+    for topic in topics {
+        content_routing.subscribe(&topic).unwrap();
+    }
     content_routing
 }

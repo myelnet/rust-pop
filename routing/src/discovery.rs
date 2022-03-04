@@ -124,7 +124,8 @@ impl RequestResponseCodec for DiscoveryCodec {
 
 #[derive(Debug)]
 pub enum DiscoveryEvent {
-    ResponseReceived(DiscoveryResponse),
+    // peer and index root
+    ResponseReceived(RequestId, PeerId, Option<CidCbor>),
 }
 
 #[derive(Clone)]
@@ -158,7 +159,7 @@ pub struct DiscoveryRequest {
 
 #[derive(Debug, PartialEq, Clone, Serialize_tuple, Deserialize_tuple)]
 pub struct DiscoveryResponse {
-    pub source: Vec<u8>,
+    // pub source: Vec<u8>,
     pub id: RequestId,
     pub addresses: SerializablePeerTable,
     pub index_root: Option<CidCbor>,
@@ -359,7 +360,7 @@ impl NetworkBehaviour for HubDiscovery {
                 }
             };
             match event {
-                RequestResponseEvent::Message { peer: _, message } => match message {
+                RequestResponseEvent::Message { peer, message } => match message {
                     RequestResponseMessage::Request {
                         request_id: _,
                         request,
@@ -368,7 +369,6 @@ impl NetworkBehaviour for HubDiscovery {
                         let new_addresses = peer_table_to_bytes(&self.hub_table.read().unwrap());
 
                         let msg = DiscoveryResponse {
-                            source: self.peer_id.to_bytes(),
                             id: request.id,
                             addresses: new_addresses,
                             index_root: self.index_root.clone(),
@@ -386,7 +386,11 @@ impl NetworkBehaviour for HubDiscovery {
                         self.hub_table.write().unwrap().extend(new_addresses);
 
                         return Poll::Ready(NetworkBehaviourAction::GenerateEvent(
-                            DiscoveryEvent::ResponseReceived(response),
+                            DiscoveryEvent::ResponseReceived(
+                                response.id,
+                                peer,
+                                response.index_root,
+                            ),
                         ));
                     }
                 },
@@ -454,7 +458,7 @@ mod tests {
         let mut addresses = HashMap::new();
         addresses.insert(peer.clone(), multiaddr);
         let resp = DiscoveryResponse {
-            source: peer,
+            // source: peer,
             id: 1,
             addresses,
             index_root: None,
@@ -549,8 +553,8 @@ mod tests {
     }
 
     fn assert_response_ok(event: Option<DiscoveryEvent>, id: RequestId) {
-        if let Some(DiscoveryEvent::ResponseReceived(responses)) = event {
-            assert_eq!(responses.id, id);
+        if let Some(DiscoveryEvent::ResponseReceived(resp_id, _, _)) = event {
+            assert_eq!(resp_id, id);
         } else {
             panic!("{:?} is not a response event", event);
         }

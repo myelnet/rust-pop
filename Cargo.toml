@@ -35,11 +35,12 @@ features = ["wasm-ext"]
 libipld = "0.12"
 rand = { version = "0.7", features = ["wasm-bindgen"] }
 async-std = { version = "1.6.2", features = ["attributes", "unstable"] }
+filecoin = { path = "./filecoin", default_features = false }
 graphsync = { path = "./graphsync", default_features = false }
 dag_service = { path = "./dag_service", default_features = false }
 blockstore = { path = "./blockstore", default_features = false }
 data_transfer = { path = "./data_transfer", default_features = false }
-routing = { path = "./routing" }
+routing = { path = "./routing", default_features = false  }
 serde = { version = "1.0", features = ["derive"] }
 instant = "0.1.12"
 futures = "0.3.19"
@@ -47,6 +48,10 @@ futures-lite = "1.12.0"
 thiserror = "1.0"
 parity-send-wrapper = { version = "0.1.0", optional = true }
 parking_lot = "0.11"
+lazy_static = "1.4.0"
+bimap = "0.6.2"
+serde_repr = "0.1"
+smallvec = "1.8.0"
 
 #  cli related imports
 warp = { version = "0.3.2", optional = true }
@@ -85,6 +90,8 @@ native = [
   "graphsync/native",
   "dag_service/native",
   "data_transfer/native",
+  "filecoin/native",
+  "routing/native",
   "warp",
   "clap",
   "reqwest",
@@ -125,4 +132,6 @@ browser = [
   "graphsync/browser",
   "data_transfer/browser",
   "dag_service/browser",
+  "routing/browser",
+  "filecoin/browser",
 ]

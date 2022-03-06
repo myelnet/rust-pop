@@ -4149,6 +4149,7 @@ name = "pop"
 version = "0.1.0"
 dependencies = [
  "async-std",
+ "bimap",
  "blockstore",
  "chrono",
  "clap 3.1.1",
@@ -4157,6 +4158,7 @@ dependencies = [
  "console_log",
  "dag_service",
  "data_transfer",
+ "filecoin",
  "futures",
  "futures-lite",
  "futures-timer",
@@ -4165,6 +4167,7 @@ dependencies = [
  "graphsync",
  "instant",
  "js-sys",
+ "lazy_static",
  "libipld",
  "libp2p",
  "libp2p-wasm-ext",
@@ -4176,6 +4179,8 @@ dependencies = [
  "reqwest",
  "routing",
  "serde",
+ "serde_repr",
+ "smallvec",
  "thiserror",
  "unixfs-v1",
  "warp",

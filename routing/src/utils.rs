@@ -1,6 +1,4 @@
 use crate::discovery::{PeerTable, SerializablePeerTable};
-use crate::RoutingTableEntry;
-use filecoin::types::Cbor;
 use libp2p::core::{Multiaddr, PeerId};
 use libp2p::gossipsub::MessageId;
 use libp2p::gossipsub::{
@@ -51,30 +49,6 @@ pub fn peer_table_from_bytes(p: &SerializablePeerTable) -> PeerTable {
         })
         .collect()
 }
-
-// pub fn index_to_bytes(c: &Index) -> SerializableIndex {
-//     c.iter()
-//         .map_while(|(cid, addresses)| {
-//             let peer_table = peer_table_to_bytes(addresses);
-//             Some((cid.bytes().clone(), peer_table))
-//         })
-//         .collect()
-// }
-
-// pub fn index_from_bytes(c: &SerializableIndex) -> Index {
-//     c.iter()
-//         .map_while(|(cid, addresses)| {
-//             // check sent peer is valid
-//             match Cid::try_from(cid.clone()) {
-//                 Ok(c) => {
-//                     let peer_table = peer_table_from_bytes(addresses);
-//                     Some((CidCbor::from(c), peer_table))
-//                 }
-//                 Err(_) => None,
-//             }
-//         })
-//         .collect()
-// }
 
 pub fn gossip_init(peer_id: PeerId, topics: Vec<Topic>) -> Gossipsub {
     // We take current time as request id as request content may not be unique

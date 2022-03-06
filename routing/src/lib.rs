@@ -23,7 +23,6 @@ use serde::{Deserialize, Serialize};
 use serde_repr::{Deserialize_repr, Serialize_repr};
 use smallvec::SmallVec;
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::io;
 use std::str::FromStr;
 use std::sync::{Arc, RwLock};
 use std::task::{Context, Poll};
@@ -149,7 +148,7 @@ where
     ) -> Result<(), String> {
         let msg = RoutingTableEntry {
             multiaddresses: self.discovery.multiaddr.to_vec(),
-            cids: cids.clone(),
+            cids,
             update,
         }
         .marshal_cbor()
@@ -168,7 +167,7 @@ where
 
     pub fn add_address(&mut self, peer_id: &PeerId, addr: Multiaddr) {
         self.discovery.add_address(peer_id, addr);
-        self.broadcaster.add_explicit_peer(peer_id);
+        // self.broadcaster.add_explicit_peer(peer_id);
     }
 
     fn addresses_of_peer(&mut self, peer_id: &PeerId) -> Vec<Multiaddr> {
@@ -198,7 +197,7 @@ where
                 }
                 match self.fetch_content(*peer, cid) {
                     Ok(ch) => return Ok(ch),
-                    Err(e) => println!("Failed to fetch {:?} from {:?}", cid, peer),
+                    Err(_) => println!("Failed to fetch {:?} from {:?}", cid, peer),
                 }
             }
         }
@@ -603,10 +602,6 @@ mod tests {
             }
         }
 
-        fn get_hub_table(&mut self) -> Arc<RwLock<PeerTable>> {
-            return self.swarm.behaviour_mut().discovery.hub_table.clone();
-        }
-
         fn get_routing_table(&mut self) -> Arc<RwLock<Index>> {
             return self.swarm.behaviour_mut().routing_table.clone();
         }
@@ -623,7 +618,7 @@ mod tests {
 
         fn push_update(&mut self, content: Vec<&str>, msg: MessageType) -> Vec<CidCbor> {
             let mut cids = Vec::new();
-            for c in content {
+            for _ in content {
                 cids.push(CidCbor::from(
                     Cid::try_from("bafy2bzaceafciokjlt5v5l53pftj6zcmulc2huy3fduwyqsm3zo5bzkau7muq")
                         .unwrap(),
@@ -637,8 +632,8 @@ mod tests {
         }
 
         fn make_index(&mut self) -> RoutingTableEntry {
-            // generate 4MiB of random bytes
-            const FILE_SIZE: usize = 2;
+            // generate 1 random byte
+            const FILE_SIZE: usize = 1;
             let mut data = vec![0u8; FILE_SIZE];
             rand::thread_rng().fill_bytes(&mut data);
 
@@ -679,19 +674,6 @@ mod tests {
                 }
             });
             peer_id
-        }
-
-        async fn next(&mut self) -> Option<RoutingEvent> {
-            loop {
-                let ev = self.swarm.next().await?;
-                if let SwarmEvent::Behaviour(event) = ev {
-                    match event {
-                        RoutingEvent::HubTableUpdated => {}
-                        RoutingEvent::HubIndexUpdated => {}
-                        _ => return Some(event),
-                    }
-                }
-            }
         }
 
         async fn next_sync(&mut self) -> Option<RoutingEvent> {
@@ -857,7 +839,7 @@ mod tests {
             )
         );
 
-        let cids = peer1.push_update(
+        peer1.push_update(
             Vec::from(["bafy2bzaceafciokjlt5v5l53pftj6zcmulc2huy3fduwyqsm3zo5bzkau7muq"]),
             MessageType::Deletion,
         );
@@ -889,8 +871,10 @@ mod tests {
         hub_peer.swarm().dial(peer1id).unwrap();
         hub_peer.next_indexing().await;
 
+        let hubid = hub_peer.spawn("hub");
+
         //  print logs for hub peer
-        peer2.swarm().dial(hub_peer.peer_id).unwrap();
+        peer2.swarm().dial(hubid).unwrap();
         peer2.next_discovery().await;
         println!("discovery done");
 
@@ -908,14 +892,14 @@ mod tests {
 
         assert_eq!(k1.sort(), k2.sort());
 
-        let mut v1: Vec<&PeerTable> = lock1.values().collect();
-        let mut v3: Vec<&PeerTable> = lock2.values().collect();
+        let v1: Vec<&PeerTable> = lock1.values().collect();
+        let v3: Vec<&PeerTable> = lock2.values().collect();
 
         assert_eq!(v1, v3);
 
-        // let cid_resp = peer2.next_content_fulfilled().await;
-        //
-        // // assert the content table updated correctly
-        // assert_eq!(cid.to_string(), cid_resp.unwrap());
+        let cid_resp = peer2.next_content_fulfilled().await;
+
+        // assert the content table updated correctly
+        assert_eq!(cid.to_string(), cid_resp.unwrap());
     }
 }

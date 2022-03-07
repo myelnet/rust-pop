@@ -16,7 +16,7 @@ use libp2p::swarm::{Swarm, SwarmEvent};
 use libp2p::{self, identity, Multiaddr, PeerId};
 use parking_lot::Mutex;
 use rand::prelude::*;
-use routing::{Config as PeerDiscoveryConfig, PeerDiscovery};
+// use routing::{Config as PeerDiscoveryConfig, PeerDiscovery};
 use std::collections::HashMap;
 use std::sync::Arc;
 use warp::Filter;
@@ -53,7 +53,7 @@ where
         let behaviour = DataTransfer::new(
             local_peer_id,
             Graphsync::new(GraphsyncConfig::default(), store.clone()),
-            PeerDiscovery::new(PeerDiscoveryConfig::default(), local_peer_id),
+            // PeerDiscovery::new(PeerDiscoveryConfig::default(), local_peer_id),
         );
 
         let mut swarm = Swarm::new(transport, behaviour, local_peer_id);

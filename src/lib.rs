@@ -621,11 +621,8 @@ mod tests {
 
         fn push_update(&mut self, content: Vec<&str>, msg: MessageType) -> Vec<CidCbor> {
             let mut cids = Vec::new();
-            for _ in content {
-                cids.push(CidCbor::from(
-                    Cid::try_from("bafy2bzaceafciokjlt5v5l53pftj6zcmulc2huy3fduwyqsm3zo5bzkau7muq")
-                        .unwrap(),
-                ));
+            for cid in content {
+                cids.push(CidCbor::from(Cid::try_from(cid).unwrap()));
             }
             self.swarm()
                 .behaviour_mut()

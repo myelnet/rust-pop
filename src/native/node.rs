@@ -3,7 +3,7 @@ use crate::native::server::{
 };
 use blockstore::types::BlockStore;
 use dag_service;
-use data_transfer::{DataTransfer, DataTransferEvent, DealParams};
+use data_transfer::{DataTransfer, DataTransferEvent, PullParams};
 use graphsync::traversal::{RecursionLimit, Selector};
 use graphsync::{Config as GraphsyncConfig, Graphsync};
 use instant::Instant;
@@ -161,7 +161,7 @@ where
             current: None,
         };
 
-        let params = DealParams {
+        let params = PullParams {
             selector: Some(selector.clone()),
             ..Default::default()
         };

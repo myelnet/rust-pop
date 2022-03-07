@@ -2,7 +2,7 @@ mod fsm;
 pub mod mimesniff;
 mod network;
 
-pub use network::DealParams;
+pub use network::{PullParams, PushParams};
 
 use blockstore::types::BlockStore;
 use filecoin::{cid_helpers::CidCbor, types::Cbor};
@@ -18,8 +18,8 @@ use libp2p::swarm::{
 use libp2p::{Multiaddr, NetworkBehaviour, PeerId};
 use network::{
     ChannelId, DataTransferNetwork, DealProposal, DealResponse, DealStatus, DtNetEvent,
-    MessageType, PushParams, TransferMessage, TransferRequest, TransferResponse,
-    EMPTY_QUEUE_SHRINK_THRESHOLD, EXTENSION_KEY,
+    MessageType, TransferMessage, TransferRequest, TransferResponse, EMPTY_QUEUE_SHRINK_THRESHOLD,
+    EXTENSION_KEY,
 };
 use num_bigint::ToBigInt;
 use routing::{DiscoveryEvent, PeerDiscovery};
@@ -134,7 +134,7 @@ where
         peer_id: PeerId,
         root: Cid,
         selector: Selector,
-        params: DealParams,
+        params: PullParams,
     ) -> Result<ChannelId, String> {
         let cid = CidCbor::from(root);
         let request_id = self.next_request_id();
@@ -731,7 +731,7 @@ mod tests {
         let id = peer2
             .swarm()
             .behaviour_mut()
-            .pull(pid1, cid, selector, DealParams::default())
+            .pull(pid1, cid, selector, PullParams::default())
             .unwrap();
 
         loop {

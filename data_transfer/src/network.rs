@@ -213,7 +213,7 @@ pub enum DealProposal {
         #[serde(rename = "ID")]
         id: u64,
         #[serde(rename = "Params")]
-        params: DealParams,
+        params: PullParams,
     },
     Push {
         #[serde(rename = "PayloadCID")]
@@ -236,7 +236,7 @@ impl DealProposal {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
-pub struct DealParams {
+pub struct PullParams {
     pub selector: Option<Selector>,
     #[serde(rename = "PieceCID")]
     pub piece_cid: Option<CidCbor>,
@@ -248,7 +248,7 @@ pub struct DealParams {
     pub unseal_price: BigInt,
 }
 
-impl Default for DealParams {
+impl Default for PullParams {
     fn default() -> Self {
         let zero: isize = 0;
         Self {

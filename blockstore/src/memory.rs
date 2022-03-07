@@ -6,7 +6,6 @@ use parking_lot::RwLock;
 use std::collections::{hash_map::DefaultHasher, HashMap};
 use std::hash::{Hash, Hasher};
 use std::iter;
-use std::mem;
 /// A thread-safe `HashMap` wrapper.
 #[derive(Debug, Default)]
 pub struct MemoryDB {
@@ -110,15 +109,15 @@ impl BlockStore for MemoryDB {
     fn insert(&self, block: &Block<Self::Params>) -> Result<(), Error> {
         let bytes = block.data();
         let cid = &block.cid().to_bytes();
-        Ok(self.write(cid, bytes)?)
+        self.write(cid, bytes)
     }
 
     fn evict(&self, cid: &Cid) -> Result<(), Error> {
-        Ok(self.delete(cid.to_bytes())?)
+        self.delete(cid.to_bytes())
     }
 
     fn contains(&self, cid: &Cid) -> Result<bool, Error> {
-        Ok(self.exists(cid.to_bytes())?)
+        self.exists(cid.to_bytes())
     }
 }
 

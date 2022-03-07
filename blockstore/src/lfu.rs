@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::ptr::NonNull;
 
-use std::sync::{Arc, Mutex};
+use std::sync::{atomic::AtomicUsize, atomic::Ordering, Arc, Mutex};
 
 use crate::lfu_freq_list::{remove_entry_pointer, FrequencyList, LfuEntry};
 use std::mem;
@@ -26,7 +26,7 @@ where
     lookup: Mutex<LookupMap>,
     freq_list: Mutex<FrequencyList>,
     capacity: Option<NonZeroUsize>,
-    len: Mutex<usize>,
+    len: AtomicUsize,
 }
 
 unsafe impl<B: DBStore> Send for LfuBlockstore<B> {}
@@ -45,21 +45,20 @@ impl<B> LfuBlockstore<B>
 where
     B: DBStore,
 {
-    #[must_use]
     pub fn new(capacity: usize, bs: B) -> Result<Self, Error> {
         let lfu = Self {
             db: bs,
             lookup: Mutex::new(LookupMap(HashMap::new())),
             freq_list: Mutex::new(FrequencyList::new()),
             capacity: NonZeroUsize::new(capacity),
-            len: Mutex::new(0),
+            len: AtomicUsize::new(0),
         };
         lfu.sync()
             .map_err(|_| Error::Other("DB sync failed".to_string()))?;
         Ok(lfu)
     }
 
-    fn exists(&self, key: &Vec<u8>) -> Result<bool, Error> {
+    fn exists(&self, key: &[u8]) -> Result<bool, Error> {
         self.db.exists(key)
     }
 
@@ -105,14 +104,14 @@ where
         *v = self.freq_list.lock().unwrap().insert(key);
 
         // let mut len =
-        *self.len.lock().unwrap() += 1;
+        self.len.fetch_add(1, Ordering::Relaxed);
 
         Ok(())
     }
 
     /// Removes a value from the lfu and blockstore by key, if it exists.
-    fn delete(&self, key: &Vec<u8>) -> Result<(), Error> {
-        self.lookup.lock().unwrap().0.remove(key).map(|mut node| {
+    fn delete(&self, key: &[u8]) -> Result<(), Error> {
+        if let Some(mut node) = self.lookup.lock().unwrap().0.remove(&key.to_vec()) {
             // SAFETY: We have unique access to self. At this point, we've
             // removed the entry from the lookup map but haven't removed it from
             // the frequency data structure, so we need to clean it up there
@@ -120,9 +119,10 @@ where
             remove_entry_pointer(
                 *unsafe { Box::from_raw(node.as_mut()) },
                 &mut self.freq_list.lock().unwrap(),
-                &mut self.len.lock().unwrap(),
-            )
-        });
+            );
+            self.len.fetch_sub(1, Ordering::Relaxed);
+
+        };
         self.db.delete(key).unwrap();
 
         Ok(())
@@ -130,11 +130,11 @@ where
 
     /// Gets a value and incrementing the internal frequency counter of that
     /// value, if it exists.
-    fn read(&self, key: &Vec<u8>) -> Result<Option<Vec<u8>>, Error> {
-        match self.lookup.lock().unwrap().0.get(key) {
+    fn read(&self, key: &[u8]) -> Result<Option<Vec<u8>>, Error> {
+        match self.lookup.lock().unwrap().0.get(&key.to_vec()) {
             Some(entry) => {
                 self.freq_list.lock().unwrap().update(*entry);
-                return self.db.read(key);
+                self.db.read(key)
             }
             None => Ok(None),
         }
@@ -159,11 +159,11 @@ where
                     *v = self.freq_list.lock().unwrap().insert(arc_ref);
 
                     // let mut len =
-                    *self.len.lock().unwrap() += 1;
+                    self.len.fetch_add(1, Ordering::Relaxed);
                 }
             }
         }
-        return Ok(());
+        Ok(())
     }
 
     /// Evicts the least frequently used key and returns it. If the lfu is
@@ -185,7 +185,12 @@ where
 
     /// Returns the current number of items in the lfu. Constant time operation.
     pub fn len(&self) -> usize {
-        *self.len.lock().unwrap()
+        self.len.load(Ordering::Relaxed)
+    }
+
+    /// Returns the current number of items in the lfu. Constant time operation.
+    pub fn is_empty(&self) -> bool {
+        self.len.load(Ordering::Relaxed) == 0
     }
 }
 
@@ -203,15 +208,15 @@ impl<B: DBStore> BlockStore for LfuBlockstore<B> {
     fn insert(&self, block: &Block<Self::Params>) -> Result<(), Error> {
         let bytes = block.data();
         let cid = block.cid().to_bytes();
-        Ok(self.write(Arc::new(cid), bytes)?)
+        self.write(Arc::new(cid), bytes)
     }
 
     fn evict(&self, cid: &Cid) -> Result<(), Error> {
-        Ok(self.delete(&cid.to_bytes())?)
+        self.delete(&cid.to_bytes())
     }
 
     fn contains(&self, cid: &Cid) -> Result<bool, Error> {
-        Ok(self.exists(&cid.to_bytes())?)
+        self.exists(&cid.to_bytes())
     }
 }
 
@@ -485,7 +490,7 @@ mod delete {
         lfu.write(Arc::new(Vec::from([1u8])), Vec::from([2u8]))
             .unwrap();
         lfu.delete(&Vec::from([1u8])).unwrap();
-        assert!(lfu.len() == 0);
+        assert!(lfu.is_empty());
         assert_eq!(lfu.freq_list.lock().unwrap().len, 0);
     }
 
@@ -505,7 +510,7 @@ mod delete {
 
         lfu.delete(&Vec::from([1u8])).unwrap();
 
-        assert!(!(lfu.len() == 0));
+        assert!(!(lfu.is_empty()));
 
         lfu.delete(&Vec::from([3u8])).unwrap();
 

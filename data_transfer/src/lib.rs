@@ -270,9 +270,10 @@ where
                 );
             }
             Some(DealProposal::Push { id, .. }) => {
+                // start the state as accepted as the receiver accepts to receive the content
                 self.channels.insert(
                     ch_id.clone(),
-                    Channel::New {
+                    Channel::Accepted {
                         id: ch_id.clone(),
                         deal_id: id,
                     },
@@ -342,19 +343,31 @@ where
                     }
                 }
                 Some(DealResponse::Push { status, .. }) => {
-                    // the response for a push request is sent as attachment to the graphsync
-                    // request.
-                    if let DealStatus::Accepted = status {
-                        let ch = self
-                            .channels
-                            .remove(&ch_id)
-                            .expect("Expected channel to be created before accepted");
-                        let next_state = ch.transition(ChannelEvent::Accepted);
-                        self.channels.insert(ch_id.clone(), next_state.clone());
-                        self.pending_events.push_back(next_state.into());
+                    match status {
+                        // the response for a push request is sent as attachment to the graphsync
+                        // request.
+                        DealStatus::Accepted => {
+                            let ch = self
+                                .channels
+                                .remove(&ch_id)
+                                .expect("Expected channel to be created before accepted");
+                            let next_state = ch.transition(ChannelEvent::Accepted);
+                            self.channels.insert(ch_id.clone(), next_state.clone());
+                            self.pending_events.push_back(next_state.into());
+                        }
+                        // completed response is processed on the push receiver side to notify we have
+                        // sent all the blocks.
+                        DealStatus::Completed => {
+                            let ch = self
+                                .channels
+                                .remove(&ch_id)
+                                .expect("Expected channel to be created before response");
+                            let next_state = ch.transition(ChannelEvent::Completed);
+                            self.channels.insert(ch_id.clone(), next_state.clone());
+                            self.pending_events.push_back(next_state.into());
+                        }
+                        _ => {}
                     }
-                    // the completed response is not needed here as we assume once all the
-                    // blocks are sent that the push request was completed.
                 }
                 // response is invalid as it didn't contain a voucher
                 _ => {}
@@ -410,7 +423,6 @@ where
                     // if we're the requester it means we're done pushing the content
                     if ch_id.initiator == self.peer_id.to_base58() {
                         if let Channel::Accepted { deal_id, .. } = ch {
-                            println!("sending final response");
                             let voucher = DealResponse::Push {
                                 id: deal_id,
                                 status: DealStatus::Completed,
@@ -431,12 +443,15 @@ where
                             };
                             self.network.send_message(&peer, tmsg);
                         }
+                        // after we sent the completed message our transfer is complete.
                         let next_state = Channel::Completed {
                             id: ch_id,
                             received: 0,
                         };
                         self.pending_events.push_back(next_state.into());
                     } else {
+                        // as the responder we sent the message confirming we are done sending all
+                        // the blocks.
                         if let Channel::New { deal_id, .. } = ch {
                             let voucher = DealResponse::Pull {
                                 id: deal_id,
@@ -627,6 +642,8 @@ mod tests {
                         DataTransferEvent::PeerTableUpdated => {}
                         _ => return Some(event),
                     }
+                } else {
+                    println!("swarm: {:?}", ev);
                 }
             }
         }
@@ -764,6 +781,7 @@ mod tests {
         let cid = root.unwrap();
         let pid1 = peer1.peer_id;
 
+        // wait for both swarms to send a completed even in parallel
         join!(
             async {
                 loop {

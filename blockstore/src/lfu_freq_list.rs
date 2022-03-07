@@ -1,14 +1,10 @@
 use std::fmt::{Debug, Formatter};
 use std::hash::{Hash, Hasher};
 use std::ptr::NonNull;
-use std::sync::Arc;
+use std::sync::{Arc};
 
 /// Removes the entry from the cache, cleaning up any values if necessary.
-pub(super) fn remove_entry_pointer(
-    mut node: LfuEntry,
-    freq_list: &mut FrequencyList,
-    len: &mut usize,
-) -> () {
+pub(super) fn remove_entry_pointer(mut node: LfuEntry, freq_list: &mut FrequencyList) {
     if let Some(mut next) = node.next {
         let next = unsafe { next.as_mut() };
         next.prev = node.prev;
@@ -41,8 +37,6 @@ pub(super) fn remove_entry_pointer(
         unsafe { Box::from_raw(owner) };
         freq_list.len -= 1;
     };
-
-    *len -= 1;
 }
 
 #[derive(Default, Eq, Ord, PartialOrd, Debug)]

@@ -22,7 +22,7 @@ impl Db {
         db_opts.increase_parallelism(num_cpus::get() as i32);
         db_opts.set_write_buffer_size(256 * 1024 * 1024); // increase from 64MB to 256MB
         Ok(Self {
-            db: DB::open(&mut db_opts, path)?,
+            db: DB::open(&db_opts, path)?,
         })
     }
 }
@@ -98,15 +98,15 @@ impl BlockStore for Db {
     fn insert(&self, block: &Block<Self::Params>) -> Result<(), Error> {
         let bytes = block.data();
         let cid = &block.cid().to_bytes();
-        Ok(self.write(cid, bytes)?)
+        self.write(cid, bytes)
     }
 
     fn evict(&self, cid: &Cid) -> Result<(), Error> {
-        Ok(self.delete(cid.to_bytes())?)
+        self.delete(cid.to_bytes())
     }
 
     fn contains(&self, cid: &Cid) -> Result<bool, Error> {
-        Ok(self.exists(cid.to_bytes())?)
+        self.exists(cid.to_bytes())
     }
 }
 

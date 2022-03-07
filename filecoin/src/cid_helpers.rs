@@ -18,7 +18,7 @@ pub struct CidCbor {
 }
 impl CidCbor {
     pub fn bytes(&self) -> &Vec<u8> {
-        return &self.bytes;
+        &self.bytes
     }
     pub fn to_cid(&self) -> Option<Cid> {
         match Cid::try_from(self.bytes.clone()) {
@@ -56,7 +56,7 @@ impl<'de> Deserialize<'de> for CidCbor {
                 if bz.first() == Some(&MULTIBASE_IDENTITY) {
                     bz.remove(0);
                 }
-                return Ok(CidCbor { bytes: bz });
+                Ok(CidCbor { bytes: bz })
             }
             Some(_) => Err(serde::de::Error::custom("unexpected tag")),
         }

@@ -43,6 +43,10 @@ pub enum JsonRpcResponse<R> {
 pub struct Client {
     endpoint: String,
 }
+impl Default for Client {
+    fn default() -> Self {         Self::new()
+    }
+}
 
 impl Client {
     pub fn new() -> Client {

@@ -56,7 +56,7 @@ impl Serialized {
 
     /// Deserializes the serialized bytes into a defined type.
     pub fn deserialize<O: DeserializeOwned>(&self) -> Result<O, CborError> {
-        Ok(from_slice(&self.bytes)?)
+        from_slice(&self.bytes)
     }
 }
 
@@ -73,12 +73,12 @@ lazy_static! {
 pub trait Cbor: Serialize + DeserializeOwned {
     /// Marshalls cbor encodable object into cbor bytes
     fn marshal_cbor(&self) -> Result<Vec<u8>, CborError> {
-        Ok(to_vec(&self)?)
+        to_vec(&self)
     }
 
     /// Unmarshals cbor encoded bytes to object
     fn unmarshal_cbor(bz: &[u8]) -> Result<Self, CborError> {
-        Ok(from_slice(bz)?)
+        from_slice(bz)
     }
 
     /// Returns the content identifier of the raw block of data
@@ -613,7 +613,7 @@ impl Cbor for SignedMessage {}
 // #[cfg(feature = "json")]
 pub mod signed_json {
     use super::*;
-    use crate::crypto::{Signature};
+    use crate::crypto::Signature;
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
     /// Wrapper for serializing and deserializing a SignedMessage from JSON.

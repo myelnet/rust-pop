@@ -9,7 +9,7 @@ pub use self::native::node::*;
 
 use bimap::BiMap;
 use blockstore::types::BlockStore;
-use data_transfer::{ChannelId, DataTransfer, DataTransferEvent, DealParams};
+use data_transfer::{ChannelId, DataTransfer, DataTransferEvent, PullParams};
 use filecoin::{cid_helpers::CidCbor, types::Cbor};
 use graphsync::traversal::{RecursionLimit, Selector};
 use libipld::codec::Decode;
@@ -187,7 +187,7 @@ where
         };
 
         self.data_transfer
-            .pull(peer_id, cid, selector, DealParams::default())
+            .pull(peer_id, cid, selector, PullParams::default())
     }
 
     fn fetch_from_random_peer(&mut self, cid: Cid) -> Result<ChannelId, String> {
@@ -312,10 +312,7 @@ where
                 //  if we initiated the transfer
                 if ch.initiator == self.peer_id.to_base58() {
                     //  do something when a request for a CID succeeded
-                    println!(
-                        "pending requests {:?}, {:?}",
-                        self.pending_cid_requests, self.peer_id
-                    );
+
                     if let Some(cid) = self.pending_cid_requests.get_by_right(&ch) {
                         //  we indicate that we're no longer interested in the CID so that if we get new routing responses from hubs
                         //  we simply update our routing table but don't fire off another request
@@ -333,8 +330,8 @@ where
                         entry.update = MessageType::Insertion;
                         if let Ok(p) = PeerId::from_str(&ch.responder) {
                             self.insert_routing_entry(p, entry).map_err(|e| e)?;
+                            self.pending_events.push_back(RoutingEvent::HubIndexUpdated);
                         }
-                        self.pending_events.push_back(RoutingEvent::HubIndexUpdated);
                     }
 
                     //  can safely remove from both as no error is thrown if the element is not found
@@ -371,7 +368,7 @@ where
                                 // we make note that we've made a request for this index
                                 self.pending_index_requests.insert(cid, ch);
                             }
-                            Err(e) => println!("{}", e),
+                            Err(e) => println!("error in fetching {}", e),
                         }
                     }
                 }
@@ -487,11 +484,12 @@ where
     Ipld: Decode<<S::Params as StoreParams>::Codecs>,
 {
     fn inject_event(&mut self, event: DataTransferEvent) {
+        println!("data transfer event: {:?} {:?}", event, self.peer_id);
         match event {
             DataTransferEvent::Completed(ch, res) => {
                 self.process_transfer_completion(ch, res).unwrap();
             }
-            _ => println!("data transfer event: {:?}", event),
+            _ => {}
         }
     }
 }

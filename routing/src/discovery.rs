@@ -27,12 +27,12 @@ use std::time::Duration;
 pub type RequestId = i32;
 #[derive(Debug, Clone)]
 pub struct PeerTable {
-    peers: HashMap<PeerId, SmallVec<[Multiaddr; 6]>>,
+    pub peers: HashMap<PeerId, SmallVec<[Multiaddr; 6]>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize_tuple, Deserialize_tuple)]
 pub struct SerializablePeerTable {
-    peers: HashMap<Vec<u8>, Vec<Vec<u8>>>,
+    pub peers: HashMap<Vec<u8>, Vec<Vec<u8>>>,
 }
 
 impl From<SerializablePeerTable> for PeerTable {
@@ -559,8 +559,7 @@ mod tests {
                 peer_id,
             );
             for _i in 0..num_addreses {
-                Swarm::listen_on(&mut swarm, "/ip4/127.0.0.1/tcp/0".parse().unwrap())
-                    .unwrap();
+                Swarm::listen_on(&mut swarm, "/ip4/127.0.0.1/tcp/0".parse().unwrap()).unwrap();
             }
             while swarm.next().now_or_never().is_some() {}
             let addresses = Swarm::listeners(&swarm).map(|addr| addr.clone()).collect();

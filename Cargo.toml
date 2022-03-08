@@ -40,6 +40,7 @@ graphsync = { path = "./graphsync", default_features = false }
 dag_service = { path = "./dag_service", default_features = false }
 blockstore = { path = "./blockstore", default_features = false }
 data_transfer = { path = "./data_transfer", default_features = false }
+routing = { path = "./routing", default_features = false }
 serde = { version = "1.0", features = ["derive"] }
 instant = "0.1.12"
 futures = "0.3.19"
@@ -90,6 +91,7 @@ native = [
   "dag_service/native",
   "data_transfer/native",
   "filecoin/native",
+  "routing/native",
   "warp",
   "clap",
   "reqwest",
@@ -131,4 +133,5 @@ browser = [
   "data_transfer/browser",
   "dag_service/browser",
   "filecoin/browser",
+  "routing/browser"
 ]

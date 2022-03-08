@@ -4177,6 +4177,7 @@ dependencies = [
  "rand 0.6.5",
  "rand 0.7.3",
  "reqwest",
+ "routing",
  "serde",
  "serde_repr",
  "smallvec",

@@ -420,9 +420,9 @@ where
                     let (ch_id, ch) = self.get_channel_by_req_id(id).expect(
                         "Expected channel to be created before graphsync response is completed",
                     );
-                    // if we're the requester it means we're done pushing the content
-                    if ch_id.initiator == self.peer_id.to_base58() {
-                        if let Channel::Accepted { deal_id, .. } = ch {
+                    match ch {
+                        // Accepted state is for push requests
+                        Channel::Accepted { deal_id, .. } => {
                             let voucher = DealResponse::Push {
                                 id: deal_id,
                                 status: DealStatus::Completed,
@@ -442,17 +442,16 @@ where
                                 }),
                             };
                             self.network.send_message(&peer, tmsg);
+                            // after we sent the completed message our transfer is complete.
+                            let next_state = Channel::Completed {
+                                id: ch_id,
+                                received: 0,
+                            };
+                            self.pending_events.push_back(next_state.into());
                         }
-                        // after we sent the completed message our transfer is complete.
-                        let next_state = Channel::Completed {
-                            id: ch_id,
-                            received: 0,
-                        };
-                        self.pending_events.push_back(next_state.into());
-                    } else {
                         // as the responder we sent the message confirming we are done sending all
                         // the blocks.
-                        if let Channel::New { deal_id, .. } = ch {
+                        Channel::New { deal_id, .. } => {
                             let voucher = DealResponse::Pull {
                                 id: deal_id,
                                 status: DealStatus::Completed,
@@ -473,6 +472,7 @@ where
                             };
                             self.network.send_message(&peer, tmsg);
                         }
+                        _ => {}
                     }
                 }
             }

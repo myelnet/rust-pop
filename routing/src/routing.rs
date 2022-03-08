@@ -19,24 +19,24 @@ use std::{
 };
 
 #[derive(Debug, Clone, PartialEq, Serialize_tuple, Deserialize_tuple, Default)]
-pub struct RoutingProposal {
+pub struct RoutingRecord {
     pub root: CidCbor,
     pub peers: Option<SerializablePeerTable>,
 }
 
-impl Cbor for RoutingProposal {}
+impl Cbor for RoutingRecord {}
 
-impl From<()> for RoutingProposal {
+impl From<()> for RoutingRecord {
     fn from(_: ()) -> Self {
         Default::default()
     }
 }
 
-impl From<RoutingProposal> for () {
-    fn from(_: RoutingProposal) -> Self {}
+impl From<RoutingRecord> for () {
+    fn from(_: RoutingRecord) -> Self {}
 }
 
-impl UpgradeInfo for RoutingProposal {
+impl UpgradeInfo for RoutingRecord {
     type Info = &'static [u8];
     type InfoIter = iter::Once<Self::Info>;
 
@@ -61,7 +61,7 @@ impl<TSocket> InboundUpgrade<TSocket> for RoutingProtocol
 where
     TSocket: AsyncRead + AsyncWrite + Send + Unpin + 'static,
 {
-    type Output = RoutingProposal;
+    type Output = RoutingRecord;
     type Error = io::Error;
     type Future = BoxFuture<'static, Result<Self::Output, Self::Error>>;
 
@@ -70,7 +70,7 @@ where
             let mut buf = Vec::new();
             socket.read_to_end(&mut buf).await?;
             socket.close().await?;
-            let message = RoutingProposal::unmarshal_cbor(&buf).map_err(|_| {
+            let message = RoutingRecord::unmarshal_cbor(&buf).map_err(|_| {
                 io::Error::new(io::ErrorKind::Other, "Failed to decode CBOR message")
             })?;
             Ok(message)
@@ -78,7 +78,7 @@ where
     }
 }
 
-impl<TSocket> OutboundUpgrade<TSocket> for RoutingProposal
+impl<TSocket> OutboundUpgrade<TSocket> for RoutingRecord
 where
     TSocket: AsyncRead + AsyncWrite + Send + Unpin + 'static,
 {
@@ -103,18 +103,18 @@ pub const EMPTY_QUEUE_SHRINK_THRESHOLD: usize = 100;
 #[derive(Debug)]
 pub enum RoutingNetEvent {
     //  responds to incoming gossip messages so there's no equivalent request here
-    Response(PeerId, RoutingProposal),
+    Response(PeerId, RoutingRecord),
 }
 
 pub struct RoutingNetwork {
     pending_events: VecDeque<
         NetworkBehaviourAction<
             RoutingNetEvent,
-            OneShotHandler<RoutingProtocol, RoutingProposal, RoutingProposal>,
+            OneShotHandler<RoutingProtocol, RoutingRecord, RoutingRecord>,
         >,
     >,
     connected: HashMap<PeerId, SmallVec<[Connection; 2]>>,
-    pending_outbound_requests: HashMap<PeerId, SmallVec<[RoutingProposal; 10]>>,
+    pending_outbound_requests: HashMap<PeerId, SmallVec<[RoutingRecord; 10]>>,
 }
 
 impl Default for RoutingNetwork {
@@ -132,7 +132,7 @@ impl RoutingNetwork {
         }
     }
 
-    pub fn send_message(&mut self, peer: &PeerId, message: RoutingProposal) {
+    pub fn send_message(&mut self, peer: &PeerId, message: RoutingRecord) {
         if let Some(message) = self.try_send_message(peer, message) {
             self.pending_outbound_requests
                 .entry(*peer)
@@ -144,8 +144,8 @@ impl RoutingNetwork {
     fn try_send_message(
         &mut self,
         peer: &PeerId,
-        message: RoutingProposal,
-    ) -> Option<RoutingProposal> {
+        message: RoutingRecord,
+    ) -> Option<RoutingRecord> {
         if let Some(connections) = self.connected.get_mut(peer) {
             if connections.is_empty() {
                 return Some(message);
@@ -164,7 +164,7 @@ impl RoutingNetwork {
 }
 
 impl NetworkBehaviour for RoutingNetwork {
-    type ProtocolsHandler = OneShotHandler<RoutingProtocol, RoutingProposal, RoutingProposal>;
+    type ProtocolsHandler = OneShotHandler<RoutingProtocol, RoutingRecord, RoutingRecord>;
 
     type OutEvent = RoutingNetEvent;
 
@@ -318,7 +318,7 @@ mod tests {
 
         println!("msg_data {:?}", msg_data);
 
-        let msg = RoutingProposal::unmarshal_cbor(&msg_data).unwrap();
+        let msg = RoutingRecord::unmarshal_cbor(&msg_data).unwrap();
 
         println!("request {:?}", msg);
 
@@ -348,7 +348,7 @@ mod tests {
 
         let client = async move {
             let stream = TcpStream::connect(&listener_addr).await.unwrap();
-            upgrade::apply_outbound(stream, RoutingProposal::default(), upgrade::Version::V1)
+            upgrade::apply_outbound(stream, RoutingRecord::default(), upgrade::Version::V1)
                 .await
                 .unwrap();
         };
@@ -438,7 +438,7 @@ mod tests {
 
         peer2.swarm().behaviour_mut().send_message(
             &peer1.peer_id,
-            RoutingProposal {
+            RoutingRecord {
                 root: CidCbor::from(cid),
                 peers: None,
             },

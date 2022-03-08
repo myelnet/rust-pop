@@ -58,6 +58,7 @@ pub struct ResponseHeaders {
 pub struct Node {
     transport: Boxed<(PeerId, StreamMuxerBox)>,
     local_peer_id: PeerId,
+    store: Arc<CacheStore>,
 }
 
 // encapsulates a common transport and peer identity for each request.
@@ -73,13 +74,15 @@ impl Node {
         let local_peer_id = PeerId::from(local_key.public());
         log::info!("Local peer id: {:?}", local_peer_id);
 
+        let store = Arc::new(CacheStore::default());
         Self {
             transport: build_transport(local_key.clone()),
             local_peer_id,
+            store,
         }
     }
     pub fn spawn_request(&self, js_params: JsValue, pool: &WorkerPool) -> Result<Promise, JsValue> {
-        let store = Arc::new(CacheStore::default());
+        let store = self.store.clone();
 
         let behaviour = DataTransfer::new(
             self.local_peer_id,

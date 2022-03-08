@@ -8,9 +8,7 @@ use libp2p::gossipsub::{
 use smallvec::SmallVec;
 use std::time::Duration;
 
-// pub fn routing_table_from_bytes(p: Vec<u8>) -> Result<RoutingTableEntry, serde_cbor::Error> {
-//     RoutingTableEntry::unmarshal_cbor(&p)
-// }
+
 
 pub fn peer_table_to_bytes(p: &PeerTable) -> SerializablePeerTable {
     p.iter()

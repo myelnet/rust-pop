@@ -19,7 +19,6 @@ use libp2p::{
     swarm::{Swarm, SwarmBuilder, SwarmEvent},
     Multiaddr, PeerId,
 };
-use routing::{Config as PeerDiscoveryConfig, PeerDiscovery};
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -86,8 +85,7 @@ impl Node {
 
         let behaviour = DataTransfer::new(
             self.local_peer_id,
-            Graphsync::new(GraphsyncConfig::default(), store.clone()),
-            PeerDiscovery::new(PeerDiscoveryConfig::default(), self.local_peer_id),
+            Graphsync::new(GraphsyncConfig::default(), store.clone())
         );
         // swarm is not safe to share between threads so instead of wrapping into a mutex
         // we create a new instance each time with the same transport backed by the same peer ID

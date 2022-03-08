@@ -250,13 +250,13 @@ mod blockstore {
         let value = [1];
         db.write(key.clone(), value).unwrap();
         let res = db.exists(&key).unwrap();
-        assert_eq!(res, true);
+        assert!(res);
     }
 
     pub fn test_does_not_exist<B: DBStore>(db: &LfuBlockstore<B>) {
         let key = Arc::new([0x41u8, 0x41u8, 0x42u8].to_vec());
         let res = db.exists(&key).unwrap();
-        assert_eq!(res, false);
+        assert!(!res);
     }
 
     pub fn test_delete<B: DBStore>(db: &LfuBlockstore<B>) {
@@ -264,10 +264,10 @@ mod blockstore {
         let value = [1];
         db.write(key.clone(), value).unwrap();
         let res = db.exists(&key).unwrap();
-        assert_eq!(res, true);
+        assert!(res);
         db.delete(&key).unwrap();
         let res = db.exists(&key).unwrap();
-        assert_eq!(res, false);
+        assert!(!res);
     }
 
     #[test]

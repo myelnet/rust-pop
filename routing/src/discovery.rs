@@ -1,4 +1,3 @@
-use crate::utils::{peer_table_from_bytes, peer_table_to_bytes};
 use async_std::io;
 use async_trait::async_trait;
 use filecoin::cid_helpers::CidCbor;
@@ -21,13 +20,68 @@ use smallvec::SmallVec;
 use std::collections::HashMap;
 use std::sync::{
     atomic::{AtomicI32, Ordering},
-    Arc, RwLock,
+    Arc,
 };
 use std::time::Duration;
 
 pub type RequestId = i32;
-pub type PeerTable = HashMap<PeerId, SmallVec<[Multiaddr; 6]>>;
-pub type SerializablePeerTable = HashMap<Vec<u8>, Vec<Vec<u8>>>;
+#[derive(Debug, Clone)]
+pub struct PeerTable {
+    peers: HashMap<PeerId, SmallVec<[Multiaddr; 6]>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize_tuple, Deserialize_tuple)]
+pub struct SerializablePeerTable {
+    peers: HashMap<Vec<u8>, Vec<Vec<u8>>>,
+}
+
+impl From<SerializablePeerTable> for PeerTable {
+    fn from(p: SerializablePeerTable) -> Self {
+        Self {peers:
+            //  addresses only get returned on a successful response
+            p.peers.iter()
+                .map_while(|(peer, addresses)| {
+                    let mut addr_vec = SmallVec::<[Multiaddr; 6]>::new();
+                    // check sent peer is valid
+                    match PeerId::from_bytes(peer) {
+                        Ok(p) => {
+                            // check associated multiaddresses are valid
+                            for addr in addresses {
+                                if let Ok(a) = Multiaddr::try_from(addr.clone()) {
+                                    addr_vec.push(a)
+                                }
+                            }
+                            // remove any potential duplicate data
+                            addr_vec.sort();
+                            addr_vec.dedup();
+                            Some((p, addr_vec))
+                        }
+                        Err(_) => None,
+                    }
+                })
+                .collect(),
+        }
+    }
+}
+
+impl From<PeerTable> for SerializablePeerTable {
+    fn from(p: PeerTable) -> Self {
+        Self {
+            peers: p
+                .peers
+                .iter()
+                .map_while(|(peer, addresses)| {
+                    let mut addr_vec = Vec::new();
+                    for addr in addresses {
+                        addr_vec.push((*addr).to_vec())
+                    }
+
+                    Some((peer.to_bytes(), addr_vec))
+                })
+                .collect(),
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct HubDiscoveryProtocol;
@@ -169,7 +223,7 @@ pub struct HubDiscovery {
     //  we implement our own id_counter (instead of libp2p's) to ensure the request / response messages are CBOR encodable
     id_counter: Arc<AtomicI32>,
     inner: RequestResponse<DiscoveryCodec>,
-    pub hub_table: Arc<RwLock<PeerTable>>,
+    pub hub_table: PeerTable,
     peer_id: PeerId,
     pub multiaddr: SmallVec<[Multiaddr; 6]>,
     hub: bool,
@@ -185,7 +239,9 @@ impl HubDiscovery {
         let inner = RequestResponse::new(DiscoveryCodec::default(), protocols, rr_config);
 
         // if no hub table was passed then initialize a dummy one (mainly for testing purposes)
-        let hub_table = Arc::new(RwLock::new(HashMap::new()));
+        let hub_table = PeerTable {
+            peers: HashMap::new(),
+        };
 
         Self {
             id_counter: Arc::new(AtomicI32::new(1)),
@@ -278,10 +334,9 @@ impl NetworkBehaviour for HubDiscovery {
     ) {
         let req_res = handler;
 
-        let mut lock = self.hub_table.write().unwrap();
         // if is in table then will be removed
         if let Some(p) = peer_id {
-            lock.remove(&p);
+            self.hub_table.peers.remove(&p);
         }
 
         self.inner.inject_dial_failure(peer_id, req_res, error)
@@ -292,8 +347,7 @@ impl NetworkBehaviour for HubDiscovery {
         self.multiaddr.push(addr.clone());
         if self.hub {
             self.hub_table
-                .write()
-                .unwrap()
+                .peers
                 .entry(self.peer_id)
                 .or_default()
                 .push(addr.clone());
@@ -305,8 +359,7 @@ impl NetworkBehaviour for HubDiscovery {
         self.multiaddr.retain(|x| x.clone() != addr.clone());
         if self.hub {
             self.hub_table
-                .write()
-                .unwrap()
+                .peers
                 .entry(self.peer_id)
                 .or_default()
                 .retain(|x| x.clone() != addr.clone());
@@ -366,7 +419,7 @@ impl NetworkBehaviour for HubDiscovery {
                         request,
                         channel,
                     } => {
-                        let new_addresses = peer_table_to_bytes(&self.hub_table.read().unwrap());
+                        let new_addresses = SerializablePeerTable::from(self.hub_table.clone());
 
                         let msg = DiscoveryResponse {
                             id: request.id,
@@ -380,10 +433,10 @@ impl NetworkBehaviour for HubDiscovery {
                         response,
                     } => {
                         //  addresses only get returned on a successful response
-                        let new_addresses = peer_table_from_bytes(&response.addresses);
+                        let new_addresses = PeerTable::from(response.addresses);
                         //  update our local peer table
                         //  extend overwrites colliding keys (we assume inbound information is most up to date)
-                        self.hub_table.write().unwrap().extend(new_addresses);
+                        self.hub_table.peers.extend(new_addresses.peers);
 
                         return Poll::Ready(NetworkBehaviourAction::GenerateEvent(
                             DiscoveryEvent::ResponseReceived(
@@ -453,10 +506,11 @@ mod tests {
 
     #[test]
     fn response_serialization() {
-        let multiaddr = Vec::from(["/ip4/127.0.0.1/tcp/0".as_bytes().to_vec()]);
-        let peer = "/ip4/127.0.0.1/tcp/0".as_bytes().to_vec();
+        let multiaddr = Vec::from(["/ip4/127.peers.peers.1/tcp/0".as_bytes().to_vec()]);
+        let peer = "/ip4/127.peers.peers.1/tcp/0".as_bytes().to_vec();
         let mut addresses = HashMap::new();
         addresses.insert(peer.clone(), multiaddr);
+        let addresses = SerializablePeerTable { peers: addresses };
         let resp = DiscoveryResponse {
             // source: peer,
             id: 1,
@@ -505,7 +559,8 @@ mod tests {
                 peer_id,
             );
             for _i in 0..num_addreses {
-                Swarm::listen_on(&mut swarm, "/ip4/127.0.0.1/tcp/0".parse().unwrap()).unwrap();
+                Swarm::listen_on(&mut swarm, "/ip4/127.0.0.1/tcp/0".parse().unwrap())
+                    .unwrap();
             }
             while swarm.next().now_or_never().is_some() {}
             let addresses = Swarm::listeners(&swarm).map(|addr| addr.clone()).collect();
@@ -517,7 +572,7 @@ mod tests {
             return peer;
         }
 
-        fn get_hub_table(&mut self) -> Arc<RwLock<PeerTable>> {
+        fn get_hub_table(&mut self) -> PeerTable {
             return self.swarm.behaviour_mut().hub_table.clone();
         }
 
@@ -568,9 +623,6 @@ mod tests {
         let peer2 = Peer::new(1, true);
         let mut peer3 = Peer::new(3, true);
 
-        println!("before {:?}", peer3.get_hub_table().read().unwrap());
-        println!("before {:?}", peer1.get_hub_table().read().unwrap());
-
         // peer 3 knows peer 2 only and itself
         peer3.add_address(&peer2);
         // peer 1 knows peer 3 only and itself
@@ -584,14 +636,11 @@ mod tests {
         peer1.swarm().dial(peer2id).unwrap();
         assert_response_ok(peer1.next().await, 1);
 
-        println!("after {:?}", peer3.get_hub_table().read().unwrap());
-        println!("after {:?}", peer1.get_hub_table().read().unwrap());
-
         let table1 = peer1.get_hub_table();
-        let lock1 = table1.read().unwrap();
+        let lock1 = table1.peers;
 
         let table3 = peer3.get_hub_table();
-        let lock3 = table3.read().unwrap();
+        let lock3 = table3.peers;
 
         let mut k1: Vec<&PeerId> = lock1.keys().collect();
         let mut k3: Vec<&PeerId> = lock3.keys().collect();

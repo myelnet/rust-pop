@@ -4,7 +4,7 @@ pub mod transport;
 
 use blockstore::memory::MemoryDB as BlockstoreMemory;
 use blockstore::types::BlockStore;
-use data_transfer::{mimesniff::detect_content_type, DataTransfer, DataTransferEvent, DealParams};
+use data_transfer::{mimesniff::detect_content_type, DataTransfer, DataTransferEvent, PullParams};
 use futures::channel::{mpsc, oneshot};
 use futures::StreamExt;
 use graphsync::traversal::unixfs_path_selector;
@@ -108,7 +108,7 @@ impl Node {
 
             swarm.behaviour_mut().add_address(&peer_id, maddr);
 
-            let params = DealParams {
+            let params = PullParams {
                 selector: Some(selector.clone()),
                 ..Default::default()
             };

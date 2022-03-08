@@ -1,7 +1,7 @@
 use async_std::task;
 use blockstore::types::BlockStore;
 use dag_service::{self, add_entries, Entry};
-use data_transfer::{DataTransfer, DealParams};
+use data_transfer::{DataTransfer, PullParams};
 use graphsync::traversal::unixfs_path_selector;
 use libipld::codec::Decode;
 use libipld::store::StoreParams;
@@ -165,8 +165,12 @@ where
 
     let mut lock = swarm.lock();
     lock.behaviour_mut().add_address(&peer, multiaddr);
+    let params = PullParams {
+        selector: Some(selector.clone()),
+        ..Default::default()
+    };
     lock.behaviour_mut()
-        .pull(peer, cid, selector, DealParams::default())
+        .pull(peer, cid, selector, params)
         .map_err(|e| warp::reject::custom(Failure::TransferFailed { err: e.to_string() }))?;
 
     let resp = format!("transfer started in background");

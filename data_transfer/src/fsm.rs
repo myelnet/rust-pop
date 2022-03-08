@@ -59,6 +59,9 @@ impl Channel {
                     all_received: false,
                 }
             }
+            (Channel::Accepted { id, .. }, ChannelEvent::Completed) => {
+                Channel::PendingLastBlocks { id, received: 0 }
+            }
             (
                 Channel::Ongoing {
                     id,

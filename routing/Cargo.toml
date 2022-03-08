@@ -12,7 +12,6 @@ features = ["wasm-ext"]
 [dependencies]
 futures = "0.3.19"
 futures-lite = "1.12.0"
-data_transfer = { path = "../data_transfer", default_features = false }
 async-std = { version = "1.6.2", features = ["attributes", "unstable"] }
 serde = { version = "1.0", features = ["derive"] }
 async-trait = "0.1"
@@ -29,8 +28,6 @@ serde_tuple = "0.5"
 libipld = "0.12"
 filecoin = { path = "../filecoin", default_features = false }
 lazy_static = "1.4.0"
-blockstore = { path = "../blockstore", default_features = false }
-graphsync = { path = "../graphsync", default_features = false }
 bimap = "0.6.2"
 dag_service = { path = "../dag_service" }
 serde_repr = "0.1"
@@ -46,5 +43,5 @@ criterion = { version = "0.3", features = ["async_futures", "async_std"] }
 
 [features]
 default = ["native"]
-native = ["filecoin/native", "data_transfer/native", "blockstore/native", "graphsync/native"]
-browser = ["instant/wasm-bindgen", "filecoin/browser", "data_transfer/browser", "blockstore/browser", "graphsync/browser"]
+native = [ "filecoin/native"]
+browser = ["instant/wasm-bindgen", "filecoin/browser"]

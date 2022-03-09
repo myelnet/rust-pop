@@ -4,6 +4,8 @@ pub mod handler;
 pub use codec::{MessageCodec, ProtocolName};
 
 use crossbeam_channel::{bounded, Sender};
+use futures::channel::mpsc;
+use futures_lite::stream::StreamExt;
 use handler::{OutboundProtocol, RequestResponseHandler, RequestResponseHandlerEvent};
 use libp2p::core::{connection::ConnectionId, ConnectedPoint, Multiaddr, PeerId};
 use libp2p::swarm::{
@@ -199,6 +201,18 @@ where
             RequestResponseHandler<TCodec>,
         >,
     >,
+    sender: mpsc::Sender<
+        NetworkBehaviourAction<
+            RequestResponseEvent<TCodec::Message>,
+            RequestResponseHandler<TCodec>,
+        >,
+    >,
+    receiver: mpsc::Receiver<
+        NetworkBehaviourAction<
+            RequestResponseEvent<TCodec::Message>,
+            RequestResponseHandler<TCodec>,
+        >,
+    >,
     /// The currently connected peers, their pending outbound and inbound responses and their known,
     /// reachable addresses, if any.
     connected: HashMap<PeerId, SmallVec<[Connection<TCodec::Message>; 2]>>,
@@ -225,6 +239,7 @@ where
             inbound_protocols.push(p.clone());
             outbound_protocols.push(p.clone());
         }
+        let (sender, receiver) = mpsc::channel(16);
         RequestResponse {
             inbound_protocols,
             outbound_protocols,
@@ -236,6 +251,8 @@ where
             connected: HashMap::new(),
             pending_outbound_requests: HashMap::new(),
             addresses: HashMap::new(),
+            sender,
+            receiver,
         }
     }
 
@@ -263,12 +280,14 @@ where
 
         if let Some(request) = self.try_send_request(peer, request) {
             let handler = self.new_handler();
-            self.pending_events.push_back(NetworkBehaviourAction::Dial {
-                opts: DialOpts::peer_id(*peer)
-                    .condition(dial_opts::PeerCondition::Disconnected)
-                    .build(),
-                handler,
-            });
+            self.sender
+                .start_send(NetworkBehaviourAction::Dial {
+                    opts: DialOpts::peer_id(*peer)
+                        .condition(dial_opts::PeerCondition::Disconnected)
+                        .build(),
+                    handler,
+                })
+                .unwrap();
             self.pending_outbound_requests
                 .entry(*peer)
                 .or_default()
@@ -305,12 +324,14 @@ where
                 conn.open = Some((request_id, s));
                 if let Some(request) = self.try_send_request(peer, response) {
                     let handler = self.new_handler();
-                    self.pending_events.push_back(NetworkBehaviourAction::Dial {
-                        opts: DialOpts::peer_id(*peer)
-                            .condition(dial_opts::PeerCondition::Disconnected)
-                            .build(),
-                        handler,
-                    });
+                    self.sender
+                        .start_send(NetworkBehaviourAction::Dial {
+                            opts: DialOpts::peer_id(*peer)
+                                .condition(dial_opts::PeerCondition::Disconnected)
+                                .build(),
+                            handler,
+                        })
+                        .unwrap();
                     self.pending_outbound_requests
                         .entry(*peer)
                         .or_default()
@@ -380,12 +401,13 @@ where
                 return Some(request);
             }
             let ix = (request.request_id.0 as usize) % connections.len();
-            self.pending_events
-                .push_back(NetworkBehaviourAction::NotifyHandler {
+            self.sender
+                .start_send(NetworkBehaviourAction::NotifyHandler {
                     peer_id: *peer,
                     handler: NotifyHandler::One(connections[ix].id),
                     event: request,
-                });
+                })
+                .unwrap();
             None
         } else {
             Some(request)
@@ -524,14 +546,15 @@ where
             // another, concurrent dialing attempt ongoing.
             if let Some(pending) = self.pending_outbound_requests.remove(&peer) {
                 for request in pending {
-                    self.pending_events
-                        .push_back(NetworkBehaviourAction::GenerateEvent(
+                    self.sender
+                        .start_send(NetworkBehaviourAction::GenerateEvent(
                             RequestResponseEvent::OutboundFailure {
                                 peer,
                                 request_id: request.request_id,
                                 error: OutboundFailure::DialFailure,
                             },
-                        ));
+                        ))
+                        .unwrap();
                 }
             }
         }
@@ -552,78 +575,84 @@ where
                     request_id,
                     message,
                 };
-                self.pending_events
-                    .push_back(NetworkBehaviourAction::GenerateEvent(
+                self.sender
+                    .start_send(NetworkBehaviourAction::GenerateEvent(
                         RequestResponseEvent::Message { peer, message: msg },
-                    ));
+                    ))
+                    .unwrap();
 
                 match self.get_connection_mut(&peer, connection) {
                     Some(_connection) => {}
                     // Connection closed after `RequestResponseEvent::Request` has been emitted.
                     None => {
-                        self.pending_events
-                            .push_back(NetworkBehaviourAction::GenerateEvent(
+                        self.sender
+                            .start_send(NetworkBehaviourAction::GenerateEvent(
                                 RequestResponseEvent::InboundFailure {
                                     peer,
                                     request_id,
                                     error: InboundFailure::ConnectionClosed,
                                 },
-                            ));
+                            ))
+                            .unwrap();
                     }
                 }
             }
             RequestResponseHandlerEvent::OutboundTimeout(request_id) => {
-                self.pending_events
-                    .push_back(NetworkBehaviourAction::GenerateEvent(
+                self.sender
+                    .start_send(NetworkBehaviourAction::GenerateEvent(
                         RequestResponseEvent::OutboundFailure {
                             peer,
                             request_id,
                             error: OutboundFailure::Timeout,
                         },
-                    ));
+                    ))
+                    .unwrap();
             }
             RequestResponseHandlerEvent::InboundTimeout(request_id) => {
-                self.pending_events
-                    .push_back(NetworkBehaviourAction::GenerateEvent(
+                self.sender
+                    .start_send(NetworkBehaviourAction::GenerateEvent(
                         RequestResponseEvent::InboundFailure {
                             peer,
                             request_id,
                             error: InboundFailure::Timeout,
                         },
-                    ));
+                    ))
+                    .unwrap();
             }
             RequestResponseHandlerEvent::OutboundUnsupportedProtocols(request_id) => {
-                self.pending_events
-                    .push_back(NetworkBehaviourAction::GenerateEvent(
+                self.sender
+                    .start_send(NetworkBehaviourAction::GenerateEvent(
                         RequestResponseEvent::OutboundFailure {
                             peer,
                             request_id,
                             error: OutboundFailure::UnsupportedProtocols,
                         },
-                    ));
+                    ))
+                    .unwrap();
             }
             RequestResponseHandlerEvent::InboundUnsupportedProtocols(request_id) => {
                 // Note: No need to call `self.remove_pending_outbound_response`,
                 // `RequestResponseHandlerEvent::Request` was never emitted for this request and
                 // thus request was never added to `pending_outbound_responses`.
-                self.pending_events
-                    .push_back(NetworkBehaviourAction::GenerateEvent(
+                self.sender
+                    .start_send(NetworkBehaviourAction::GenerateEvent(
                         RequestResponseEvent::InboundFailure {
                             peer,
                             request_id,
                             error: InboundFailure::UnsupportedProtocols,
                         },
-                    ));
+                    ))
+                    .unwrap();
             }
         }
     }
 
     fn poll(
         &mut self,
-        _: &mut Context<'_>,
+        cx: &mut Context<'_>,
         _: &mut impl PollParameters,
     ) -> Poll<NetworkBehaviourAction<Self::OutEvent, Self::ProtocolsHandler>> {
-        if let Some(ev) = self.pending_events.pop_front() {
+        if let Poll::Ready(Some(ev)) = self.receiver.poll_next(cx) {
             return Poll::Ready(ev);
         } else if self.pending_events.capacity() > EMPTY_QUEUE_SHRINK_THRESHOLD {
             self.pending_events.shrink_to_fit();

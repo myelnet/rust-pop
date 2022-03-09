@@ -310,7 +310,6 @@ where
         // only hubs should respond
         if self.config.is_hub {
             let req = ContentRequest::unmarshal_cbor(&message.data).map_err(|e| e.to_string())?;
-            println!("{:?}", req);
             //  if the sent Cid is valid
             if let Some(r) = req.root.to_cid() {
                 // if !self.store.contains(&r).map_err(|e| e.to_string())? {
@@ -395,7 +394,6 @@ where
     Ipld: Decode<<S::Params as StoreParams>::Codecs>,
 {
     fn inject_event(&mut self, event: DataTransferEvent) {
-        println!("data transfer event: {:?} {:?}", event, self.config.peer_id);
         match event {
             DataTransferEvent::Completed(ch, res) => {
                 self.process_transfer_completion(ch, res).unwrap();

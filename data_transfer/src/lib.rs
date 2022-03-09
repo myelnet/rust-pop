@@ -33,7 +33,7 @@ use std::{
 pub struct DataTransfer {
     peer_id: PeerId,
     next_request_id: u64,
-    pub pending_events: VecDeque<DataTransferEvent>,
+    pending_events: VecDeque<DataTransferEvent>,
     channels: HashMap<ChannelId, Channel>,
     pub channel_ids: HashMap<RequestId, ChannelId>,
 }

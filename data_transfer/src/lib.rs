@@ -8,7 +8,7 @@ use blockstore::types::BlockStore;
 use filecoin::{cid_helpers::CidCbor, types::Cbor};
 use fsm::{Channel, ChannelEvent};
 use graphsync::traversal::Selector;
-use graphsync::{Extensions, Graphsync, GraphsyncEvent, RequestId};
+use graphsync::{Extensions, Graphsync, GraphsyncEvent, IncomingRequestHook, RequestId};
 use libipld::codec::Decode;
 use libipld::store::StoreParams;
 use libipld::{Cid, Ipld};
@@ -216,7 +216,6 @@ impl DataTransfer {
         if response.accepted {
             match response.voucher {
                 Some(DealResponse::Pull { status, .. }) => {
-                    println!("pull response {:?}", status);
                     match status {
                         // if it's the response for a pull request, it was attached to the first graphsync
                         // message.
@@ -232,7 +231,6 @@ impl DataTransfer {
                         // the completion response for a pull request is sent separately after the
                         // transfer is completed.
                         DealStatus::Completed => {
-                            println!("pull completed");
                             let ch = self
                                 .channels
                                 .remove(&ch_id)
@@ -359,7 +357,6 @@ impl DataTransfer {
                                     voucher: Some(voucher),
                                 }),
                             };
-                            println!("dt outbound");
                             self.pending_events
                                 .push_back(DataTransferEvent::DtOutbound(peer, tmsg));
                         }
@@ -423,6 +420,45 @@ impl DataTransfer {
             }
         }
     }
+
+    pub fn incoming_request_hook(&self) -> IncomingRequestHook {
+        Arc::new(|_peer, gs_req| {
+            let mut extensions = HashMap::new();
+            if let Ok(rmsg) = TransferMessage::try_from(&gs_req.extensions) {
+                if rmsg.is_rq {
+                    let req = rmsg
+                        .request
+                        .expect("Expected incoming message to have a request");
+                    if let DealProposal::Pull { id, .. } =
+                        req.voucher.expect("Expected request to have a voucher")
+                    {
+                        let voucher = DealResponse::Pull {
+                            id,
+                            status: DealStatus::Accepted,
+                            message: "".to_string(),
+                            payment_owed: (0_isize).to_bigint().unwrap(),
+                        };
+                        let tmsg = TransferMessage {
+                            is_rq: false,
+                            request: None,
+                            response: Some(TransferResponse {
+                                mtype: MessageType::New,
+                                accepted: true,
+                                paused: false,
+                                transfer_id: req.transfer_id,
+                                voucher_type: voucher.voucher_type(),
+                                voucher: Some(voucher),
+                            }),
+                        };
+                        extensions.insert(EXTENSION_KEY.to_string(), tmsg.marshal_cbor().unwrap());
+                    }
+                }
+                (true, extensions)
+            } else {
+                (false, extensions)
+            }
+        })
+    }
 }
 
 #[derive(Debug)]
@@ -469,47 +505,13 @@ where
     Ipld: Decode<<S::Params as StoreParams>::Codecs>,
 {
     pub fn new(peer_id: PeerId, mut graphsync: Graphsync<S>) -> Self {
-        graphsync.register_incoming_request_hook(Arc::new(|_peer, gs_req| {
-            let mut extensions = HashMap::new();
-            if let Ok(rmsg) = TransferMessage::try_from(&gs_req.extensions) {
-                if rmsg.is_rq {
-                    let req = rmsg
-                        .request
-                        .expect("Expected incoming message to have a request");
-                    if let DealProposal::Pull { id, .. } =
-                        req.voucher.expect("Expected request to have a voucher")
-                    {
-                        let voucher = DealResponse::Pull {
-                            id,
-                            status: DealStatus::Accepted,
-                            message: "".to_string(),
-                            payment_owed: (0_isize).to_bigint().unwrap(),
-                        };
-                        let tmsg = TransferMessage {
-                            is_rq: false,
-                            request: None,
-                            response: Some(TransferResponse {
-                                mtype: MessageType::New,
-                                accepted: true,
-                                paused: false,
-                                transfer_id: req.transfer_id,
-                                voucher_type: voucher.voucher_type(),
-                                voucher: Some(voucher),
-                            }),
-                        };
-                        extensions.insert(EXTENSION_KEY.to_string(), tmsg.marshal_cbor().unwrap());
-                    }
-                }
-                (true, extensions)
-            } else {
-                (false, extensions)
-            }
-        }));
+        let dt = DataTransfer::new(peer_id);
+        graphsync.register_incoming_request_hook(dt.incoming_request_hook());
 
         Self {
             graphsync,
             network: DataTransferNetwork::new(),
-            dt: DataTransfer::new(peer_id),
+            dt,
         }
     }
 
@@ -600,7 +602,6 @@ where
     Ipld: Decode<<S::Params as StoreParams>::Codecs>,
 {
     fn inject_event(&mut self, event: DtNetEvent) {
-        println!("received dt event");
         self.dt.inject_dt_event(event);
     }
 }

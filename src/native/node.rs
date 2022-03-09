@@ -3,7 +3,7 @@ use crate::native::server::{
 };
 use blockstore::types::BlockStore;
 use dag_service;
-use data_transfer::{DataTransfer, DataTransferEvent, PullParams};
+use data_transfer::{DataTransferBehaviour, DataTransferEvent, PullParams};
 use graphsync::traversal::{RecursionLimit, Selector};
 use graphsync::{Config as GraphsyncConfig, Graphsync};
 use instant::Instant;
@@ -27,7 +27,7 @@ pub struct Node<B: 'static + BlockStore>
 where
     Ipld: Decode<<<B as BlockStore>::Params as StoreParams>::Codecs>,
 {
-    pub swarm: Arc<Mutex<Swarm<DataTransfer<B>>>>,
+    pub swarm: Arc<Mutex<Swarm<DataTransferBehaviour<B>>>>,
     pub store: Arc<B>,
 }
 
@@ -50,7 +50,7 @@ where
 
         let store = Arc::new(config.blockstore);
 
-        let behaviour = DataTransfer::new(
+        let behaviour = DataTransferBehaviour::new(
             local_peer_id,
             Graphsync::new(GraphsyncConfig::default(), store.clone()),
             // PeerDiscovery::new(PeerDiscoveryConfig::default(), local_peer_id),
@@ -128,7 +128,7 @@ where
             .and(swarm_filter.clone())
             .and_then(
                 |simple_map: HashMap<String, String>,
-                 behaviour: Arc<Mutex<Swarm<DataTransfer<B>>>>| {
+                 behaviour: Arc<Mutex<Swarm<DataTransferBehaviour<B>>>>| {
                     //  can safely unwrap entries as if they are None the method will just return a failure
                     //  response to the requesting client
                     return retrieve_file(

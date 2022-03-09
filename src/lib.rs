@@ -41,7 +41,7 @@ pub const ROUTING_TOPIC: &str = "myel/content-routing";
 pub const SYNCING_TOPIC: &str = "myel/index-syncing";
 
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
-enum RoutingTableEntry {
+pub enum RoutingTableEntry {
     Insertion {
         multiaddresses: Vec<Multiaddr>,
         cids: Vec<CidCbor>,
@@ -87,9 +87,7 @@ where
     routing_responder: RoutingNetwork,
 
     #[behaviour(ignore)]
-    peer_id: PeerId,
-    #[behaviour(ignore)]
-    is_hub: bool,
+    config: PopConfig,
     #[behaviour(ignore)]
     pending_events: VecDeque<RoutingEvent>,
     // a map of who has the content we made requests for
@@ -131,8 +129,7 @@ where
             data_transfer,
             broadcaster,
             store,
-            is_hub: config.is_hub,
-            peer_id: config.peer_id,
+            config,
             routing_responder: RoutingNetwork::new(),
             pending_events: VecDeque::default(),
             // can swap this for something on disk, this is a thread safe hashmap
@@ -146,38 +143,32 @@ where
         // self.broadcaster.add_explicit_peer(peer_id);
     }
 
-    pub fn publish_insertion(&mut self, cids: Vec<CidCbor>) -> Result<(), String> {
-        let msg = RoutingTableEntry::Insertion {
-            multiaddresses: self.discovery.multiaddr.to_vec(),
-            cids,
-        }
-        .marshal_cbor()
-        .map_err(|e| e.to_string())?;
+    pub fn publish_update(&mut self, msg: RoutingTableEntry) -> Result<(), String> {
         // Because Topic is not thread safe (the hasher it uses can't be safely shared across threads)
         // we create a new instantiation of the Topic for each publication, in most examples Topic is
         // cloned anyway
         self.broadcaster
-            .publish(IdentTopic::new(SYNCING_TOPIC), msg)
+            .publish(
+                IdentTopic::new(SYNCING_TOPIC),
+                msg.marshal_cbor().map_err(|e| e.to_string())?,
+            )
             .map_err(|e| e.to_string())?;
         self.pending_events
             .push_back(RoutingEvent::SyncRequestBroadcast);
 
         Ok(())
     }
-    pub fn publish_deletion(&mut self, cids: Vec<CidCbor>) -> Result<(), String> {
-        let msg = RoutingTableEntry::Deletion { cids }
-            .marshal_cbor()
-            .map_err(|e| e.to_string())?;
-        // Because Topic is not thread safe (the hasher it uses can't be safely shared across threads)
-        // we create a new instantiation of the Topic for each publication, in most examples Topic is
-        // cloned anyway
-        self.broadcaster
-            .publish(IdentTopic::new(SYNCING_TOPIC), msg)
-            .map_err(|e| e.to_string())?;
-        self.pending_events
-            .push_back(RoutingEvent::SyncRequestBroadcast);
 
-        Ok(())
+    pub fn publish_insertion(&mut self, cids: Vec<CidCbor>) -> Result<(), String> {
+        let msg = RoutingTableEntry::Insertion {
+            multiaddresses: self.discovery.multiaddr.to_vec(),
+            cids,
+        };
+        self.publish_update(msg)
+    }
+    pub fn publish_deletion(&mut self, cids: Vec<CidCbor>) -> Result<(), String> {
+        let msg = RoutingTableEntry::Deletion { cids };
+        self.publish_update(msg)
     }
 
     pub fn find_content(&mut self, root: Cid) -> Result<(), String> {
@@ -259,7 +250,7 @@ where
     fn process_discovery_response(&mut self, peer_id: PeerId, index_root: Option<CidCbor>) {
         self.pending_events.push_back(RoutingEvent::HubTableUpdated);
         //  only hubs should respond
-        if self.is_hub {
+        if self.config.is_hub {
             if let Some(r) = index_root {
                 if let Some(cid) = r.to_cid() {
                     if self.pending_index_requests.get_by_left(&cid).is_none() {
@@ -301,7 +292,7 @@ where
         message: GossipsubMessage,
     ) -> Result<(), String> {
         // only hubs should respond
-        if self.is_hub {
+        if self.config.is_hub {
             let entry =
                 RoutingTableEntry::unmarshal_cbor(&message.data).map_err(|e| e.to_string())?;
             self.insert_routing_entry(peer_id, entry).map_err(|e| e)?;
@@ -317,7 +308,7 @@ where
         message: GossipsubMessage,
     ) -> Result<(), String> {
         // only hubs should respond
-        if self.is_hub {
+        if self.config.is_hub {
             let req = ContentRequest::unmarshal_cbor(&message.data).map_err(|e| e.to_string())?;
             println!("{:?}", req);
             //  if the sent Cid is valid
@@ -350,7 +341,7 @@ where
         match res {
             Ok(_) => {
                 //  if we initiated the transfer
-                if ch.initiator == self.peer_id.to_base58() {
+                if ch.initiator == self.config.peer_id.to_base58() {
                     //  do something when a request for an index CID succeeded
                     if let Some(cid) = self.pending_index_requests.get_by_right(&ch) {
                         let raw_bytes =
@@ -404,7 +395,7 @@ where
     Ipld: Decode<<S::Params as StoreParams>::Codecs>,
 {
     fn inject_event(&mut self, event: DataTransferEvent) {
-        println!("data transfer event: {:?} {:?}", event, self.peer_id);
+        println!("data transfer event: {:?} {:?}", event, self.config.peer_id);
         match event {
             DataTransferEvent::Completed(ch, res) => {
                 self.process_transfer_completion(ch, res).unwrap();

@@ -318,6 +318,20 @@ where
         self.routing_table.write().unwrap().extend(new_entry);
         self.pending_events
             .push_back(RoutingEvent::RoutingTableUpdated);
+        // check we are still interested in a CID (i.e a transfer for it has no succesfully completed yet)
+        if self.pending_cids.contains(&root) {
+            //  check no transfer channel has been set up yet
+            if self.pending_requests.get_by_left(&root).is_none() {
+                //  if the sent Cid is valid
+                match self.fetch_from_random_peer(root) {
+                    Ok(ch) => {
+                        // flag that a request for the cid has now been made
+                        self.pending_requests.insert(root, ch);
+                    }
+                    Err(e) => println!("eeor {}", e),
+                }
+            }
+        }
     }
 
     fn process_sync_request(
@@ -715,16 +729,16 @@ mod tests {
         }
 
         async fn next_content_fulfilled(&mut self) -> Option<String> {
-           loop {
-               let ev = self.swarm.next().await?;
-               if let SwarmEvent::Behaviour(event) = ev {
-                   match event {
-                       RoutingEvent::ContentRequestFulfilled(cid) => return Some(cid),
-                       _ => {}
-                   }
-               }
-           }
-       }
+            loop {
+                let ev = self.swarm.next().await?;
+                if let SwarmEvent::Behaviour(event) = ev {
+                    match event {
+                        RoutingEvent::ContentRequestFulfilled(cid) => return Some(cid),
+                        _ => {}
+                    }
+                }
+            }
+        }
     }
 
     #[async_std::test]

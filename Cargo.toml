@@ -52,6 +52,7 @@ lazy_static = "1.4.0"
 bimap = "0.6.2"
 serde_repr = "0.1"
 smallvec = "1.8.0"
+serde_tuple = "0.5"
 
 #  cli related imports
 warp = { version = "0.3.2", optional = true }

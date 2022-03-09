@@ -1,7 +1,7 @@
 use async_std::task;
 use blockstore::types::BlockStore;
 use dag_service::{self, add_entries, Entry};
-use data_transfer::{DataTransfer, PullParams};
+use data_transfer::{DataTransferBehaviour, PullParams};
 use graphsync::traversal::unixfs_path_selector;
 use libipld::codec::Decode;
 use libipld::store::StoreParams;
@@ -149,7 +149,7 @@ pub async fn retrieve_file<B: 'static + BlockStore>(
     key: String,
     peer: String,
     multiaddr: String,
-    swarm: Arc<Mutex<Swarm<DataTransfer<B>>>>,
+    swarm: Arc<Mutex<Swarm<DataTransferBehaviour<B>>>>,
 ) -> Result<impl warp::Reply, warp::Rejection>
 where
     Ipld: Decode<<<B as BlockStore>::Params as StoreParams>::Codecs>,

@@ -26,7 +26,6 @@ use serde::{Deserialize, Serialize};
 use serde_repr::{Deserialize_repr, Serialize_repr};
 use smallvec::SmallVec;
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::str::FromStr;
 use std::sync::{Arc, RwLock};
 use std::task::{Context, Poll};
 
@@ -36,7 +35,6 @@ pub type SerializableIndex = HashMap<Vec<u8>, SerializablePeerTable>;
 pub type SerializableLocalIndex = HashSet<Vec<u8>>;
 
 pub const ROUTING_TOPIC: &str = "myel/content-routing";
-pub const SYNCING_TOPIC: &str = "myel/index-syncing";
 
 #[derive(Debug, PartialEq, Clone, Serialize_repr, Deserialize_repr)]
 #[repr(u64)]
@@ -64,8 +62,6 @@ impl Cbor for ContentRequest {}
 pub enum RoutingEvent {
     ContentRequestBroadcast(String),
     FoundContent(String),
-    ContentRequestFulfilled(String),
-    SyncRequestBroadcast,
     HubTableUpdated,
     HubIndexUpdated,
     RoutingTableUpdated,
@@ -105,13 +101,7 @@ where
     pub fn new(peer_id: PeerId, is_hub: bool, store: Arc<S>, index_root: Option<CidCbor>) -> Self {
         let discovery = HubDiscovery::new(DiscoveryConfig::default(), peer_id, is_hub, index_root);
         //  topic with identity hash
-        let broadcaster = gossip_init(
-            peer_id,
-            Vec::from([
-                IdentTopic::new(ROUTING_TOPIC),
-                IdentTopic::new(SYNCING_TOPIC),
-            ]),
-        );
+        let broadcaster = gossip_init(peer_id, Vec::from([IdentTopic::new(ROUTING_TOPIC)]));
 
         Self {
             peer_id,
@@ -132,30 +122,6 @@ where
         // self.broadcaster.add_explicit_peer(peer_id);
     }
 
-    pub fn broadcast_update(
-        &mut self,
-        cids: Vec<CidCbor>,
-        update: MessageType,
-    ) -> Result<(), String> {
-        let msg = RoutingTableEntry {
-            multiaddresses: self.discovery.multiaddr.to_vec(),
-            cids,
-            update,
-        }
-        .marshal_cbor()
-        .map_err(|e| e.to_string())?;
-        // Because Topic is not thread safe (the hasher it uses can't be safely shared across threads)
-        // we create a new instantiation of the Topic for each publication, in most examples Topic is
-        // cloned anyway
-        self.broadcaster
-            .publish(IdentTopic::new(SYNCING_TOPIC), msg)
-            .map_err(|e| e.to_string())?;
-        self.pending_events
-            .push_back(RoutingEvent::SyncRequestBroadcast);
-
-        Ok(())
-    }
-
     pub fn find_content(&mut self, root: Cid) -> Result<(), String> {
         let msg = ContentRequest {
             multiaddresses: self.discovery.multiaddr.to_vec(),
@@ -166,9 +132,6 @@ where
 
         //  mark that we are actively interested in content
         self.pending_cids.insert(root);
-        // false flags that we haven't made a request for the content yet
-        let mut sent_request = false;
-        //  there's no pending request for the content
         //  we have an entry in our routing table
         if self.routing_table.read().unwrap().contains_key(&root) {
             ()
@@ -233,7 +196,7 @@ where
         Ok(())
     }
 
-    fn process_discovery_response(&mut self, peer_id: PeerId, index_root: Option<CidCbor>) {
+    fn process_discovery_response(&mut self) {
         self.pending_events.push_back(RoutingEvent::HubTableUpdated);
     }
 
@@ -254,39 +217,24 @@ where
         // only hubs should respond
         if self.is_hub {
             let req = ContentRequest::unmarshal_cbor(&message.data).map_err(|e| e.to_string())?;
+            println!("{:?}", req);
             //  if the sent Cid is valid
             if let Some(r) = req.root.to_cid() {
-                if !self.store.contains(&r).map_err(|e| e.to_string())? {
-                    //  if routing table contains the root cid, if not then do nothing
-                    if let Some(peer_table) = self.routing_table.read().unwrap().get(&r) {
-                        let message = RoutingRecord {
-                            root: req.root,
-                            peers: Some(SerializablePeerTable::from(peer_table.clone())),
-                        };
-                        self.routing_responder.send_message(&peer_id, message);
-                        self.pending_events
-                            .push_back(RoutingEvent::FoundContent(r.to_string()));
-                    }
-                } else {
-                    return Err("invalid cid".to_string());
+                // if !self.store.contains(&r).map_err(|e| e.to_string())? {
+                //  if routing table contains the root cid, if not then do nothing
+                if let Some(peer_table) = self.routing_table.read().unwrap().get(&r) {
+                    let message = RoutingRecord {
+                        root: req.root,
+                        peers: Some(SerializablePeerTable::from(peer_table.clone())),
+                    };
+                    self.routing_responder.send_message(&peer_id, message);
+                    self.pending_events
+                        .push_back(RoutingEvent::FoundContent(r.to_string()));
                 }
+                // }
+            } else {
+                return Err("invalid cid".to_string());
             }
-        }
-
-        Ok(())
-    }
-
-    fn process_sync_request(
-        &mut self,
-        peer_id: PeerId,
-        message: GossipsubMessage,
-    ) -> Result<(), String> {
-        // only hubs should respond
-        if self.is_hub {
-            let entry =
-                RoutingTableEntry::unmarshal_cbor(&message.data).map_err(|e| e.to_string())?;
-            self.insert_routing_entry(peer_id, entry).map_err(|e| e)?;
-            self.pending_events.push_back(RoutingEvent::HubIndexUpdated);
         }
 
         Ok(())
@@ -317,9 +265,7 @@ where
 {
     fn inject_event(&mut self, event: DiscoveryEvent) {
         match event {
-            DiscoveryEvent::ResponseReceived(_, peer, root) => {
-                self.process_discovery_response(peer, root)
-            }
+            DiscoveryEvent::ResponseReceived(..) => self.process_discovery_response(),
         }
     }
 }
@@ -361,8 +307,6 @@ where
                 if let Some(s) = message.source {
                     if message.topic == IdentTopic::new(ROUTING_TOPIC).hash() {
                         self.process_routing_request(s, message).unwrap();
-                    } else if message.topic == IdentTopic::new(SYNCING_TOPIC).hash() {
-                        self.process_sync_request(s, message).unwrap();
                     }
                 }
             }
@@ -419,7 +363,6 @@ mod tests {
         fn new(is_hub: bool) -> Self {
             let (peer_id, trans) = mk_transport();
             let bs = Arc::new(MemoryBlockStore::default());
-            let gs = Graphsync::new(Default::default(), bs.clone());
             let rt = Pop::new(peer_id, is_hub, bs.clone(), None);
             let mut swarm = Swarm::new(trans, rt, peer_id);
             Swarm::listen_on(&mut swarm, "/ip4/127.0.0.1/tcp/0".parse().unwrap()).unwrap();
@@ -446,19 +389,7 @@ mod tests {
             self.swarm().behaviour_mut().find_content(content).unwrap();
         }
 
-        fn push_update(&mut self, content: Vec<&str>, msg: MessageType) -> Vec<CidCbor> {
-            let mut cids = Vec::new();
-            for cid in content {
-                cids.push(CidCbor::from(Cid::try_from(cid).unwrap()));
-            }
-            self.swarm()
-                .behaviour_mut()
-                .broadcast_update(cids.clone(), msg)
-                .unwrap();
-            cids
-        }
-
-        fn make_index(&mut self) -> RoutingTableEntry {
+        fn make_routing_table(&mut self, peer: PeerId) -> RoutingTableEntry {
             // generate 1 random byte
             const FILE_SIZE: usize = 1;
             let mut data = vec![0u8; FILE_SIZE];
@@ -476,14 +407,9 @@ mod tests {
 
             let data = entry.marshal_cbor().unwrap();
 
-            if let Some(cid) =
-                dag_service::add(self.swarm().behaviour_mut().store.clone(), &data).unwrap()
-            {
-                self.swarm()
-                    .behaviour_mut()
-                    .discovery
-                    .update_index_root(CidCbor::from(cid));
-            }
+            self.swarm()
+                .behaviour_mut()
+                .insert_routing_entry(peer, entry.clone());
 
             entry
         }
@@ -501,18 +427,6 @@ mod tests {
                 }
             });
             peer_id
-        }
-
-        async fn next_sync(&mut self) -> Option<RoutingEvent> {
-            loop {
-                let ev = self.swarm.next().await?;
-                if let SwarmEvent::Behaviour(event) = ev {
-                    match event {
-                        RoutingEvent::SyncRequestBroadcast => return Some(event),
-                        _ => println!("{:?}", event),
-                    }
-                }
-            }
         }
 
         async fn next_discovery(&mut self) -> Option<RoutingEvent> {
@@ -550,173 +464,36 @@ mod tests {
                 }
             }
         }
-
-        async fn next_content_fulfilled(&mut self) -> Option<String> {
-            loop {
-                let ev = self.swarm.next().await?;
-                if let SwarmEvent::Behaviour(event) = ev {
-                    match event {
-                        RoutingEvent::ContentRequestFulfilled(cid) => return Some(cid),
-                        _ => {}
-                    }
-                }
-            }
-        }
     }
 
     #[async_std::test]
-    async fn test_can_sync_index_on_hanshake() {
-        //  will have empty hub table as not a hub
-        let mut peer1 = Peer::new(true);
-
-        // will have themselves in hub table
-        let mut peer2 = Peer::new(false);
-        let entry = peer2.make_index();
-
-        peer1.add_address(&peer2);
-
-        let hub_routing_table = peer1.get_routing_table().clone();
-
-        let peer2id = peer2.spawn("peer2");
-
-        let dial = peer1.swarm().dial(peer2id);
-
-        println!("dial {:?}", dial);
-
-        assert!(dial.is_ok());
-
-        peer1.next_indexing().await;
-
-        let cid = &entry.cids.first().unwrap().to_cid().unwrap();
-
-        assert!(hub_routing_table.read().unwrap().contains_key(cid));
-
-        assert!(hub_routing_table
-            .read()
-            .unwrap()
-            .get(cid)
-            .unwrap()
-            .peers
-            .contains_key(&peer2id));
-
-        assert_eq!(
-            hub_routing_table
-                .read()
-                .unwrap()
-                .get(cid)
-                .unwrap()
-                .peers
-                .get(&peer2id)
-                .unwrap()
-                .clone(),
-            SmallVec::<[Multiaddr; 6]>::from(entry.multiaddresses)
-        );
-    }
-
-    #[async_std::test]
-    async fn test_can_update_index() {
-        //  will have empty hub table as not a hub
-        let mut peer1 = Peer::new(false);
-
-        // will have themselves in hub table
-        let mut peer2 = Peer::new(true);
-
-        peer1.add_address(&peer2);
-        //
-        // //  print logs for peer 2
-        let hub_routing_table = peer2.get_routing_table().clone();
-        let peer2id = peer2.spawn("peer2");
-
-        std::thread::sleep(std::time::Duration::from_millis(1000));
-        //
-        // peer3.swarm().dial(peer2id).unwrap();
-        peer1.swarm().dial(peer2id).unwrap();
-
-        peer1.next_discovery().await;
-
-        let cids = peer1.push_update(
-            Vec::from(["bafy2bzaceafciokjlt5v5l53pftj6zcmulc2huy3fduwyqsm3zo5bzkau7muq"]),
-            MessageType::Insertion,
-        );
-
-        peer1.next_sync().await;
-
-        std::thread::sleep(std::time::Duration::from_millis(1000));
-
-        let cid = &cids.first().unwrap().to_cid().unwrap();
-
-        assert!(hub_routing_table.read().unwrap().contains_key(cid));
-
-        assert!(hub_routing_table
-            .read()
-            .unwrap()
-            .get(cid)
-            .unwrap()
-            .peers
-            .contains_key(&peer1.peer_id));
-
-        assert_eq!(
-            hub_routing_table
-                .read()
-                .unwrap()
-                .get(cid)
-                .unwrap()
-                .peers
-                .get(&peer1.peer_id)
-                .unwrap()
-                .clone(),
-            SmallVec::<[Multiaddr; 6]>::from(
-                peer1.swarm().behaviour_mut().discovery.multiaddr.to_vec()
-            )
-        );
-
-        peer1.push_update(
-            Vec::from(["bafy2bzaceafciokjlt5v5l53pftj6zcmulc2huy3fduwyqsm3zo5bzkau7muq"]),
-            MessageType::Deletion,
-        );
-
-        peer1.next_sync().await;
-
-        std::thread::sleep(std::time::Duration::from_millis(1000));
-
-        assert!(hub_routing_table.read().unwrap().is_empty())
-    }
-
-    #[async_std::test]
-    async fn test_content_request() {
+    async fn test_routing() {
         let mut hub_peer = Peer::new(true);
-        // Peer 1 has a content table that its going to push to hub peer
-        let mut peer1 = Peer::new(false);
-        let entry = peer1.make_index();
+        let entry = hub_peer.make_routing_table(hub_peer.peer_id);
         let cid = &entry.cids.first().unwrap().to_cid().unwrap();
-        let mut peer2 = Peer::new(false);
+        let mut peer1 = Peer::new(false);
 
-        hub_peer.add_address(&peer1);
-        peer2.add_address(&hub_peer);
+        peer1.add_address(&hub_peer);
 
         //  print logs for hub peer
         let hub_table = hub_peer.get_routing_table().clone();
-        let peer1id = peer1.spawn("peer1");
-
-        //  print logs for hub peer
-        hub_peer.swarm().dial(peer1id).unwrap();
-        hub_peer.next_indexing().await;
-
         let hubid = hub_peer.spawn("hub");
 
         //  print logs for hub peer
-        peer2.swarm().dial(hubid).unwrap();
-        peer2.next_discovery().await;
+        peer1.swarm().dial(hubid).unwrap();
+        peer1.next_discovery().await;
+
+        //  print logs for hub peer
         println!("discovery done");
 
-        peer2.request_content(*cid);
+        peer1.request_content(*cid);
 
-        peer2.next_routing().await;
+        peer1.next_routing().await;
 
         let lock1 = hub_table.read().unwrap();
 
-        let table2 = peer2.get_routing_table();
-        let lock2 = table2.read().unwrap();
+        let table1 = peer1.get_routing_table();
+        let lock2 = table1.read().unwrap();
 
         let mut k1: Vec<&Cid> = lock1.keys().collect();
         let mut k2: Vec<&Cid> = lock2.keys().collect();
@@ -729,10 +506,5 @@ mod tests {
             lock2.values().map(|x| &x.peers).collect();
 
         assert_eq!(v1, v3);
-
-        let cid_resp = peer2.next_content_fulfilled().await;
-
-        // assert the content table updated correctly
-        assert_eq!(cid.to_string(), cid_resp.unwrap());
     }
 }

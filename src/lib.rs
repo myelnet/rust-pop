@@ -62,6 +62,7 @@ impl Cbor for ContentRequest {}
 #[derive(Debug)]
 pub enum RoutingEvent {
     ContentRequestBroadcast(String),
+    ContentRequestFulfilled(String),
     SyncRequestBroadcast,
     FoundContent(String),
     HubTableUpdated,
@@ -93,10 +94,12 @@ where
     // a map of who has the content we made requests for
     #[behaviour(ignore)]
     routing_table: Arc<RwLock<Index>>,
+    #[behaviour(ignore)]
+    pending_cids: HashSet<Cid>,
     // A bidirectional map of index cids we have made data-transfer requests for.
     // This will always be empty if the node is not a hub
     #[behaviour(ignore)]
-    pending_index_requests: BiMap<Cid, ChannelId>,
+    pending_requests: BiMap<Cid, ChannelId>,
     #[behaviour(ignore)]
     store: Arc<S>,
 }
@@ -134,7 +137,8 @@ where
             pending_events: VecDeque::default(),
             // can swap this for something on disk, this is a thread safe hashmap
             routing_table: Arc::new(RwLock::new(HashMap::new())),
-            pending_index_requests: BiMap::new(),
+            pending_cids: HashSet::new(),
+            pending_requests: BiMap::new(),
         }
     }
 
@@ -171,12 +175,52 @@ where
         self.publish_update(msg)
     }
 
-    pub fn find_content(&mut self, root: Cid) -> Result<(), String> {
-        //  we have an entry in our routing table
-        if self.routing_table.read().unwrap().contains_key(&root) {
-            return Ok(());
-        }
+    fn pull_all(&mut self, peer_id: PeerId, cid: Cid) -> Result<ChannelId, String> {
+        let selector = Selector::ExploreRecursive {
+            limit: RecursionLimit::None,
+            sequence: Box::new(Selector::ExploreAll {
+                next: Box::new(Selector::ExploreRecursiveEdge),
+            }),
+            current: None,
+        };
 
+        self.data_transfer
+            .pull(peer_id, cid, selector, PullParams::default())
+    }
+
+    fn fetch_from_random_peer(&mut self, cid: Cid) -> Result<ChannelId, String> {
+        let table = self.routing_table.clone();
+        let lock = table.read().unwrap();
+        if let Some(peer_table) = lock.get(&cid) {
+            for peer in peer_table.keys() {
+                for addr in peer_table.get(peer).unwrap() {
+                    self.add_address(peer, addr.clone());
+                }
+                match self.pull_all(*peer, cid) {
+                    Ok(ch) => return Ok(ch),
+                    Err(_) => println!("Failed to fetch {:?} from {:?}", cid, peer),
+                }
+            }
+        }
+        Err("failed to fetch from all peers".to_string())
+    }
+
+    pub fn get(&mut self, root: Cid) -> Result<(), String> {
+        //  mark that we are actively interested in content
+        self.pending_cids.insert(root);
+        let is_not_requested = self.pending_requests.get_by_left(&root).is_none();
+        let is_routable = self.routing_table.read().unwrap().contains_key(&root);
+        //  there's no pending request for the content
+        if is_not_requested && is_routable {
+            let ch = self.fetch_from_random_peer(root).map_err(|e| e)?;
+            self.pending_requests.insert(root, ch);
+        } else if !is_routable {
+            self.find_content(root).map_err(|e| e)?;
+        }
+        Ok(())
+    }
+
+    pub fn find_content(&mut self, root: Cid) -> Result<(), String> {
         let msg = ContentRequest {
             multiaddresses: self.discovery.multiaddr.to_vec(),
             root: CidCbor::from(root),
@@ -253,23 +297,13 @@ where
         if self.config.is_hub {
             if let Some(r) = index_root {
                 if let Some(cid) = r.to_cid() {
-                    if self.pending_index_requests.get_by_left(&cid).is_none() {
-                        let selector = Selector::ExploreRecursive {
-                            limit: RecursionLimit::None,
-                            sequence: Box::new(Selector::ExploreAll {
-                                next: Box::new(Selector::ExploreRecursiveEdge),
-                            }),
-                            current: None,
-                        };
-                        match self
-                            .data_transfer
-                            .pull(peer_id, cid, selector, PullParams::default())
-                        {
+                    if self.pending_requests.get_by_left(&cid).is_none() {
+                        match self.pull_all(peer_id, cid) {
                             Ok(ch) => {
                                 // we make note that we've made a request for this index
-                                self.pending_index_requests.insert(cid, ch);
+                                self.pending_requests.insert(cid, ch);
                             }
-                            Err(e) => println!("error in fetching {}", e),
+                            Err(e) => println!("error in fetching index {}", e),
                         }
                     }
                 }
@@ -341,33 +375,38 @@ where
             Ok(_) => {
                 //  if we initiated the transfer
                 if ch.initiator == self.config.peer_id.to_base58() {
-                    //  do something when a request for an index CID succeeded
-                    if let Some(cid) = self.pending_index_requests.get_by_right(&ch) {
-                        let raw_bytes =
-                            dag_service::cat(self.store.clone(), *cid).map_err(|e| e)?;
-                        let entry = RoutingTableEntry::unmarshal_cbor(&raw_bytes)
-                            .map_err(|e| e.to_string())?;
-                        //  override just in case
-                        if let Ok(p) = PeerId::from_str(&ch.responder) {
-                            self.insert_routing_entry(p, entry).map_err(|e| e)?;
-                            self.pending_events.push_back(RoutingEvent::HubIndexUpdated);
+                    //  do something when a request for a CID succeeded
+
+                    if let Some(cid) = self.pending_requests.get_by_right(&ch) {
+                        //  we indicate that we're no longer interested in the CID so that if we get new routing responses from hubs
+                        //  we simply update our routing table but don't fire off another request
+                        if self.pending_cids.remove(cid) {
+                            self.pending_events
+                                .push_back(RoutingEvent::ContentRequestFulfilled(cid.to_string()));
+                        } else {
+                            //  do something when a request for an index CID succeeded
+                            let raw_bytes =
+                                dag_service::cat(self.store.clone(), *cid).map_err(|e| e)?;
+                            let mut entry = RoutingTableEntry::unmarshal_cbor(&raw_bytes)
+                                .map_err(|e| e.to_string())?;
+                            //  override just in case
+                            if let Ok(p) = PeerId::from_str(&ch.responder) {
+                                self.insert_routing_entry(p, entry).map_err(|e| e)?;
+                                self.pending_events.push_back(RoutingEvent::HubIndexUpdated);
+                            }
                         }
                     }
-
-                    //  can safely remove from both as no error is thrown if the element is not found
-                    self.pending_index_requests.remove_by_right(&ch);
                 }
-                Ok(())
             }
             Err(e) => {
                 println!("transfer error: {:?}", e);
                 //  do something when a request for a CID failed
-                if self.pending_index_requests.contains_right(&ch) {
-                    self.pending_index_requests.remove_by_right(&ch);
-                }
-                Ok(())
             }
         }
+
+        self.pending_requests.remove_by_right(&ch);
+
+        Ok(())
     }
 
     fn poll(
@@ -533,8 +572,12 @@ mod tests {
                 .add_address(&peer.peer_id, peer.addr.clone());
         }
 
-        fn request_content(&mut self, content: Cid) {
+        fn find_content(&mut self, content: Cid) {
             self.swarm().behaviour_mut().find_content(content).unwrap();
+        }
+
+        fn get(&mut self, content: Cid) {
+            self.swarm().behaviour_mut().get(content).unwrap();
         }
 
         fn make_index(&mut self) -> RoutingTableEntry {
@@ -670,6 +713,18 @@ mod tests {
                 }
             }
         }
+
+        async fn next_content_fulfilled(&mut self) -> Option<String> {
+           loop {
+               let ev = self.swarm.next().await?;
+               if let SwarmEvent::Behaviour(event) = ev {
+                   match event {
+                       RoutingEvent::ContentRequestFulfilled(cid) => return Some(cid),
+                       _ => {}
+                   }
+               }
+           }
+       }
     }
 
     #[async_std::test]
@@ -844,7 +899,8 @@ mod tests {
                 cids,
             } => Some(cids.first().unwrap().to_cid().unwrap()),
             _ => None,
-        };
+        }
+        .unwrap();
 
         let mut peer1 = Peer::new(false);
 
@@ -861,7 +917,7 @@ mod tests {
         //  print logs for hub peer
         println!("discovery done");
 
-        peer1.request_content(cid.unwrap());
+        peer1.find_content(cid);
 
         peer1.next_routing().await;
 
@@ -879,5 +935,65 @@ mod tests {
         let v3: Vec<&HashMap<PeerId, SmallVec<[Multiaddr; 4]>>> = lock2.values().collect();
 
         assert_eq!(v1, v3);
+    }
+
+    #[async_std::test]
+    async fn test_content_request() {
+        let mut hub_peer = Peer::new(true);
+        // Peer 1 has a content table that its going to push to hub peer
+        let mut peer1 = Peer::new(false);
+        let entry = peer1.make_index();
+        let cid = match entry {
+            RoutingTableEntry::Insertion {
+                multiaddresses: _,
+                cids,
+            } => Some(cids.first().unwrap().to_cid().unwrap()),
+            _ => None,
+        }
+        .unwrap();
+
+        let mut peer2 = Peer::new(false);
+
+        hub_peer.add_address(&peer1);
+        peer2.add_address(&hub_peer);
+
+        //  print logs for hub peer
+        let hub_table = hub_peer.get_routing_table().clone();
+        let peer1id = peer1.spawn("peer1");
+
+        //  print logs for hub peer
+        hub_peer.swarm().dial(peer1id).unwrap();
+        hub_peer.next_indexing().await;
+
+        let hubid = hub_peer.spawn("hub");
+
+        //  print logs for hub peer
+        peer2.swarm().dial(hubid).unwrap();
+        peer2.next_discovery().await;
+        println!("discovery done");
+
+        peer2.get(cid);
+
+        peer2.next_routing().await;
+
+        let lock1 = hub_table.read().unwrap();
+
+        let table2 = peer2.get_routing_table();
+        let lock2 = table2.read().unwrap();
+
+        let mut k1: Vec<&Cid> = lock1.keys().collect();
+        let mut k2: Vec<&Cid> = lock2.keys().collect();
+
+        assert_eq!(k1.sort(), k2.sort());
+
+        let v1: Vec<&PeerTable> = lock1.values().collect();
+        let v3: Vec<&PeerTable> = lock2.values().collect();
+
+        assert_eq!(v1, v3);
+
+        let cid_resp = peer2.next_content_fulfilled().await;
+
+        // assert the content table updated correctly
+        assert_eq!(cid.to_string(), cid_resp.unwrap());
     }
 }

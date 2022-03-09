@@ -4,7 +4,9 @@ pub mod transport;
 
 use blockstore::memory::MemoryDB as BlockstoreMemory;
 use blockstore::types::BlockStore;
-use data_transfer::{mimesniff::detect_content_type, DataTransfer, DataTransferEvent, PullParams};
+use data_transfer::{
+    mimesniff::detect_content_type, DataTransferBehaviour, DataTransferEvent, PullParams,
+};
 use futures::channel::{mpsc, oneshot};
 use futures::StreamExt;
 use graphsync::traversal::unixfs_path_selector;
@@ -83,9 +85,9 @@ impl Node {
     pub fn spawn_request(&self, js_params: JsValue, pool: &WorkerPool) -> Result<Promise, JsValue> {
         let store = self.store.clone();
 
-        let behaviour = DataTransfer::new(
+        let behaviour = DataTransferBehaviour::new(
             self.local_peer_id,
-            Graphsync::new(GraphsyncConfig::default(), store.clone())
+            Graphsync::new(GraphsyncConfig::default(), store.clone()),
         );
         // swarm is not safe to share between threads so instead of wrapping into a mutex
         // we create a new instance each time with the same transport backed by the same peer ID

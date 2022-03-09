@@ -2,13 +2,13 @@ mod fsm;
 pub mod mimesniff;
 mod network;
 
-pub use network::{PullParams, PushParams, ChannelId};
+pub use network::{ChannelId, PullParams, PushParams};
 
 use blockstore::types::BlockStore;
 use filecoin::{cid_helpers::CidCbor, types::Cbor};
 use fsm::{Channel, ChannelEvent};
 use graphsync::traversal::Selector;
-use graphsync::{Graphsync, GraphsyncEvent, RequestId};
+use graphsync::{Extensions, Graphsync, GraphsyncEvent, IncomingRequestHook, RequestId};
 use libipld::codec::Decode;
 use libipld::store::StoreParams;
 use libipld::{Cid, Ipld};
@@ -28,108 +28,33 @@ use std::{
     task::{Context, Poll},
 };
 
-#[derive(Debug)]
-pub enum DataTransferEvent {
-    Started(ChannelId),
-    Accepted(ChannelId),
-    Progress(ChannelId),
-    Block {
-        ch_id: ChannelId,
-        link: Cid,
-        size: usize,
-        data: Ipld,
-    },
-    Completed(ChannelId, Result<(), String>),
-}
-
-#[derive(NetworkBehaviour)]
-#[behaviour(
-    out_event = "DataTransferEvent",
-    poll_method = "poll",
-    event_process = true
-)]
-pub struct DataTransfer<S: BlockStore>
-where
-    Ipld: Decode<<S::Params as StoreParams>::Codecs>,
-{
-    graphsync: Graphsync<S>,
-    network: DataTransferNetwork,
-
-    #[behaviour(ignore)]
+pub struct DataTransfer {
     peer_id: PeerId,
-    #[behaviour(ignore)]
     next_request_id: u64,
-    #[behaviour(ignore)]
     pending_events: VecDeque<DataTransferEvent>,
-    #[behaviour(ignore)]
     channels: HashMap<ChannelId, Channel>,
-    #[behaviour(ignore)]
     channel_ids: HashMap<RequestId, ChannelId>,
 }
 
-impl<S: 'static + BlockStore> DataTransfer<S>
-where
-    Ipld: Decode<<S::Params as StoreParams>::Codecs>,
-{
-    pub fn new(peer_id: PeerId, mut graphsync: Graphsync<S>) -> Self {
-        let now_unix = instant::now() as u64;
-
-        graphsync.register_incoming_request_hook(Arc::new(|_peer, gs_req| {
-            let mut extensions = HashMap::new();
-            if let Ok(rmsg) = TransferMessage::try_from(&gs_req.extensions) {
-                if rmsg.is_rq {
-                    let req = rmsg
-                        .request
-                        .expect("Expected incoming message to have a request");
-                    if let DealProposal::Pull { id, .. } =
-                        req.voucher.expect("Expected request to have a voucher")
-                    {
-                        let voucher = DealResponse::Pull {
-                            id,
-                            status: DealStatus::Accepted,
-                            message: "".to_string(),
-                            payment_owed: (0_isize).to_bigint().unwrap(),
-                        };
-                        let tmsg = TransferMessage {
-                            is_rq: false,
-                            request: None,
-                            response: Some(TransferResponse {
-                                mtype: MessageType::New,
-                                accepted: true,
-                                paused: false,
-                                transfer_id: req.transfer_id,
-                                voucher_type: voucher.voucher_type(),
-                                voucher: Some(voucher),
-                            }),
-                        };
-                        extensions.insert(EXTENSION_KEY.to_string(), tmsg.marshal_cbor().unwrap());
-                    }
-                }
-                (true, extensions)
-            } else {
-                (false, extensions)
-            }
-        }));
-
+impl DataTransfer {
+    pub fn new(peer_id: PeerId) -> Self {
         let now_unix = instant::now() as u64;
         Self {
             peer_id,
-            graphsync,
             next_request_id: now_unix,
-            network: DataTransferNetwork::new(),
             pending_events: VecDeque::default(),
             channel_ids: HashMap::new(),
             channels: HashMap::new(),
         }
     }
 
-    pub fn pull(
+    pub fn open_pull_channel(
         &mut self,
         peer_id: PeerId,
         root: Cid,
         selector: Selector,
         params: PullParams,
-    ) -> Result<ChannelId, String> {
+    ) -> (ChannelId, TransferMessage) {
         let cid = CidCbor::from(root);
         let request_id = self.next_request_id();
         let voucher = DealProposal::Pull {
@@ -153,12 +78,8 @@ where
             }),
             response: None,
         };
-        let buf = message.marshal_cbor().map_err(|e| e.to_string())?;
-        let mut extensions = HashMap::new();
-        extensions.insert(EXTENSION_KEY.to_string(), buf);
-        let rq_id = self.graphsync.request(peer_id, root, selector, extensions);
+
         let ch_id = self.channel_id(request_id, peer_id);
-        self.channel_ids.insert(rq_id, ch_id.clone());
         self.channels.insert(
             ch_id.clone(),
             Channel::New {
@@ -166,16 +87,16 @@ where
                 deal_id: request_id,
             },
         );
-        Ok(ch_id)
+        (ch_id, message)
     }
 
-    pub fn push(
+    pub fn open_push_channel(
         &mut self,
         peer_id: PeerId,
         root: Cid,
         selector: Selector,
         params: PushParams,
-    ) -> Result<ChannelId, String> {
+    ) -> (ChannelId, TransferMessage) {
         let cid = CidCbor::from(root);
         let request_id = self.next_request_id();
         let voucher = DealProposal::Push {
@@ -199,7 +120,6 @@ where
             }),
             response: None,
         };
-        self.network.send_message(&peer_id, message);
         let ch_id = self.channel_id(request_id, peer_id);
         self.channels.insert(
             ch_id.clone(),
@@ -208,7 +128,7 @@ where
                 deal_id: request_id,
             },
         );
-        Ok(ch_id)
+        (ch_id, message)
     }
 
     /// Constructs a channel id
@@ -225,24 +145,6 @@ where
         let request_id = self.next_request_id;
         self.next_request_id += 1;
         request_id
-    }
-
-    fn poll(
-        &mut self,
-        _: &mut Context,
-        _: &mut impl PollParameters,
-    ) -> Poll<
-        NetworkBehaviourAction<
-            <Self as NetworkBehaviour>::OutEvent,
-            <Self as NetworkBehaviour>::ProtocolsHandler,
-        >,
-    > {
-        if let Some(ev) = self.pending_events.pop_front() {
-            return Poll::Ready(NetworkBehaviourAction::GenerateEvent(ev));
-        } else if self.pending_events.capacity() > EMPTY_QUEUE_SHRINK_THRESHOLD {
-            self.pending_events.shrink_to_fit();
-        }
-        Poll::Pending
     }
 
     fn get_channel_by_req_id(&mut self, req_id: RequestId) -> Option<(ChannelId, Channel)> {
@@ -273,7 +175,6 @@ where
                     },
                 );
                 if let Some(cid) = request.root.to_cid() {
-                    let mut extensions = HashMap::new();
                     let voucher = DealResponse::Push {
                         id,
                         status: DealStatus::Accepted,
@@ -292,12 +193,17 @@ where
                             voucher: Some(voucher),
                         }),
                     };
+                    let mut extensions = HashMap::new();
                     extensions.insert(EXTENSION_KEY.to_string(), tmsg.marshal_cbor().unwrap());
                     // in the case pf a push request, the responder initiates the graphsync request
-                    let rq_id = self
-                        .graphsync
-                        .request(peer, cid, request.selector, extensions);
-                    self.channel_ids.insert(rq_id, ch_id.clone());
+                    self.pending_events
+                        .push_back(DataTransferEvent::GsOutbound {
+                            ch_id: ch_id.clone(),
+                            peer_id: peer,
+                            root: cid,
+                            selector: request.selector,
+                            extensions,
+                        });
                 }
             }
             _ => {}
@@ -373,16 +279,7 @@ where
         ch_id
     }
 
-    pub fn add_address(&mut self, peer_id: &PeerId, addr: Multiaddr) {
-        self.graphsync.add_address(peer_id, addr);
-    }
-}
-
-impl<S: 'static + BlockStore> NetworkBehaviourEventProcess<GraphsyncEvent> for DataTransfer<S>
-where
-    Ipld: Decode<<S::Params as StoreParams>::Codecs>,
-{
-    fn inject_event(&mut self, event: GraphsyncEvent) {
+    pub fn inject_graphsync_event(&mut self, event: GraphsyncEvent) {
         match event {
             GraphsyncEvent::RequestAccepted(peer, req) => {
                 if let Ok(msg) = TransferMessage::try_from(&req.extensions) {
@@ -430,7 +327,8 @@ where
                                     voucher: Some(voucher),
                                 }),
                             };
-                            self.network.send_message(&peer, tmsg);
+                            self.pending_events
+                                .push_back(DataTransferEvent::DtOutbound(peer, tmsg));
                             // after we sent the completed message our transfer is complete.
                             let next_state = Channel::Completed {
                                 id: ch_id,
@@ -459,7 +357,8 @@ where
                                     voucher: Some(voucher),
                                 }),
                             };
-                            self.network.send_message(&peer, tmsg);
+                            self.pending_events
+                                .push_back(DataTransferEvent::DtOutbound(peer, tmsg));
                         }
                         _ => {}
                     }
@@ -510,13 +409,8 @@ where
             }
         }
     }
-}
 
-impl<S: 'static + BlockStore> NetworkBehaviourEventProcess<DtNetEvent> for DataTransfer<S>
-where
-    Ipld: Decode<<S::Params as StoreParams>::Codecs>,
-{
-    fn inject_event(&mut self, event: DtNetEvent) {
+    pub fn inject_dt_event(&mut self, event: DtNetEvent) {
         match event {
             DtNetEvent::Request(peer_id, request) => {
                 self.process_request(peer_id, request);
@@ -525,6 +419,190 @@ where
                 self.process_response(peer_id, response);
             }
         }
+    }
+
+    pub fn incoming_request_hook(&self) -> IncomingRequestHook {
+        Arc::new(|_peer, gs_req| {
+            let mut extensions = HashMap::new();
+            if let Ok(rmsg) = TransferMessage::try_from(&gs_req.extensions) {
+                if rmsg.is_rq {
+                    let req = rmsg
+                        .request
+                        .expect("Expected incoming message to have a request");
+                    if let DealProposal::Pull { id, .. } =
+                        req.voucher.expect("Expected request to have a voucher")
+                    {
+                        let voucher = DealResponse::Pull {
+                            id,
+                            status: DealStatus::Accepted,
+                            message: "".to_string(),
+                            payment_owed: (0_isize).to_bigint().unwrap(),
+                        };
+                        let tmsg = TransferMessage {
+                            is_rq: false,
+                            request: None,
+                            response: Some(TransferResponse {
+                                mtype: MessageType::New,
+                                accepted: true,
+                                paused: false,
+                                transfer_id: req.transfer_id,
+                                voucher_type: voucher.voucher_type(),
+                                voucher: Some(voucher),
+                            }),
+                        };
+                        extensions.insert(EXTENSION_KEY.to_string(), tmsg.marshal_cbor().unwrap());
+                    }
+                }
+                (true, extensions)
+            } else {
+                (false, extensions)
+            }
+        })
+    }
+}
+
+#[derive(Debug)]
+pub enum DataTransferEvent {
+    DtOutbound(PeerId, TransferMessage),
+    GsOutbound {
+        ch_id: ChannelId,
+        peer_id: PeerId,
+        root: Cid,
+        selector: Selector,
+        extensions: Extensions,
+    },
+    Started(ChannelId),
+    Accepted(ChannelId),
+    Progress(ChannelId),
+    Block {
+        ch_id: ChannelId,
+        link: Cid,
+        size: usize,
+        data: Ipld,
+    },
+    Completed(ChannelId, Result<(), String>),
+}
+
+#[derive(NetworkBehaviour)]
+#[behaviour(
+    out_event = "DataTransferEvent",
+    poll_method = "poll",
+    event_process = true
+)]
+pub struct DataTransferBehaviour<S: BlockStore>
+where
+    Ipld: Decode<<S::Params as StoreParams>::Codecs>,
+{
+    graphsync: Graphsync<S>,
+    network: DataTransferNetwork,
+
+    #[behaviour(ignore)]
+    dt: DataTransfer,
+}
+
+impl<S: 'static + BlockStore> DataTransferBehaviour<S>
+where
+    Ipld: Decode<<S::Params as StoreParams>::Codecs>,
+{
+    pub fn new(peer_id: PeerId, mut graphsync: Graphsync<S>) -> Self {
+        let dt = DataTransfer::new(peer_id);
+        graphsync.register_incoming_request_hook(dt.incoming_request_hook());
+
+        Self {
+            graphsync,
+            network: DataTransferNetwork::new(),
+            dt,
+        }
+    }
+
+    pub fn pull(
+        &mut self,
+        peer_id: PeerId,
+        root: Cid,
+        selector: Selector,
+        params: PullParams,
+    ) -> Result<ChannelId, String> {
+        let (ch_id, message) = self
+            .dt
+            .open_pull_channel(peer_id, root, selector.clone(), params);
+        let buf = message.marshal_cbor().map_err(|e| e.to_string())?;
+        let mut extensions = HashMap::new();
+        extensions.insert(EXTENSION_KEY.to_string(), buf);
+        let rq_id = self.graphsync.request(peer_id, root, selector, extensions);
+        self.dt.channel_ids.insert(rq_id, ch_id.clone());
+        Ok(ch_id)
+    }
+
+    pub fn push(
+        &mut self,
+        peer_id: PeerId,
+        root: Cid,
+        selector: Selector,
+        params: PushParams,
+    ) -> Result<ChannelId, String> {
+        let (ch_id, message) = self
+            .dt
+            .open_push_channel(peer_id, root, selector.clone(), params);
+        self.network.send_message(&peer_id, message);
+        Ok(ch_id)
+    }
+
+    fn poll(
+        &mut self,
+        _: &mut Context,
+        _: &mut impl PollParameters,
+    ) -> Poll<
+        NetworkBehaviourAction<
+            <Self as NetworkBehaviour>::OutEvent,
+            <Self as NetworkBehaviour>::ProtocolsHandler,
+        >,
+    > {
+        if let Some(ev) = self.dt.pending_events.pop_front() {
+            match ev {
+                DataTransferEvent::DtOutbound(peer, msg) => {
+                    self.network.send_message(&peer, msg);
+                }
+                DataTransferEvent::GsOutbound {
+                    ch_id,
+                    peer_id,
+                    root,
+                    selector,
+                    extensions,
+                } => {
+                    let rq_id = self.graphsync.request(peer_id, root, selector, extensions);
+                    self.dt.channel_ids.insert(rq_id, ch_id);
+                }
+                _ => {
+                    return Poll::Ready(NetworkBehaviourAction::GenerateEvent(ev));
+                }
+            }
+        } else if self.dt.pending_events.capacity() > EMPTY_QUEUE_SHRINK_THRESHOLD {
+            self.dt.pending_events.shrink_to_fit();
+        }
+        Poll::Pending
+    }
+
+    pub fn add_address(&mut self, peer_id: &PeerId, addr: Multiaddr) {
+        self.graphsync.add_address(peer_id, addr.clone());
+    }
+}
+
+impl<S: 'static + BlockStore> NetworkBehaviourEventProcess<GraphsyncEvent>
+    for DataTransferBehaviour<S>
+where
+    Ipld: Decode<<S::Params as StoreParams>::Codecs>,
+{
+    fn inject_event(&mut self, event: GraphsyncEvent) {
+        self.dt.inject_graphsync_event(event);
+    }
+}
+
+impl<S: 'static + BlockStore> NetworkBehaviourEventProcess<DtNetEvent> for DataTransferBehaviour<S>
+where
+    Ipld: Decode<<S::Params as StoreParams>::Codecs>,
+{
+    fn inject_event(&mut self, event: DtNetEvent) {
+        self.dt.inject_dt_event(event);
     }
 }
 
@@ -568,7 +646,7 @@ mod tests {
     struct Peer {
         peer_id: PeerId,
         addr: Multiaddr,
-        swarm: Swarm<DataTransfer<MemoryBlockStore>>,
+        swarm: Swarm<DataTransferBehaviour<MemoryBlockStore>>,
         store: Arc<MemoryBlockStore>,
     }
 
@@ -577,7 +655,7 @@ mod tests {
             let (peer_id, trans) = mk_transport();
             let bs = Arc::new(MemoryBlockStore::default());
             let gs = Graphsync::new(Default::default(), bs.clone());
-            let dt = DataTransfer::new(peer_id, gs);
+            let dt = DataTransferBehaviour::new(peer_id, gs);
             let mut swarm = Swarm::new(trans, dt, peer_id);
             Swarm::listen_on(&mut swarm, "/ip4/127.0.0.1/tcp/0".parse().unwrap()).unwrap();
             while swarm.next().now_or_never().is_some() {}
@@ -596,7 +674,7 @@ mod tests {
                 .add_address(&peer.peer_id, peer.addr.clone());
         }
 
-        fn swarm(&mut self) -> &mut Swarm<DataTransfer<MemoryBlockStore>> {
+        fn swarm(&mut self) -> &mut Swarm<DataTransferBehaviour<MemoryBlockStore>> {
             &mut self.swarm
         }
 

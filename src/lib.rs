@@ -33,11 +33,8 @@ pub type Index = HashMap<Cid, PeerTable>;
 pub type LocalIndex = HashSet<Cid>;
 pub type SerializableIndex = HashMap<Vec<u8>, SerializablePeerTable>;
 pub type SerializableLocalIndex = HashSet<Vec<u8>>;
-use data_transfer::{
-    ChannelId, DataTransfer, DataTransferEvent, DataTransferNetwork, DtNetEvent, PullParams,
-    EXTENSION_KEY,
-};
-use graphsync::{Extensions, Graphsync, GraphsyncEvent};
+use data_transfer::{ChannelId, DataTransferBehaviour, DataTransferEvent, PullParams};
+use graphsync::Graphsync;
 use std::str::FromStr;
 
 pub const ROUTING_TOPIC: &str = "myel/content-routing";
@@ -70,24 +67,6 @@ pub enum RoutingEvent {
     HubTableUpdated,
     HubIndexUpdated,
     RoutingTableUpdated,
-    DtOutbound(PeerId, data_transfer::TransferMessage),
-    GsOutbound {
-        ch_id: ChannelId,
-        peer_id: PeerId,
-        root: Cid,
-        selector: Selector,
-        extensions: Extensions,
-    },
-    Started(ChannelId),
-    Accepted(ChannelId),
-    Progress(ChannelId),
-    Block {
-        ch_id: ChannelId,
-        link: Cid,
-        size: usize,
-        data: Ipld,
-    },
-    Completed(ChannelId, Result<(), String>),
 }
 
 #[derive(NetworkBehaviour)]
@@ -96,15 +75,11 @@ pub struct Pop<S: 'static + BlockStore>
 where
     Ipld: Decode<<S::Params as StoreParams>::Codecs>,
 {
-    graphsync: Graphsync<S>,
-    dt_network: DataTransferNetwork,
+    data_transfer: DataTransferBehaviour<S>,
     discovery: HubDiscovery,
     broadcaster: Gossipsub,
     routing_responder: RoutingNetwork,
 
-
-    #[behaviour(ignore)]
-    data_transfer: DataTransfer,
     #[behaviour(ignore)]
     peer_id: PeerId,
     #[behaviour(ignore)]
@@ -137,15 +112,16 @@ where
             ]),
         );
 
+        let gs = Graphsync::new(Default::default(), store.clone());
+        let data_transfer = DataTransferBehaviour::new(peer_id, gs);
+
         Self {
             peer_id,
             is_hub,
             discovery,
+            data_transfer,
             broadcaster,
-            store: store.clone(),
-            graphsync: Graphsync::new(Default::default(), store),
-            data_transfer: DataTransfer::new(peer_id),
-            dt_network: DataTransferNetwork::new(),
+            store,
             routing_responder: RoutingNetwork::new(),
             pending_events: VecDeque::default(),
             // can swap this for something on disk, this is a thread safe hashmap
@@ -157,24 +133,6 @@ where
     pub fn add_address(&mut self, peer_id: &PeerId, addr: Multiaddr) {
         self.discovery.add_address(peer_id, addr);
         // self.broadcaster.add_explicit_peer(peer_id);
-    }
-
-    pub fn pull(
-        &mut self,
-        peer_id: PeerId,
-        root: Cid,
-        selector: Selector,
-        params: PullParams,
-    ) -> Result<ChannelId, String> {
-        let (ch_id, message) =
-            self.data_transfer
-                .open_pull_channel(peer_id, root, selector.clone(), params);
-        let buf = message.marshal_cbor().map_err(|e| e.to_string())?;
-        let mut extensions = HashMap::new();
-        extensions.insert(EXTENSION_KEY.to_string(), buf);
-        let rq_id = self.graphsync.request(peer_id, root, selector, extensions);
-        self.data_transfer.channel_ids.insert(rq_id, ch_id.clone());
-        Ok(ch_id)
     }
 
     pub fn broadcast_update(&mut self, cids: Vec<CidCbor>, deletion: bool) -> Result<(), String> {
@@ -290,7 +248,10 @@ where
                             }),
                             current: None,
                         };
-                        match self.pull(peer_id, cid, selector, PullParams::default()) {
+                        match self
+                            .data_transfer
+                            .pull(peer_id, cid, selector, PullParams::default())
+                        {
                             Ok(ch) => {
                                 // we make note that we've made a request for this index
                                 self.pending_index_requests.insert(cid, ch);
@@ -412,50 +373,22 @@ where
         } else if self.pending_events.capacity() > EMPTY_QUEUE_SHRINK_THRESHOLD {
             self.pending_events.shrink_to_fit();
         }
-
-        if let Some(ev) = self.data_transfer.pending_events.pop_front() {
-            match ev {
-                DataTransferEvent::DtOutbound(peer, msg) => {
-                    self.dt_network.send_message(&peer, msg);
-                }
-                DataTransferEvent::GsOutbound {
-                    ch_id,
-                    peer_id,
-                    root,
-                    selector,
-                    extensions,
-                } => {
-                    let rq_id = self.graphsync.request(peer_id, root, selector, extensions);
-                    self.data_transfer.channel_ids.insert(rq_id, ch_id);
-                }
-                DataTransferEvent::Completed(ch, res) => {
-                    self.process_transfer_completion(ch, res).unwrap();
-                    // return Poll::Ready(NetworkBehaviourAction::GenerateEvent(ev.into()));
-                }
-                _ => {}
-            }
-        } else if self.data_transfer.pending_events.capacity() > EMPTY_QUEUE_SHRINK_THRESHOLD {
-            self.data_transfer.pending_events.shrink_to_fit();
-        }
         Poll::Pending
     }
 }
 
-impl<S: 'static + BlockStore> NetworkBehaviourEventProcess<GraphsyncEvent> for Pop<S>
+impl<S: 'static + BlockStore> NetworkBehaviourEventProcess<DataTransferEvent> for Pop<S>
 where
     Ipld: Decode<<S::Params as StoreParams>::Codecs>,
 {
-    fn inject_event(&mut self, event: GraphsyncEvent) {
-        self.data_transfer.inject_graphsync_event(event);
-    }
-}
-
-impl<S: 'static + BlockStore> NetworkBehaviourEventProcess<DtNetEvent> for Pop<S>
-where
-    Ipld: Decode<<S::Params as StoreParams>::Codecs>,
-{
-    fn inject_event(&mut self, event: DtNetEvent) {
-        self.data_transfer.inject_dt_event(event);
+    fn inject_event(&mut self, event: DataTransferEvent) {
+        println!("data transfer event: {:?} {:?}", event, self.peer_id);
+        match event {
+            DataTransferEvent::Completed(ch, res) => {
+                self.process_transfer_completion(ch, res).unwrap();
+            }
+            _ => {}
+        }
     }
 }
 
@@ -754,6 +687,7 @@ mod tests {
         peer1
             .swarm()
             .behaviour_mut()
+            .data_transfer
             .pull(peer2id, cid.unwrap(), selector, PullParams::default())
             .unwrap();
 

@@ -1,6 +1,8 @@
 use filecoin::{cid_helpers::CidCbor, types::Cbor};
+use futures::channel::mpsc;
 use futures::future::BoxFuture;
 use futures::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use futures_lite::stream::StreamExt;
 use graphsync::traversal::{RecursionLimit, Selector};
 use graphsync::Extensions;
 use libipld::Cid;
@@ -20,7 +22,7 @@ use serde_repr::{Deserialize_repr, Serialize_repr};
 use serde_tuple::{Deserialize_tuple, Serialize_tuple};
 use smallvec::SmallVec;
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::HashMap,
     io, iter,
     task::{Context, Poll},
 };
@@ -378,7 +380,13 @@ pub enum DtNetEvent {
 }
 
 pub struct DataTransferNetwork {
-    pending_events: VecDeque<
+    receiver: mpsc::Receiver<
+        NetworkBehaviourAction<
+            DtNetEvent,
+            OneShotHandler<TransferProtocol, TransferMessage, TransferMessage>,
+        >,
+    >,
+    sender: mpsc::Sender<
         NetworkBehaviourAction<
             DtNetEvent,
             OneShotHandler<TransferProtocol, TransferMessage, TransferMessage>,
@@ -397,23 +405,27 @@ impl Default for DataTransferNetwork {
 
 impl DataTransferNetwork {
     pub fn new() -> Self {
+        let (sender, receiver) = mpsc::channel(16);
         Self {
-            pending_events: VecDeque::new(),
             connected: HashMap::new(),
             pending_outbound_requests: HashMap::new(),
             addresses: HashMap::new(),
+            sender,
+            receiver,
         }
     }
 
     pub fn send_message(&mut self, peer: &PeerId, message: TransferMessage) {
         if let Some(message) = self.try_send_message(peer, message) {
             let handler = self.new_handler();
-            self.pending_events.push_back(NetworkBehaviourAction::Dial {
-                opts: DialOpts::peer_id(*peer)
-                    .condition(dial_opts::PeerCondition::Disconnected)
-                    .build(),
-                handler,
-            });
+            self.sender
+                .start_send(NetworkBehaviourAction::Dial {
+                    opts: DialOpts::peer_id(*peer)
+                        .condition(dial_opts::PeerCondition::Disconnected)
+                        .build(),
+                    handler,
+                })
+                .unwrap();
             self.pending_outbound_requests
                 .entry(*peer)
                 .or_default()
@@ -430,12 +442,13 @@ impl DataTransferNetwork {
             if connections.is_empty() {
                 return Some(message);
             }
-            self.pending_events
-                .push_back(NetworkBehaviourAction::NotifyHandler {
+            self.sender
+                .start_send(NetworkBehaviourAction::NotifyHandler {
                     peer_id: *peer,
                     handler: NotifyHandler::Any,
                     event: message,
-                });
+                })
+                .unwrap();
             None
         } else {
             Some(message)
@@ -490,21 +503,23 @@ impl NetworkBehaviour for DataTransferNetwork {
             return;
         }
         if event.is_rq {
-            self.pending_events
-                .push_back(NetworkBehaviourAction::GenerateEvent(DtNetEvent::Request(
+            self.sender
+                .start_send(NetworkBehaviourAction::GenerateEvent(DtNetEvent::Request(
                     peer_id,
                     event
                         .request
                         .expect("Expected event request to have request field"),
-                )));
+                )))
+                .unwrap();
         } else {
-            self.pending_events
-                .push_back(NetworkBehaviourAction::GenerateEvent(DtNetEvent::Response(
+            self.sender
+                .start_send(NetworkBehaviourAction::GenerateEvent(DtNetEvent::Response(
                     peer_id,
                     event
                         .response
                         .expect("Expected event response to have a response field"),
-                )));
+                )))
+                .unwrap();
         }
     }
 
@@ -597,13 +612,11 @@ impl NetworkBehaviour for DataTransferNetwork {
 
     fn poll(
         &mut self,
-        _: &mut Context<'_>,
+        ctx: &mut Context<'_>,
         _: &mut impl PollParameters,
     ) -> Poll<NetworkBehaviourAction<Self::OutEvent, Self::ProtocolsHandler>> {
-        if let Some(ev) = self.pending_events.pop_front() {
+        if let Poll::Ready(Some(ev)) = self.receiver.poll_next(ctx) {
             return Poll::Ready(ev);
-        } else if self.pending_events.capacity() > EMPTY_QUEUE_SHRINK_THRESHOLD {
-            self.pending_events.shrink_to_fit();
         }
         Poll::Pending
     }
@@ -738,7 +751,10 @@ mod tests {
             let (peer_id, trans) = mk_transport();
             let mut swarm = Swarm::new(trans, DataTransferNetwork::new(), peer_id);
             Swarm::listen_on(&mut swarm, "/ip4/127.0.0.1/tcp/0".parse().unwrap()).unwrap();
-            while swarm.next().now_or_never().is_some() {}
+            while futures::StreamExt::next(&mut swarm)
+                .now_or_never()
+                .is_some()
+            {}
             let addr = Swarm::listeners(&swarm).next().unwrap().clone();
             Self {
                 peer_id,
@@ -755,7 +771,7 @@ mod tests {
             let peer_id = self.peer_id;
             task::spawn(async move {
                 loop {
-                    let event = self.swarm.next().await;
+                    let event = futures::StreamExt::next(&mut self.swarm).await;
                     println!("event {:?}", event);
                 }
             });
@@ -764,8 +780,8 @@ mod tests {
 
         async fn next(&mut self) -> Option<DtNetEvent> {
             loop {
-                let ev = self.swarm.next().await?;
-                if let SwarmEvent::Behaviour(event) = ev {
+                let ev = futures::StreamExt::next(&mut self.swarm).await;
+                if let Some(SwarmEvent::Behaviour(event)) = ev {
                     return Some(event);
                 }
             }

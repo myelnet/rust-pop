@@ -1301,6 +1301,7 @@ dependencies = [
  "filecoin",
  "forest_bigint",
  "futures",
+ "futures-lite",
  "graphsync",
  "hex",
  "instant",

@@ -6,4 +6,4 @@ pub use crate::discovery::{DiscoveryEvent, HubDiscovery, PeerTable, Serializable
 pub use crate::routing::{
     RoutingNetEvent, RoutingNetwork, RoutingRecord, EMPTY_QUEUE_SHRINK_THRESHOLD,
 };
-pub use utils::{gossip_init};
+pub use utils::{gossip_init, peer_table_from_bytes, peer_table_to_bytes};

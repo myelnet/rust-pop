@@ -4178,8 +4178,10 @@ dependencies = [
  "rand 0.6.5",
  "rand 0.7.3",
  "reqwest",
+ "routing",
  "serde",
  "serde_repr",
+ "serde_tuple",
  "smallvec",
  "thiserror",
  "unixfs-v1",
@@ -6056,6 +6058,7 @@ dependencies = [
  "rand 0.7.3",
  "serde",
  "serde_json",
+ "serde_tuple",
  "slice_as_array",
  "thiserror",
 ]

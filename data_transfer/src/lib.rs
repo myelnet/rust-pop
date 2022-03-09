@@ -2,7 +2,10 @@ mod fsm;
 pub mod mimesniff;
 mod network;
 
-pub use network::{ChannelId, PullParams, PushParams};
+pub use network::{
+    ChannelId, DataTransferNetwork, DtNetEvent, PullParams, PushParams, TransferMessage,
+    EXTENSION_KEY,
+};
 
 use blockstore::types::BlockStore;
 use filecoin::{cid_helpers::CidCbor, types::Cbor};
@@ -17,9 +20,8 @@ use libp2p::swarm::{
 };
 use libp2p::{Multiaddr, NetworkBehaviour, PeerId};
 use network::{
-    DataTransferNetwork, DealProposal, DealResponse, DealStatus, DtNetEvent, MessageType,
-    TransferMessage, TransferRequest, TransferResponse, EMPTY_QUEUE_SHRINK_THRESHOLD,
-    EXTENSION_KEY,
+    DealProposal, DealResponse, DealStatus, MessageType, TransferRequest, TransferResponse,
+    EMPTY_QUEUE_SHRINK_THRESHOLD,
 };
 use num_bigint::ToBigInt;
 use std::{
@@ -31,9 +33,9 @@ use std::{
 pub struct DataTransfer {
     peer_id: PeerId,
     next_request_id: u64,
-    pending_events: VecDeque<DataTransferEvent>,
+    pub pending_events: VecDeque<DataTransferEvent>,
     channels: HashMap<ChannelId, Channel>,
-    channel_ids: HashMap<RequestId, ChannelId>,
+    pub channel_ids: HashMap<RequestId, ChannelId>,
 }
 
 impl DataTransfer {

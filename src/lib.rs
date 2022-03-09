@@ -459,7 +459,6 @@ mod tests {
     use async_std::task;
     use blockstore::memory::MemoryDB as MemoryBlockStore;
     use futures::prelude::*;
-    use graphsync::Graphsync;
     use libp2p::core::muxing::StreamMuxerBox;
     use libp2p::core::transport::Boxed;
     use libp2p::identity;

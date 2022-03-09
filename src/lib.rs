@@ -34,6 +34,7 @@ pub type LocalIndex = HashSet<Cid>;
 pub type SerializableIndex = HashMap<Vec<u8>, SerializablePeerTable>;
 pub type SerializableLocalIndex = HashSet<Vec<u8>>;
 use data_transfer::{ChannelId, DataTransferBehaviour, DataTransferEvent, PullParams};
+use graphsync::Graphsync;
 use std::str::FromStr;
 
 pub const ROUTING_TOPIC: &str = "myel/content-routing";
@@ -49,7 +50,6 @@ enum RoutingTableEntry {
         cids: Vec<CidCbor>,
     },
 }
-
 impl Cbor for RoutingTableEntry {}
 
 #[derive(Debug, PartialEq, Clone, Serialize_tuple, Deserialize_tuple)]
@@ -101,13 +101,7 @@ impl<S: 'static + BlockStore> Pop<S>
 where
     Ipld: Decode<<S::Params as StoreParams>::Codecs>,
 {
-    pub fn new(
-        peer_id: PeerId,
-        is_hub: bool,
-        data_transfer: DataTransferBehaviour<S>,
-        store: Arc<S>,
-        index_root: Option<CidCbor>,
-    ) -> Self {
+    pub fn new(peer_id: PeerId, is_hub: bool, store: Arc<S>, index_root: Option<CidCbor>) -> Self {
         let discovery = HubDiscovery::new(DiscoveryConfig::default(), peer_id, is_hub, index_root);
         //  topic with identity hash
         let broadcaster = gossip_init(
@@ -117,6 +111,9 @@ where
                 IdentTopic::new(SYNCING_TOPIC),
             ]),
         );
+
+        let gs = Graphsync::new(Default::default(), store.clone());
+        let data_transfer = DataTransferBehaviour::new(peer_id, gs);
 
         Self {
             peer_id,
@@ -352,7 +349,7 @@ where
             }
             Err(e) => {
                 println!("transfer error: {:?}", e);
-                //  do something when a request for a CID failed e
+                //  do something when a request for a CID failed
                 if self.pending_index_requests.contains_right(&ch) {
                     self.pending_index_requests.remove_by_right(&ch);
                 }
@@ -503,9 +500,7 @@ mod tests {
         fn new(is_hub: bool) -> Self {
             let (peer_id, trans) = mk_transport();
             let bs = Arc::new(MemoryBlockStore::default());
-            let gs = Graphsync::new(Default::default(), bs.clone());
-            let dt = DataTransferBehaviour::new(peer_id, gs);
-            let rt = Pop::new(peer_id, is_hub, dt, bs, None);
+            let rt = Pop::new(peer_id, is_hub, bs, None);
             let mut swarm = Swarm::new(trans, rt, peer_id);
             Swarm::listen_on(&mut swarm, "/ip4/127.0.0.1/tcp/0".parse().unwrap()).unwrap();
             while swarm.next().now_or_never().is_some() {}

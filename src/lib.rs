@@ -69,6 +69,12 @@ pub enum RoutingEvent {
     RoutingTableUpdated,
 }
 
+#[derive(Debug)]
+pub struct PopConfig {
+    pub is_hub: bool,
+    pub peer_id: PeerId,
+}
+
 #[derive(NetworkBehaviour)]
 #[behaviour(out_event = "RoutingEvent", poll_method = "poll", event_process = true)]
 pub struct Pop<S: 'static + BlockStore>
@@ -101,11 +107,16 @@ impl<S: 'static + BlockStore> Pop<S>
 where
     Ipld: Decode<<S::Params as StoreParams>::Codecs>,
 {
-    pub fn new(peer_id: PeerId, is_hub: bool, store: Arc<S>, index_root: Option<CidCbor>) -> Self {
-        let discovery = HubDiscovery::new(DiscoveryConfig::default(), peer_id, is_hub, index_root);
+    pub fn new(config: PopConfig, store: Arc<S>, index_root: Option<CidCbor>) -> Self {
+        let discovery = HubDiscovery::new(
+            DiscoveryConfig::default(),
+            config.peer_id,
+            config.is_hub,
+            index_root,
+        );
         //  topic with identity hash
         let broadcaster = gossip_init(
-            peer_id,
+            config.peer_id,
             Vec::from([
                 IdentTopic::new(ROUTING_TOPIC),
                 IdentTopic::new(SYNCING_TOPIC),
@@ -113,15 +124,15 @@ where
         );
 
         let gs = Graphsync::new(Default::default(), store.clone());
-        let data_transfer = DataTransferBehaviour::new(peer_id, gs);
+        let data_transfer = DataTransferBehaviour::new(config.peer_id, gs);
 
         Self {
-            peer_id,
-            is_hub,
             discovery,
             data_transfer,
             broadcaster,
             store,
+            is_hub: config.is_hub,
+            peer_id: config.peer_id,
             routing_responder: RoutingNetwork::new(),
             pending_events: VecDeque::default(),
             // can swap this for something on disk, this is a thread safe hashmap
@@ -135,17 +146,28 @@ where
         // self.broadcaster.add_explicit_peer(peer_id);
     }
 
-    pub fn broadcast_update(&mut self, cids: Vec<CidCbor>, deletion: bool) -> Result<(), String> {
-        let msg = if deletion {
-            RoutingTableEntry::Deletion { cids }
-        } else {
-            RoutingTableEntry::Insertion {
-                multiaddresses: self.discovery.multiaddr.to_vec(),
-                cids,
-            }
+    pub fn publish_insertion(&mut self, cids: Vec<CidCbor>) -> Result<(), String> {
+        let msg = RoutingTableEntry::Insertion {
+            multiaddresses: self.discovery.multiaddr.to_vec(),
+            cids,
         }
         .marshal_cbor()
         .map_err(|e| e.to_string())?;
+        // Because Topic is not thread safe (the hasher it uses can't be safely shared across threads)
+        // we create a new instantiation of the Topic for each publication, in most examples Topic is
+        // cloned anyway
+        self.broadcaster
+            .publish(IdentTopic::new(SYNCING_TOPIC), msg)
+            .map_err(|e| e.to_string())?;
+        self.pending_events
+            .push_back(RoutingEvent::SyncRequestBroadcast);
+
+        Ok(())
+    }
+    pub fn publish_deletion(&mut self, cids: Vec<CidCbor>) -> Result<(), String> {
+        let msg = RoutingTableEntry::Deletion { cids }
+            .marshal_cbor()
+            .map_err(|e| e.to_string())?;
         // Because Topic is not thread safe (the hasher it uses can't be safely shared across threads)
         // we create a new instantiation of the Topic for each publication, in most examples Topic is
         // cloned anyway
@@ -499,7 +521,8 @@ mod tests {
         fn new(is_hub: bool) -> Self {
             let (peer_id, trans) = mk_transport();
             let bs = Arc::new(MemoryBlockStore::default());
-            let rt = Pop::new(peer_id, is_hub, bs, None);
+            let config = PopConfig { peer_id, is_hub };
+            let rt = Pop::new(config, bs, None);
             let mut swarm = Swarm::new(trans, rt, peer_id);
             Swarm::listen_on(&mut swarm, "/ip4/127.0.0.1/tcp/0".parse().unwrap()).unwrap();
             while swarm.next().now_or_never().is_some() {}
@@ -582,10 +605,17 @@ mod tests {
             for cid in content {
                 cids.push(CidCbor::from(Cid::try_from(cid).unwrap()));
             }
-            self.swarm()
-                .behaviour_mut()
-                .broadcast_update(cids.clone(), deletion)
-                .unwrap();
+            if deletion {
+                self.swarm()
+                    .behaviour_mut()
+                    .publish_deletion(cids.clone())
+                    .unwrap();
+            } else {
+                self.swarm()
+                    .behaviour_mut()
+                    .publish_insertion(cids.clone())
+                    .unwrap();
+            }
             cids
         }
 

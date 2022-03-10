@@ -59,7 +59,6 @@ where
     #[behaviour(ignore)]
     pending_cids: HashSet<Cid>,
     // A bidirectional map of index cids we have made data-transfer requests for.
-    // This will always be empty if the node is not a hub
     #[behaviour(ignore)]
     pending_requests: BiMap<Cid, ChannelId>,
     #[behaviour(ignore)]
@@ -86,7 +85,6 @@ where
 
     pub fn add_address(&mut self, peer_id: &PeerId, addr: Multiaddr) {
         self.routing.add_address(peer_id, addr.clone());
-        // self.data_transfer.add_address(peer_id, addr);
     }
 
     fn addresses_of_peer(&mut self, peer_id: &PeerId) -> Vec<Multiaddr> {
@@ -141,8 +139,7 @@ where
             if self.pending_requests.get_by_left(&root).is_none() {
                 //  if the sent Cid is valid
                 let table = self.routing.routing_table.clone();
-                let lock = table.read().unwrap();
-                if let Some(peer_table) = lock.get(&root) {
+                if let Some(peer_table) = table.get(&root) {
                     let peer = peer_table.keys().next().unwrap();
                     let addresses = peer_table.get(peer).unwrap();
                     for addr in addresses {
@@ -166,18 +163,12 @@ where
         match res {
             Ok(_) => {
                 //  if we initiated the transfer
-                println!("transfer succeeded");
                 if ch.initiator == self.routing.config.peer_id.to_base58() {
                     //  do something when a request for a CID succeeded
-                    //  if we initiated the transfer
-                    println!("we initiated it {:?}", self.routing.config.peer_id);
-
                     if let Some(cid) = self.pending_requests.get_by_right(&ch) {
-                        println!("was a pending request {:?}", cid);
                         //  we indicate that we're no longer interested in the CID so that if we get new routing responses from hubs
                         //  we simply update our routing table but don't fire off another request
                         if self.pending_cids.remove(cid) {
-                            println!("was in pending cids {:?}", cid);
                             self.pending_events
                                 .push_back(RoutingEvent::ContentRequestFulfilled(cid.to_string()));
                         } else {
@@ -252,7 +243,6 @@ where
                     .push_back(RoutingEvent::HubTableUpdated(peer, root));
             }
             RoutingEvent::RoutingTableUpdated(root) => {
-                println!("Routing Table Updated {:?}", root);
                 self.get_from_routing(root);
             }
             e => self.pending_events.push_back(e),
@@ -319,7 +309,7 @@ mod tests {
             }
         }
 
-        fn get_routing_table(&mut self) -> Arc<RwLock<Index>> {
+        fn get_routing_table(&mut self) -> Index {
             return self.swarm.behaviour_mut().routing.routing_table.clone();
         }
 
@@ -500,19 +490,12 @@ mod tests {
         };
         let (cid, ma) = res.unwrap();
 
-        assert!(hub_routing_table.read().unwrap().contains_key(&cid));
+        assert!(hub_routing_table.contains_key(&cid));
 
-        assert!(hub_routing_table
-            .read()
-            .unwrap()
-            .get(&cid)
-            .unwrap()
-            .contains_key(&peer2id));
+        assert!(hub_routing_table.get(&cid).unwrap().contains_key(&peer2id));
 
         assert_eq!(
             hub_routing_table
-                .read()
-                .unwrap()
                 .get(&cid)
                 .unwrap()
                 .get(&peer2id)
@@ -583,18 +566,11 @@ mod tests {
 
         let hubid = hub_peer.spawn("hub");
 
-        //  print logs for hub peer
         peer2.swarm().dial(hubid).unwrap();
-        //  print logs for hub peer
-        // peer2.swarm().dial(peer1id).unwrap();
-        peer2.next_discovery().await;
-        // peer2.next_discovery().await;
-        //  print logs for hub peer
-        // peer2.swarm().dial(peer1id).unwrap();
-        peer2.get(cid);
 
-        // //  print logs for hub peer
-        // peer2.next_routing().await;
+        peer2.next_discovery().await;
+
+        peer2.get(cid);
 
         let cid_resp = peer2.next_content_fulfilled().await;
 

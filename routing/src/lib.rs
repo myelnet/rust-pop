@@ -81,9 +81,7 @@ pub struct Routing {
     pending_events: VecDeque<RoutingEvent>,
     // a map of who has the content we made requests for
     #[behaviour(ignore)]
-    pub routing_table: Arc<RwLock<Index>>,
-    // A bidirectional map of index cids we have made data-transfer requests for.
-    // This will always be empty if the node is not a hub
+    pub routing_table: Index,
 }
 
 impl Routing {
@@ -109,8 +107,8 @@ impl Routing {
             config,
             routing_responder: RoutingNetwork::new(),
             pending_events: VecDeque::default(),
-            // can swap this for something on disk, this is a thread safe hashmap
-            routing_table: Arc::new(RwLock::new(HashMap::new())),
+            // can swap this for something on disk
+            routing_table: HashMap::new(),
         }
     }
 
@@ -153,7 +151,7 @@ impl Routing {
 
     pub fn find_content(&mut self, root: Cid) -> Result<(), String> {
         //  we have an entry in our routing table
-        if self.routing_table.read().unwrap().contains_key(&root) {
+        if self.routing_table.contains_key(&root) {
             return Ok(());
         }
 
@@ -192,11 +190,10 @@ impl Routing {
                     addr_vec.push(addr)
                 }
                 let peer_table: PeerTable = HashMap::from([(peer_id, addr_vec)]);
-                let mut lock = self.routing_table.write().unwrap();
                 for cid in cids {
                     // check sent cids iare valid
                     if let Some(c) = cid.to_cid() {
-                        lock.insert(c, peer_table.clone());
+                        self.routing_table.insert(c, peer_table.clone());
                     }
                     // quit if a single CID is invalid, this can be relaxed
                     else {
@@ -207,13 +204,12 @@ impl Routing {
             RoutingTableEntry::Deletion { cids } => {
                 for cid in cids {
                     // check sent cids are valid
-                    let mut lock = self.routing_table.write().unwrap();
                     if let Some(c) = cid.to_cid() {
-                        if let Some(peer_table) = lock.get_mut(&c) {
+                        if let Some(peer_table) = self.routing_table.get_mut(&c) {
                             peer_table.remove(&peer_id);
                             // if empty clear the entry for the CID
                             if peer_table.is_empty() {
-                                lock.remove(&c);
+                                self.routing_table.remove(&c);
                             }
                         }
                     }
@@ -231,7 +227,7 @@ impl Routing {
         // expand table as new entries come in
         let mut new_entry = HashMap::new();
         new_entry.insert(root, peer_table);
-        self.routing_table.write().unwrap().extend(new_entry);
+        self.routing_table.extend(new_entry);
         self.pending_events
             .push_back(RoutingEvent::RoutingTableUpdated(root));
     }
@@ -259,12 +255,15 @@ impl Routing {
     ) -> Result<(), String> {
         // only hubs should respond
         if self.config.is_hub {
+            println! {"I'm a hub responding to a routing request"}
             let req = ContentRequest::unmarshal_cbor(&message.data).map_err(|e| e.to_string())?;
             //  if the sent Cid is valid
             if let Some(r) = req.root.to_cid() {
+                println! {"I successfully converted to cid"}
                 // if !self.store.contains(&r).map_err(|e| e.to_string())? {
                 //  if routing table contains the root cid, if not then do nothing
-                if let Some(peer_table) = self.routing_table.read().unwrap().get(&r) {
+                if let Some(peer_table) = self.routing_table.get(&r) {
+                    println! {"I have an associated entry"}
                     let message = RoutingRecord {
                         root: req.root,
                         peers: Some(peer_table_to_bytes(peer_table)),
@@ -272,11 +271,15 @@ impl Routing {
                     self.routing_responder.send_message(&peer_id, message);
                     self.pending_events
                         .push_back(RoutingEvent::FoundContent(r.to_string()));
+                } else {
+                    println! {"I don't have an entry "}
                 }
                 // }
             } else {
                 return Err("invalid cid".to_string());
             }
+        } else {
+            println! {"I'm not a hub "}
         }
 
         Ok(())
@@ -412,7 +415,7 @@ mod tests {
             }
         }
 
-        fn get_routing_table(&mut self) -> Arc<RwLock<Index>> {
+        fn get_routing_table(&mut self) -> Index {
             return self.swarm.behaviour_mut().routing_table.clone();
         }
 
@@ -550,19 +553,15 @@ mod tests {
 
         let cid = &cids.first().unwrap().to_cid().unwrap();
 
-        assert!(hub_routing_table.read().unwrap().contains_key(cid));
+        assert!(hub_routing_table.contains_key(cid));
 
         assert!(hub_routing_table
-            .read()
-            .unwrap()
             .get(cid)
             .unwrap()
             .contains_key(&peer1.peer_id));
 
         assert_eq!(
             hub_routing_table
-                .read()
-                .unwrap()
                 .get(cid)
                 .unwrap()
                 .get(&peer1.peer_id)
@@ -582,7 +581,7 @@ mod tests {
 
         std::thread::sleep(std::time::Duration::from_millis(1000));
 
-        assert!(hub_routing_table.read().unwrap().is_empty())
+        assert!(hub_routing_table.is_empty())
     }
 
     #[async_std::test]
@@ -616,10 +615,10 @@ mod tests {
 
         peer1.next_routing().await;
 
-        let lock1 = hub_table.read().unwrap();
+        let lock1 = hub_table;
 
         let table1 = peer1.get_routing_table();
-        let lock2 = table1.read().unwrap();
+        let lock2 = table1;
 
         let mut k1: Vec<&Cid> = lock1.keys().collect();
         let mut k2: Vec<&Cid> = lock2.keys().collect();

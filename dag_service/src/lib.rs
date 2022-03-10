@@ -1,3 +1,6 @@
+mod car;
+mod error;
+
 use blockstore::types::BlockStore;
 use futures::prelude::*;
 use libipld::{Block, Cid};

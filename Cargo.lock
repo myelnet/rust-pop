@@ -1210,9 +1210,15 @@ name = "dag_service"
 version = "0.1.0"
 dependencies = [
  "blockstore",
+ "cs_serde_cbor",
+ "filecoin",
  "futures",
+ "hex",
+ "integer-encoding 3.0.3",
  "libipld",
  "rand 0.7.3",
+ "serde",
+ "thiserror",
  "unixfs-v1",
 ]
 
@@ -2026,7 +2032,7 @@ dependencies = [
  "hex",
  "indexmap",
  "instant",
- "integer-encoding 3.0.2",
+ "integer-encoding 3.0.3",
  "libipld",
  "libp2p",
  "log",
@@ -2422,9 +2428,9 @@ checksum = "c27df786dcc3a75ccd134f83ece166af0a1e5785d52b12b7375d0d063e1d5c47"
 
 [[package]]
 name = "integer-encoding"
-version = "3.0.2"
+version = "3.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "90c11140ffea82edce8dcd74137ce9324ec24b3cf0175fc9d7e29164da9915b8"
+checksum = "0e85a1509a128c855368e135cffcde7eac17d8e1083f41e2b98c58bc1a5074be"
 
 [[package]]
 name = "ipconfig"

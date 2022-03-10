@@ -8,14 +8,21 @@ edition = "2021"
 [dependencies]
 libipld = "0.12"
 unixfs-v1 = "0.2.1"
-blockstore = { path = "../blockstore", default_features = false }
 futures = "0.3.19"
-
+serde = { version = "1.0", features = ["derive"] }
+serde_cbor = { package = "cs_serde_cbor", version = "0.12", features = [
+  "tags",
+] }
+blockstore = { path = "../blockstore", default_features = false }
+filecoin = { path = "../filecoin", default_features = false }
+thiserror = "1.0"
+integer-encoding = "3.0.3"
 
 [dev-dependencies]
 rand = { version = "0.7", features = ["wasm-bindgen"] }
+hex = "0.4.3"
 
 [features]
 default = ["native"]
-native = ["blockstore/native"]
-browser = ["blockstore/browser"]
+native = ["blockstore/native", "filecoin/native"]
+browser = ["blockstore/browser", "filecoin/browser"]

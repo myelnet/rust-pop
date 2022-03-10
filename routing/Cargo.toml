@@ -30,6 +30,7 @@ filecoin = { path = "../filecoin", default_features = false }
 lazy_static = "1.4.0"
 bimap = "0.6.2"
 dag_service = { path = "../dag_service" }
+blockstore = { path = "../blockstore" }
 serde_repr = "0.1"
 
 

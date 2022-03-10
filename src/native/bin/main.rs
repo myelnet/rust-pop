@@ -37,6 +37,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 ),
         )
         .subcommand(
+            Command::new("import")
+                .override_help("import a DAG from a CAR file into the blockstore")
+                .arg(
+                    Arg::new("path")
+                        .short('p')
+                        .takes_value(true)
+                        .long("pathname")
+                        .required(true)
+                        .help("path to the CAR file"),
+                ),
+        )
+        .subcommand(
             Command::new("export")
                 .override_help("gets a file from blockstore")
                 .arg(
@@ -94,6 +106,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
             //  can safely unwrap subcommand because we have just checked its name
             add(flags.values_of("path").unwrap().collect()).await
         }
+        Some("import") => {
+            let flags = matches.subcommand().unwrap().1;
+            import(flags.values_of("path").unwrap().collect()).await
+        }
         Some("export") => {
             let flags = matches.subcommand().unwrap().1;
             export(
@@ -119,6 +135,17 @@ async fn add(path: String) -> Result<(), Box<dyn Error>> {
     let client = reqwest::Client::new();
     let resp = client
         .post("http://127.0.0.1:27403/add")
+        .body(path)
+        .send()
+        .await?;
+    println!("{:?}: {:?}", resp.status(), resp.text().await.unwrap());
+    Ok(())
+}
+
+async fn import(path: String) -> Result<(), Box<dyn Error>> {
+    let client = reqwest::Client::new();
+    let resp = client
+        .post("http://127.0.0.1:27403/import")
         .body(path)
         .send()
         .await?;

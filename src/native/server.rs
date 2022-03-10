@@ -1,6 +1,6 @@
 use async_std::task;
 use blockstore::types::BlockStore;
-use dag_service::{self, add_entries, Entry};
+use dag_service::{self, add_entries, car::import_car_file, Entry};
 use data_transfer::{DataTransferBehaviour, PullParams};
 use graphsync::traversal::unixfs_path_selector;
 use libipld::codec::Decode;
@@ -126,6 +126,23 @@ where
             .map_err(|e| warp::reject::custom(Failure::ReadFailure { err: e.to_string() }));
     }
     Err(warp::reject::not_found())
+}
+
+pub async fn import_car<B: BlockStore>(
+    path: String,
+    store: Arc<B>,
+) -> Result<impl warp::Reply, warp::Rejection>
+where
+    Ipld: Decode<<<B as BlockStore>::Params as StoreParams>::Codecs>,
+{
+    let mut f = fs::File::open(path)
+        .map_err(|e| warp::reject::custom(Failure::InvalidPath { err: e.to_string() }))?;
+    let root = import_car_file(store.clone(), &mut f)
+        .map_err(|e| warp::reject::custom(Failure::ReadFailure { err: e.to_string() }))?;
+    Ok(warp::reply::with_status(
+        format!("imported CAR with root {:?} into blockstore", root),
+        http::StatusCode::CREATED,
+    ))
 }
 
 pub async fn export_file<B: BlockStore>(

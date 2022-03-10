@@ -86,7 +86,7 @@ where
 
     pub fn add_address(&mut self, peer_id: &PeerId, addr: Multiaddr) {
         self.routing.add_address(peer_id, addr.clone());
-        self.data_transfer.add_address(peer_id, addr);
+        // self.data_transfer.add_address(peer_id, addr);
     }
 
     fn addresses_of_peer(&mut self, peer_id: &PeerId) -> Vec<Multiaddr> {
@@ -166,20 +166,25 @@ where
         match res {
             Ok(_) => {
                 //  if we initiated the transfer
+                println!("transfer succeeded");
                 if ch.initiator == self.routing.config.peer_id.to_base58() {
                     //  do something when a request for a CID succeeded
+                    //  if we initiated the transfer
+                    println!("we initiated it {:?}", self.routing.config.peer_id);
 
                     if let Some(cid) = self.pending_requests.get_by_right(&ch) {
+                        println!("was a pending request {:?}", cid);
                         //  we indicate that we're no longer interested in the CID so that if we get new routing responses from hubs
                         //  we simply update our routing table but don't fire off another request
                         if self.pending_cids.remove(cid) {
+                            println!("was in pending cids {:?}", cid);
                             self.pending_events
                                 .push_back(RoutingEvent::ContentRequestFulfilled(cid.to_string()));
                         } else {
                             //  do something when a request for an index CID succeeded
                             let raw_bytes =
                                 dag_service::cat(self.store.clone(), *cid).map_err(|e| e)?;
-                            let mut entry = RoutingTableEntry::unmarshal_cbor(&raw_bytes)
+                            let entry = RoutingTableEntry::unmarshal_cbor(&raw_bytes)
                                 .map_err(|e| e.to_string())?;
                             //  override just in case
                             if let Ok(p) = PeerId::from_str(&ch.responder) {
@@ -247,6 +252,7 @@ where
                     .push_back(RoutingEvent::HubTableUpdated(peer, root));
             }
             RoutingEvent::RoutingTableUpdated(root) => {
+                println!("Routing Table Updated {:?}", root);
                 self.get_from_routing(root);
             }
             e => self.pending_events.push_back(e),
@@ -414,7 +420,7 @@ mod tests {
                 if let SwarmEvent::Behaviour(event) = ev {
                     match event {
                         RoutingEvent::ContentRequestFulfilled(cid) => return Some(cid),
-                        _ => {}
+                        _ => println!("{:?}", event),
                     }
                 }
             }
@@ -566,6 +572,7 @@ mod tests {
 
         hub_peer.add_address(&peer1);
         peer2.add_address(&hub_peer);
+        peer2.add_address(&peer1);
 
         //  print logs for hub peer
         let peer1id = peer1.spawn("peer1");
@@ -578,11 +585,16 @@ mod tests {
 
         //  print logs for hub peer
         peer2.swarm().dial(hubid).unwrap();
+        //  print logs for hub peer
+        // peer2.swarm().dial(peer1id).unwrap();
         peer2.next_discovery().await;
+        // peer2.next_discovery().await;
+        //  print logs for hub peer
+        // peer2.swarm().dial(peer1id).unwrap();
         peer2.get(cid);
 
-        //  print logs for hub peer
-        peer2.next_routing().await;
+        // //  print logs for hub peer
+        // peer2.next_routing().await;
 
         let cid_resp = peer2.next_content_fulfilled().await;
 

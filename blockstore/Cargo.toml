@@ -10,7 +10,7 @@ thiserror = "1.0"
 serde_cbor = { package = "cs_serde_cbor", version = "0.12", features = [
   "tags",
 ] }
-libipld = "0.12"
+libipld = "0.13.1"
 num_cpus = "1.13"
 async-trait = "0.1"
 

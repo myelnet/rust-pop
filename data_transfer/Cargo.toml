@@ -26,7 +26,7 @@ blockstore = { path = "../blockstore", default_features = false }
 num-bigint = { package = "forest_bigint", version = "0.1.1", features = [
   "json",
 ] }
-libipld = "0.12"
+libipld = "0.13.1"
 smallvec = "1.8.0"
 instant = "0.1.12"
 utf16_lit = "2.0.2"

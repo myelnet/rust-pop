@@ -24,7 +24,7 @@ serde_cbor = { package = "cs_serde_cbor", version = "0.12", features = [
 fil_types = { optional = true, version = "0.2" }
 lazy_static = "1.4.0"
 derive_builder = "0.9"
-libipld = "0.12"
+libipld = "0.13.1"
 libsecp256k1 = "0.6"
 num-traits = "0.2"
 num-derive = "0.3.0"

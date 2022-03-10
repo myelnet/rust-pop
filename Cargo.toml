@@ -32,7 +32,7 @@ default-features = true
 features = ["wasm-ext"]
 
 [dependencies]
-libipld = "0.12"
+libipld = "0.13.1"
 rand = { version = "0.7", features = ["wasm-bindgen"] }
 async-std = { version = "1.6.2", features = ["attributes", "unstable"] }
 filecoin = { path = "./filecoin", default_features = false }

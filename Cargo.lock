@@ -4793,6 +4793,7 @@ dependencies = [
  "async-std",
  "async-trait",
  "bimap",
+ "blockstore",
  "criterion",
  "cs_serde_cbor",
  "dag_service",

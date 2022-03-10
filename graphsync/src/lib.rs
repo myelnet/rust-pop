@@ -988,24 +988,9 @@ mod tests {
 
         assert_response_ok(peer2.next().await, id);
 
-        assert_progress_ok(
-            peer2.next().await,
-            id,
-            Cid::try_from("bafyreib6ba6oakwqzsg4vv6sogb7yysu5yqqe7dqth6z3nulqkyj7lom4a").unwrap(),
-            161,
-        );
-        assert_progress_ok(
-            peer2.next().await,
-            id,
-            Cid::try_from("bafyreiho2e2clchrto55m3va2ygfnbc6d4bl73xldmsqvy2hjino3gxmvy").unwrap(),
-            18,
-        );
-        assert_progress_ok(
-            peer2.next().await,
-            id,
-            Cid::try_from("bafyreibwnmylvsglbfzglba6jvdz7b5w34p4ypecrbjrincneuskezhcq4").unwrap(),
-            18,
-        );
+        assert_progress_ok(peer2.next().await, id, *parent_block.cid(), 161);
+        assert_progress_ok(peer2.next().await, id, *leaf1_block.cid(), 18);
+        assert_progress_ok(peer2.next().await, id, *leaf2_block.cid(), 18);
         assert_complete_ok(peer2.next().await, id);
     }
 
@@ -1051,12 +1036,7 @@ mod tests {
 
         assert_response_ok(peer2.next().await, id);
 
-        assert_progress_ok(
-            peer2.next().await,
-            id,
-            Cid::try_from("bafyreib6ba6oakwqzsg4vv6sogb7yysu5yqqe7dqth6z3nulqkyj7lom4a").unwrap(),
-            161,
-        );
+        assert_progress_ok(peer2.next().await, id, *parent_block.cid(), 161);
         assert_complete_ok(peer2.next().await, id);
     }
 

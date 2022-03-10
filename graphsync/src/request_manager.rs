@@ -179,10 +179,12 @@ mod tests {
         let leaf1 = ipld!({ "name": "leaf1", "size": 12 });
         let leaf1_block =
             Block::<DefaultParams>::encode(DagCborCodec, Code::Sha2_256, &leaf1).unwrap();
+        let cid1 = *leaf1_block.cid();
 
         let leaf2 = ipld!({ "name": "leaf2", "size": 6 });
         let leaf2_block =
             Block::<DefaultParams>::encode(DagCborCodec, Code::Sha2_256, &leaf2).unwrap();
+        let cid2 = *leaf2_block.cid();
 
         let parent = ipld!({
             "children": [leaf1_block.cid(), leaf2_block.cid()],
@@ -239,26 +241,11 @@ mod tests {
         }
         manager.inject_response(response);
         // We receive the first block
-        assert_progress_ok(
-            manager.receiver.lock().unwrap().recv().await,
-            1,
-            161,
-            Cid::try_from("bafyreib6ba6oakwqzsg4vv6sogb7yysu5yqqe7dqth6z3nulqkyj7lom4a").unwrap(),
-        );
+        assert_progress_ok(manager.receiver.lock().unwrap().recv().await, 1, 161, root);
         // We receive the second block
-        assert_progress_ok(
-            manager.receiver.lock().unwrap().recv().await,
-            1,
-            18,
-            Cid::try_from("bafyreiho2e2clchrto55m3va2ygfnbc6d4bl73xldmsqvy2hjino3gxmvy").unwrap(),
-        );
+        assert_progress_ok(manager.receiver.lock().unwrap().recv().await, 1, 18, cid1);
         // We receive the last block
-        assert_progress_ok(
-            manager.receiver.lock().unwrap().recv().await,
-            1,
-            18,
-            Cid::try_from("bafyreibwnmylvsglbfzglba6jvdz7b5w34p4ypecrbjrincneuskezhcq4").unwrap(),
-        );
+        assert_progress_ok(manager.receiver.lock().unwrap().recv().await, 1, 18, cid2);
         // the traversal should complete and we should receive the result
         if let Ok(evt) = manager.receiver.lock().unwrap().recv().await {
             match evt {

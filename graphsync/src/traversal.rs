@@ -369,7 +369,7 @@ where
     ) -> Option<Result<Block<S::Params>, Error>> {
         let maybe_block = self.maybe_resolve_link(&mut ipld);
         match ipld {
-            Ipld::StringMap(_) | Ipld::List(_) => self.push(ipld, selector.clone()),
+            Ipld::Map(_) | Ipld::List(_) => self.push(ipld, selector.clone()),
             _ => {}
         }
         match maybe_block {
@@ -429,7 +429,7 @@ fn select_next_entries(ipld: Ipld, selector: Selector) -> Vec<(Ipld, Selector)> 
             })
             .collect(),
         None => match &ipld {
-            Ipld::StringMap(m) => m
+            Ipld::Map(m) => m
                 .keys()
                 .filter_map(|k| {
                     let ps = PathSegment::from(k.as_ref());
@@ -527,7 +527,7 @@ where
         callback(self, node).map_err(Error::Custom)?;
 
         match node {
-            Ipld::StringMap(_) | Ipld::List(_) => (),
+            Ipld::Map(_) | Ipld::List(_) => (),
             _ => return Ok(()),
         }
 
@@ -544,7 +544,7 @@ where
             }
             None => {
                 match node {
-                    Ipld::StringMap(m) => {
+                    Ipld::Map(m) => {
                         for (k, v) in m.iter() {
                             let ps = PathSegment::from(k.as_ref());
                             self.visit(node, selector.clone(), callback, ps, v).await?;
@@ -593,7 +593,7 @@ where
                 for link in pb_node.links {
                     map.insert(link.name.clone(), link.into());
                 }
-                Some(Ipld::StringMap(map))
+                Some(Ipld::Map(map))
             }
             _ => None,
         }

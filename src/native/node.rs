@@ -1,5 +1,5 @@
 use crate::native::server::{
-    build_transport, export_file, handle_rejection, read_file, retrieve_file,
+    build_transport, export_file, handle_rejection, import_car, read_file, retrieve_file,
 };
 use blockstore::types::BlockStore;
 use dag_service;
@@ -105,7 +105,18 @@ where
             })
             .and(store_filter.clone())
             .and_then(|path: String, store: Arc<B>| {
-                return read_file(path.clone(), store.clone());
+                return read_file(path, store);
+            });
+
+        let import_car = warp::post()
+            .and(warp::path("import"))
+            .and(warp::body::bytes())
+            .map(|bytes: warp::hyper::body::Bytes| {
+                return std::str::from_utf8(&bytes).unwrap().to_string();
+            })
+            .and(store_filter.clone())
+            .and_then(|path: String, store: Arc<B>| {
+                return import_car(path, store);
             });
 
         let export_file = warp::post()
@@ -141,6 +152,7 @@ where
             );
 
         let routes = add_file
+            .or(import_car)
             .or(export_file)
             .or(retrieve_file)
             .recover(handle_rejection);

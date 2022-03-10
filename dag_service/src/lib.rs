@@ -1,4 +1,4 @@
-mod car;
+pub mod car;
 mod error;
 
 use blockstore::types::BlockStore;

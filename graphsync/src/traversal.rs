@@ -16,6 +16,7 @@ use protobuf::ProtobufError;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_cbor::{error::Error as CborError, from_slice, to_vec};
 use smallvec::SmallVec;
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 use std::io::Error as StdError;
@@ -584,19 +585,35 @@ where
 
     /// turns a unixfs directory into a map indexed by link name
     pub fn unixfs_reifier(&self, node: &Ipld) -> Option<Ipld> {
-        let pb_node = PbNode::try_from(node).ok()?;
-        let unixfs = UnixFs::try_from(Some(&pb_node.data[..])).ok()?;
-        match unixfs.Type {
-            // we only care about directories for now
-            UnixFsType::Directory => {
-                let mut map = BTreeMap::new();
-                for link in pb_node.links {
-                    map.insert(link.name.clone(), link.into());
-                }
-                Some(Ipld::Map(map))
+        resolve_unixfs(node)
+    }
+}
+
+pub fn resolve_unixfs(node: &Ipld) -> Option<Ipld> {
+    let pb_node = PbNode::try_from(node).ok()?;
+    let unixfs = UnixFs::try_from(Some(&pb_node.data[..])).ok()?;
+    match unixfs.Type {
+        // we only care about directories for now
+        UnixFsType::Directory => {
+            let mut map = BTreeMap::new();
+            for link in pb_node.links {
+                map.insert(link.name.clone(), link.into());
             }
-            _ => None,
+            Some(Ipld::Map(map))
         }
+        UnixFsType::File => {
+            if pb_node.links.is_empty() {
+                let data = match unixfs.Data {
+                    Some(Cow::Borrowed(x)) => x,
+                    None => &[][..],
+                    _ => panic!("should not be Cow::Owned"),
+                };
+                // need to copy the bytes here unfortunately
+                return Some(Ipld::Bytes(data.to_vec()));
+            }
+            None
+        }
+        _ => None,
     }
 }
 

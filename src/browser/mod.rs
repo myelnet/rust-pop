@@ -9,10 +9,10 @@ use data_transfer::{
 };
 use futures::channel::{mpsc, oneshot};
 use futures::StreamExt;
-use graphsync::traversal::unixfs_path_selector;
+use graphsync::traversal::{resolve_unixfs, unixfs_path_selector};
 use graphsync::{Config as GraphsyncConfig, Graphsync};
 use js_sys::{Promise, Uint8Array};
-use libipld::{cbor::DagCborCodec, multihash::Code, Block, Cid, Ipld};
+use libipld::{cbor::DagCborCodec, multihash::Code, pb::PbNode, Block, Cid, Ipld};
 use libp2p::{
     core,
     core::muxing::StreamMuxerBox,
@@ -121,6 +121,8 @@ impl Node {
                 .pull(peer_id, cid, selector, params)
                 .unwrap();
 
+            log::info!("initiated pull");
+
             // future is executed locally inside the thread
             wasm_bindgen_futures::spawn_local(async move {
                 let mut osender = Some(os);
@@ -130,21 +132,26 @@ impl Node {
                 while let Some(evt) = swarm.next().await {
                     if let SwarmEvent::Behaviour(event) = evt {
                         match event {
-                            DataTransferEvent::Block {
-                                data: Ipld::Bytes(bytes),
-                                ..
-                            } => {
-                                if let Some(os) = osender.take() {
-                                    let ct = detect_content_type(&bytes);
-                                    drop(os.send(ct));
+                            DataTransferEvent::Block { data, .. } => {
+                                if let Some(Ipld::Bytes(bytes)) =
+                                    resolve_unixfs(&data).or(Some(data))
+                                {
+                                    if let Some(os) = osender.take() {
+                                        let ct = detect_content_type(&bytes);
+                                        drop(os.send(ct));
+                                    }
+                                    sender.start_send(bytes).unwrap();
                                 }
-                                sender.start_send(bytes).unwrap();
                             }
                             DataTransferEvent::Completed(_, Ok(())) => {
                                 break;
                             }
-                            _ => {}
+                            e => {
+                                log::info!("dt => {:?}", e);
+                            }
                         }
+                    } else {
+                        log::info!("event => {:?}", evt);
                     }
                 }
             });
@@ -175,7 +182,7 @@ impl Node {
                     )?;
                     Ok(res.into())
                 }
-                Err(_) => Err(JsValue::undefined()),
+                Err(e) => Err(js_err(e)),
             }
         };
         Ok(wasm_bindgen_futures::future_to_promise(done))

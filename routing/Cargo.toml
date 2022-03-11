@@ -26,12 +26,12 @@ instant = "0.1.12"
 rand = { version = "0.7", features = ["wasm-bindgen"] }
 serde_tuple = "0.5"
 libipld = "0.13.1"
-filecoin = { path = "../filecoin", default_features = false }
+serde_repr = "0.1"
 lazy_static = "1.4.0"
 bimap = "0.6.2"
-dag_service = { path = "../dag_service" }
-blockstore = { path = "../blockstore" }
-serde_repr = "0.1"
+dag_service = { path = "../dag_service", default_features = false }
+blockstore = { path = "../blockstore", default_features = false }
+filecoin = { path = "../filecoin", default_features = false }
 
 
 [build-dependencies]
@@ -44,5 +44,5 @@ criterion = { version = "0.3", features = ["async_futures", "async_std"] }
 
 [features]
 default = ["native"]
-native = [ "filecoin/native"]
-browser = ["instant/wasm-bindgen", "filecoin/browser"]
+native = [ "filecoin/native", "dag_service/native", "blockstore/native"]
+browser = ["instant/wasm-bindgen", "filecoin/browser", "dag_service/browser", "blockstore/browser"]

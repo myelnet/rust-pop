@@ -2053,6 +2053,7 @@ dependencies = [
  "libipld 0.13.1",
  "libp2p",
  "log",
+ "multistream-select",
  "pprof",
  "protobuf",
  "protoc-rust",

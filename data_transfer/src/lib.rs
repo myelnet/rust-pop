@@ -11,7 +11,9 @@ use blockstore::types::BlockStore;
 use filecoin::{cid_helpers::CidCbor, types::Cbor};
 use fsm::{Channel, ChannelEvent};
 use graphsync::traversal::Selector;
-use graphsync::{Extensions, Graphsync, GraphsyncEvent, IncomingRequestHook, RequestId};
+use graphsync::{
+    client::Client, Extensions, Graphsync, GraphsyncEvent, IncomingRequestHook, RequestId,
+};
 use libipld::codec::Decode;
 use libipld::store::StoreParams;
 use libipld::{Cid, Ipld};
@@ -29,6 +31,24 @@ use std::{
     sync::Arc,
     task::{Context, Poll},
 };
+
+pub struct DtClient<S: BlockStore> {
+    gs_client: Client<S>,
+    next_request_id: u64,
+}
+
+impl<S: 'static + BlockStore> DtClient<S>
+where
+    Ipld: Decode<<S::Params as StoreParams>::Codecs>,
+{
+    pub fn new(gs_client: Client<S>) -> Self {
+        let next_request_id = instant::now() as u64;
+        Self {
+            next_request_id,
+            gs_client,
+        }
+    }
+}
 
 pub struct DataTransfer {
     peer_id: PeerId,

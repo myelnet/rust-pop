@@ -4838,7 +4838,9 @@ dependencies = [
  "async-trait",
  "bimap",
  "blockstore",
+ "byteorder",
  "criterion",
+ "cs_serde_bytes",
  "cs_serde_cbor",
  "dag_service",
  "filecoin",
@@ -4850,14 +4852,17 @@ dependencies = [
  "lazy_static",
  "libipld 0.13.1",
  "libp2p",
+ "once_cell",
  "protoc-rust",
  "rand 0.7.3",
  "serde",
  "serde_json",
  "serde_repr",
  "serde_tuple",
+ "sha2 0.10.2",
  "smallvec",
  "thiserror",
+ "unsigned-varint 0.7.1",
 ]
 
 [[package]]

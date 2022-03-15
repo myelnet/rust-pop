@@ -1,4 +1,5 @@
 mod discovery;
+mod index;
 mod routing;
 mod utils;
 pub use crate::discovery::Config as DiscoveryConfig;

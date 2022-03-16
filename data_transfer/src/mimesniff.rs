@@ -1,27 +1,48 @@
 use byteorder::{BigEndian, ReadBytesExt};
 use utf16_lit::utf16;
 
-pub fn detect_content_type(content: &[u8]) -> String {
+#[derive(Debug, PartialEq, Copy, Clone)]
+pub enum ContentType {
+    Jpeg,
+    Png,
+    Gif,
+    Mp4,
+    Unknown,
+}
+
+impl Into<String> for ContentType {
+    fn into(self) -> String {
+        match self {
+            Self::Jpeg => "image/jpeg".to_string(),
+            Self::Png => "image/png".to_string(),
+            Self::Gif => "image/gif".to_string(),
+            Self::Mp4 => "video/mp4".to_string(),
+            Self::Unknown => "".to_string(),
+        }
+    }
+}
+
+pub fn detect_content_type(content: &[u8]) -> ContentType {
     let mut first_non_ws = 0;
     while first_non_ws < 512 && is_ws(content[first_non_ws] as u16) {
         first_non_ws += 1;
     }
     if content[0..JPEG.len()] == JPEG {
-        return "image/jpeg".to_string();
+        return ContentType::Jpeg;
     }
     if content[0..PNG.len()] == PNG {
-        return "image/png".to_string();
+        return ContentType::Png;
     }
     if &content[0..GIF1.len()] == GIF1 {
-        return "image/gif".to_string();
+        return ContentType::Gif;
     }
     if &content[0..GIF2.len()] == GIF2 {
-        return "image/gif".to_string();
+        return ContentType::Gif;
     }
     if match_mp4(content) {
-        return "video/mp4".to_string();
+        return ContentType::Mp4;
     }
-    String::from("")
+    ContentType::Unknown
 }
 
 fn match_mp4(buf: &[u8]) -> bool {
@@ -112,21 +133,21 @@ mod tests {
 
     #[test]
     fn sniff_jpg() {
-        assert_eq!(detect_content_type(JPEG_FILE), "image/jpeg".to_string());
+        assert_eq!(detect_content_type(JPEG_FILE), ContentType::Jpeg);
     }
 
     #[test]
     fn sniff_png() {
-        assert_eq!(detect_content_type(PNG_FILE), "image/png".to_string());
+        assert_eq!(detect_content_type(PNG_FILE), ContentType::Png);
     }
 
     #[test]
     fn sniff_gif() {
-        assert_eq!(detect_content_type(GIF_FILE), "image/gif".to_string());
+        assert_eq!(detect_content_type(GIF_FILE), ContentType::Gif);
     }
 
     #[test]
     fn sniff_mp4() {
-        assert_eq!(detect_content_type(MP4_FILE), "video/mp4".to_string());
+        assert_eq!(detect_content_type(MP4_FILE), ContentType::Mp4);
     }
 }

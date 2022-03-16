@@ -7,7 +7,6 @@ use criterion::{criterion_group, criterion_main, BatchSize, Throughput};
 use dag_service::{add, cat};
 use futures::prelude::*;
 use graphsync::{
-    client::{Client, RequestEvent},
     traversal::{BlockIterator, Progress, RecursionLimit, Selector, StoreLoader},
     Graphsync, GraphsyncEvent,
 };
@@ -154,47 +153,6 @@ fn bench_transfer(c: &mut Criterion) {
                                 }
                                 _ => {}
                             }
-                        }
-                    }
-                },
-                BatchSize::SmallInput,
-            );
-        });
-        group.bench_with_input(BenchmarkId::new("client", size), size, move |b, &size| {
-            b.iter_batched(
-                || prepare_blocks(size),
-                |dag| async move {
-                    let peer1 = Peer::new(dag.store);
-                    let maddr1 = peer1.addr.clone();
-                    let peer1 = peer1.spawn("peer1");
-
-                    let (peer2, trans) = mk_transport();
-                    let store = Arc::new(MemoryDB::default());
-
-                    let client = Client::new(store, trans);
-                    let maddr1 = maddr1.with(multiaddr::Protocol::P2p(peer1.into()));
-
-                    let mux = client.dial(maddr1).await.unwrap();
-
-                    let selector = Selector::ExploreRecursive {
-                        limit: RecursionLimit::None,
-                        sequence: Box::new(Selector::ExploreAll {
-                            next: Box::new(Selector::ExploreRecursiveEdge),
-                        }),
-                        current: None,
-                    };
-
-                    let mut stream = client
-                        .request(mux, dag.root, selector, Default::default())
-                        .await
-                        .unwrap();
-
-                    while let Some(evt) = stream.next().await {
-                        match evt {
-                            RequestEvent::Completed(_, res) => {
-                                assert_eq!(res, Ok(()));
-                            }
-                            RequestEvent::Progress { .. } => {}
                         }
                     }
                 },

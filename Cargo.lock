@@ -1337,6 +1337,7 @@ dependencies = [
  "libipld 0.13.1",
  "libp2p",
  "log",
+ "multistream-select",
  "rand 0.7.3",
  "serde",
  "serde_repr",

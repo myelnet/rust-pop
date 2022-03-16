@@ -1,3 +1,4 @@
+pub mod client;
 mod fsm;
 pub mod mimesniff;
 mod network;
@@ -10,10 +11,8 @@ pub use network::{
 use blockstore::types::BlockStore;
 use filecoin::{cid_helpers::CidCbor, types::Cbor};
 use fsm::{Channel, ChannelEvent};
-use graphsync::traversal::Selector;
-use graphsync::{
-    client::Client, Extensions, Graphsync, GraphsyncEvent, IncomingRequestHook, RequestId,
-};
+use graphsync::traversal::{resolve_unixfs, Selector};
+use graphsync::{Extensions, Graphsync, GraphsyncEvent, IncomingRequestHook, RequestId};
 use libipld::codec::Decode;
 use libipld::store::StoreParams;
 use libipld::{Cid, Ipld};
@@ -21,6 +20,7 @@ use libp2p::swarm::{
     NetworkBehaviour, NetworkBehaviourAction, NetworkBehaviourEventProcess, PollParameters,
 };
 use libp2p::{Multiaddr, NetworkBehaviour, PeerId};
+use mimesniff::{detect_content_type, ContentType};
 use network::{
     DealProposal, DealResponse, DealStatus, MessageType, TransferRequest, TransferResponse,
     EMPTY_QUEUE_SHRINK_THRESHOLD,
@@ -31,24 +31,6 @@ use std::{
     sync::Arc,
     task::{Context, Poll},
 };
-
-pub struct DtClient<S: BlockStore> {
-    gs_client: Client<S>,
-    next_request_id: u64,
-}
-
-impl<S: 'static + BlockStore> DtClient<S>
-where
-    Ipld: Decode<<S::Params as StoreParams>::Codecs>,
-{
-    pub fn new(gs_client: Client<S>) -> Self {
-        let next_request_id = instant::now() as u64;
-        Self {
-            next_request_id,
-            gs_client,
-        }
-    }
-}
 
 pub struct DataTransfer {
     peer_id: PeerId,
@@ -642,8 +624,7 @@ mod tests {
     use libp2p::noise::{Keypair, NoiseConfig, X25519Spec};
     use libp2p::swarm::SwarmEvent;
     use libp2p::tcp::TcpConfig;
-    use libp2p::yamux::YamuxConfig;
-    use libp2p::{PeerId, Swarm, Transport};
+    use libp2p::{mplex, multiaddr, PeerId, Swarm, Transport};
     use rand::prelude::*;
     use std::time::Duration;
 
@@ -659,7 +640,7 @@ mod tests {
             .nodelay(true)
             .upgrade(libp2p::core::upgrade::Version::V1)
             .authenticate(noise)
-            .multiplex(YamuxConfig::default())
+            .multiplex(mplex::MplexConfig::new())
             .timeout(Duration::from_secs(20))
             .boxed();
         (peer_id, transport)

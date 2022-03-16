@@ -52,6 +52,9 @@ impl Channel {
             (Channel::New { id, deal_id }, ChannelEvent::Accepted) => {
                 Channel::Accepted { id, deal_id }
             }
+            (Channel::New { id, .. }, ChannelEvent::Completed) => {
+                Channel::PendingLastBlocks { id, received: 0 }
+            }
             (Channel::Accepted { id, .. }, ChannelEvent::BlockReceived { size }) => {
                 Channel::Ongoing {
                     id,

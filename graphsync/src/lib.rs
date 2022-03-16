@@ -1,7 +1,6 @@
-pub mod client;
 mod empty_map;
 mod graphsync_pb;
-mod network;
+pub mod network;
 mod request_manager;
 mod response_manager;
 

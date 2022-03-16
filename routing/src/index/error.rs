@@ -1,7 +1,3 @@
-// Copyright 2019-2022 ChainSafe Systems
-// SPDX-License-Identifier: Apache-2.0, MIT
-
-// use filecoin::Error as EncodingError;
 use std::error::Error as StdError;
 use thiserror::Error;
 
@@ -30,12 +26,6 @@ pub enum Error {
     #[error("{0}")]
     Other(String),
 }
-//
-// impl From<EncodingError> for Error {
-//     fn from(e: EncodingError) -> Self {
-//         Self::Dynamic(Box::new(e))
-//     }
-// }
 
 impl From<Box<dyn StdError>> for Error {
     fn from(e: Box<dyn StdError>) -> Self {

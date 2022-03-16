@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0, MIT
 
 use super::node::Node;
-use super::{hash::Hash, Error, HashAlgorithm, KeyValuePair, MAX_ARRAY_WIDTH};
+use super::{hash::Hash, Error, KeyValuePair, MAX_ARRAY_WIDTH};
 use filecoin::cid_helpers::CidCbor;
 use libipld::Cid;
 use once_cell::unsync::OnceCell;
@@ -14,16 +14,16 @@ use std::convert::TryFrom;
 
 /// Pointer to index values or a link to another child node.
 #[derive(Debug)]
-pub(crate) enum Pointer<K, V, H> {
+pub(crate) enum Pointer<K, V> {
     Values(Vec<KeyValuePair<K, V>>),
     Link {
         cid: Cid,
-        cache: OnceCell<Box<Node<K, V, H>>>,
+        cache: OnceCell<Box<Node<K, V>>>,
     },
-    Dirty(Box<Node<K, V, H>>),
+    Dirty(Box<Node<K, V>>),
 }
 
-impl<K: PartialEq, V: PartialEq, H> PartialEq for Pointer<K, V, H> {
+impl<K: PartialEq, V: PartialEq> PartialEq for Pointer<K, V> {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (&Pointer::Values(ref a), &Pointer::Values(ref b)) => a == b,
@@ -41,10 +41,10 @@ enum PointerSer<'a, K, V> {
     Link(CidCbor),
 }
 
-impl<'a, K, V, H> TryFrom<&'a Pointer<K, V, H>> for PointerSer<'a, K, V> {
+impl<'a, K, V> TryFrom<&'a Pointer<K, V>> for PointerSer<'a, K, V> {
     type Error = &'static str;
 
-    fn try_from(pointer: &'a Pointer<K, V, H>) -> Result<Self, Self::Error> {
+    fn try_from(pointer: &'a Pointer<K, V>) -> Result<Self, Self::Error> {
         match pointer {
             Pointer::Values(vals) => Ok(PointerSer::Vals(vals.as_ref())),
             Pointer::Link { cid, .. } => {
@@ -56,7 +56,7 @@ impl<'a, K, V, H> TryFrom<&'a Pointer<K, V, H>> for PointerSer<'a, K, V> {
     }
 }
 
-impl<K, V, H> Serialize for Pointer<K, V, H>
+impl<K, V> Serialize for Pointer<K, V>
 where
     K: Serialize,
     V: Serialize,
@@ -78,7 +78,7 @@ enum PointerDe<K, V> {
     Link(CidCbor),
 }
 
-impl<K, V, H> From<PointerDe<K, V>> for Pointer<K, V, H> {
+impl<K, V> From<PointerDe<K, V>> for Pointer<K, V> {
     fn from(pointer: PointerDe<K, V>) -> Self {
         match pointer {
             PointerDe::Link(cid) => Pointer::Link {
@@ -91,7 +91,7 @@ impl<K, V, H> From<PointerDe<K, V>> for Pointer<K, V, H> {
     }
 }
 
-impl<'de, K, V, H> Deserialize<'de> for Pointer<K, V, H>
+impl<'de, K, V> Deserialize<'de> for Pointer<K, V>
 where
     K: DeserializeOwned,
     V: DeserializeOwned,
@@ -105,17 +105,16 @@ where
     }
 }
 
-impl<K, V, H> Default for Pointer<K, V, H> {
+impl<K, V> Default for Pointer<K, V> {
     fn default() -> Self {
         Pointer::Values(Vec::new())
     }
 }
 
-impl<K, V, H> Pointer<K, V, H>
+impl<K, V> Pointer<K, V>
 where
     K: Serialize + DeserializeOwned + Hash + PartialOrd,
     V: Serialize + DeserializeOwned,
-    H: HashAlgorithm,
 {
     pub(crate) fn from_key_value(key: K, value: V) -> Self {
         Pointer::Values(vec![KeyValuePair::new(key, value)])

@@ -2,9 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0, MIT
 
 use super::bitfield::Bitfield;
-use super::hash_bits::HashBits;
+use super::hash::HashBits;
 use super::pointer::Pointer;
-use super::{hash::Hash, Error, HashAlgorithm, KeyValuePair, MAX_ARRAY_WIDTH};
+use super::{
+    hash::{Hash, HashAlgorithm, Sha256},
+    Error, KeyValuePair, MAX_ARRAY_WIDTH,
+};
 use blockstore::types::BlockStore;
 
 use once_cell::unsync::OnceCell;
@@ -12,18 +15,17 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_cbor::{from_slice, to_vec};
 use std::borrow::Borrow;
-use std::error::Error as StdError;
 use std::fmt::Debug;
 use std::sync::Arc;
 
 /// Node in Hamt tree which contains bitfield of set indexes and pointers to nodes
 #[derive(Debug)]
-pub(crate) struct Node<K, V, H> {
+pub(crate) struct Node<K, V> {
     pub(crate) bitfield: Bitfield,
-    pub(crate) pointers: Vec<Pointer<K, V, H>>,
+    pub(crate) pointers: Vec<Pointer<K, V>>,
 }
 
-impl<K, V, H> TryFrom<&Vec<u8>> for Node<K, V, H>
+impl<K, V> TryFrom<&Vec<u8>> for Node<K, V>
 where
     K: DeserializeOwned,
     V: DeserializeOwned,
@@ -38,13 +40,13 @@ where
     }
 }
 
-impl<K: PartialEq, V: PartialEq, H> PartialEq for Node<K, V, H> {
+impl<K: PartialEq, V: PartialEq> PartialEq for Node<K, V> {
     fn eq(&self, other: &Self) -> bool {
         (self.bitfield == other.bitfield) && (self.pointers == other.pointers)
     }
 }
 
-impl<K, V, H> Serialize for Node<K, V, H>
+impl<K, V> Serialize for Node<K, V>
 where
     K: Serialize,
     V: Serialize,
@@ -57,7 +59,7 @@ where
     }
 }
 
-impl<'de, K, V, H> Deserialize<'de> for Node<K, V, H>
+impl<'de, K, V> Deserialize<'de> for Node<K, V>
 where
     K: DeserializeOwned,
     V: DeserializeOwned,
@@ -71,7 +73,7 @@ where
     }
 }
 
-impl<K, V, H> Default for Node<K, V, H> {
+impl<K, V> Default for Node<K, V> {
     fn default() -> Self {
         Node {
             bitfield: Bitfield::zero(),
@@ -80,10 +82,9 @@ impl<K, V, H> Default for Node<K, V, H> {
     }
 }
 
-impl<K, V, H> Node<K, V, H>
+impl<K, V> Node<K, V>
 where
     K: Hash + Eq + PartialOrd + Serialize + DeserializeOwned,
-    H: HashAlgorithm,
     V: Serialize + DeserializeOwned,
 {
     pub fn set<S: BlockStore>(
@@ -97,7 +98,7 @@ where
     where
         V: PartialEq,
     {
-        let hash = H::hash(&key);
+        let hash = Sha256::hash(&key);
         self.modify_value(
             &mut HashBits::new(&hash),
             bit_width,
@@ -133,43 +134,12 @@ where
         Q: Eq + Hash,
         S: BlockStore,
     {
-        let hash = H::hash(k);
+        let hash = Sha256::hash(k);
         self.rm_value(&mut HashBits::new(&hash), bit_width, 0, k, store)
     }
 
     pub fn is_empty(&self) -> bool {
         self.pointers.is_empty()
-    }
-
-    pub(crate) fn for_each<S, F>(&self, store: Arc<S>, f: &mut F) -> Result<(), Box<dyn StdError>>
-    where
-        F: FnMut(&K, &V) -> Result<(), Box<dyn StdError>>,
-        S: BlockStore,
-    {
-        for p in &self.pointers {
-            match p {
-                Pointer::Link { cid, cache } => {
-                    if let Some(cached_node) = cache.get() {
-                        cached_node.for_each(store.clone(), f)?
-                    } else {
-                        let node = Box::new(Node::try_from(
-                            &dag_service::cat(store.clone(), *cid)
-                                .map_err(|_| Error::CidNotFound(cid.to_string()))?,
-                        )?);
-                        // Ignore error intentionally, the cache value will always be the same
-                        let cache_node = cache.get_or_init(|| node);
-                        cache_node.for_each(store.clone(), f)?
-                    }
-                }
-                Pointer::Dirty(n) => n.for_each(store.clone(), f)?,
-                Pointer::Values(kvs) => {
-                    for kv in kvs {
-                        f(kv.0.borrow(), kv.1.borrow())?;
-                    }
-                }
-            }
-        }
-        Ok(())
     }
 
     /// Search for a key.
@@ -183,7 +153,7 @@ where
         K: Borrow<Q>,
         Q: Eq + Hash,
     {
-        let hash = H::hash(q);
+        let hash = Sha256::hash(q);
         self.get_value(&mut HashBits::new(&hash), bit_width, 0, q, store)
     }
 
@@ -255,7 +225,7 @@ where
 
         match child {
             Pointer::Link { cid, cache } => {
-                let res = || -> Result<Box<Node<K, V, H>>, Error> {
+                let res = || -> Result<Box<Node<K, V>>, Error> {
                     let node = Box::new(Node::try_from(
                         &dag_service::cat(store.clone(), *cid)
                             .map_err(|_| Error::CidNotFound(cid.to_string()))?,
@@ -305,7 +275,7 @@ where
 
                 // If the array is full, create a subshard and insert everything
                 if vals.len() >= MAX_ARRAY_WIDTH {
-                    let mut sub = Node::<K, V, H>::default();
+                    let mut sub = Node::<K, V>::default();
                     let consumed = hashed_key.consumed;
                     let modified = sub.modify_value(
                         hashed_key,
@@ -318,7 +288,7 @@ where
                     )?;
                     let kvs = std::mem::take(vals);
                     for p in kvs.into_iter() {
-                        let hash = H::hash(p.key());
+                        let hash = Sha256::hash(p.key());
                         sub.modify_value(
                             &mut HashBits::new_at_index(&hash, consumed),
                             bit_width,
@@ -372,7 +342,7 @@ where
 
         match child {
             Pointer::Link { cid, cache } => {
-                let res = || -> Result<Box<Node<K, V, H>>, Error> {
+                let res = || -> Result<Box<Node<K, V>>, Error> {
                     let node = Box::new(Node::try_from(
                         &dag_service::cat(store.clone(), *cid)
                             .map_err(|_| Error::CidNotFound(cid.to_string()))?,
@@ -444,7 +414,7 @@ where
         Ok(())
     }
 
-    fn rm_child(&mut self, i: usize, idx: u32) -> Pointer<K, V, H> {
+    fn rm_child(&mut self, i: usize, idx: u32) -> Pointer<K, V> {
         self.bitfield.clear_bit(idx);
         self.pointers.remove(i)
     }
@@ -462,11 +432,11 @@ where
         mask.and(&self.bitfield).count_ones()
     }
 
-    fn get_child_mut(&mut self, i: usize) -> &mut Pointer<K, V, H> {
+    fn get_child_mut(&mut self, i: usize) -> &mut Pointer<K, V> {
         &mut self.pointers[i]
     }
 
-    fn get_child(&self, i: usize) -> &Pointer<K, V, H> {
+    fn get_child(&self, i: usize) -> &Pointer<K, V> {
         &self.pointers[i]
     }
 }

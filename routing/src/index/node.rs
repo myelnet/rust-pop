@@ -6,17 +6,14 @@ use super::hash_bits::HashBits;
 use super::pointer::Pointer;
 use super::{hash::Hash, Error, HashAlgorithm, KeyValuePair, MAX_ARRAY_WIDTH};
 use blockstore::types::BlockStore;
-use libipld::store::StoreParams;
-use libipld::Block;
+
 use once_cell::unsync::OnceCell;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_cbor::{from_slice, to_vec};
-use serde_tuple::{Deserialize_tuple, Serialize_tuple};
 use std::borrow::Borrow;
 use std::error::Error as StdError;
 use std::fmt::Debug;
-use std::marker::PhantomData;
 use std::sync::Arc;
 
 /// Node in Hamt tree which contains bitfield of set indexes and pointers to nodes
@@ -112,7 +109,6 @@ where
         )
     }
 
-    #[inline]
     pub fn get<Q: ?Sized, S: BlockStore>(
         &self,
         k: &Q,
@@ -126,7 +122,6 @@ where
         Ok(self.search(k, store, bit_width)?.map(|kv| kv.value()))
     }
 
-    #[inline]
     pub fn remove_entry<Q: ?Sized, S>(
         &mut self,
         k: &Q,
@@ -234,7 +229,6 @@ where
     }
 
     /// Internal method to modify values.
-    #[allow(clippy::too_many_arguments)]
     fn modify_value<S: BlockStore>(
         &mut self,
         hashed_key: &mut HashBits,
@@ -298,12 +292,6 @@ where
                 // Update, if the key already exists.
                 if let Some(i) = vals.iter().position(|p| p.key() == &key) {
                     if overwrite {
-                        // If value changed, the parent nodes need to be marked as dirty.
-                        // ! The assumption here is that `PartialEq` is implemented correctly,
-                        // ! and that if that is true, the serialized bytes are equal.
-                        // ! To be absolutely sure, can serialize each value and compare or
-                        // ! refactor the Hamt to not be type safe and serialize on entry and
-                        // ! exit. These both come at costs, and this isn't a concern.
                         let value_changed = vals[i].value() != &value;
                         return Ok((
                             Some(std::mem::replace(&mut vals[i].1, value)),

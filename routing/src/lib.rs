@@ -19,12 +19,12 @@ use libp2p::swarm::{
 use libp2p::{Multiaddr, NetworkBehaviour, PeerId};
 use serde::{Deserialize, Serialize};
 use serde_tuple::{Deserialize_tuple, Serialize_tuple};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 pub use utils::gossip_init;
 
-pub type LocalIndex = HashSet<CidCbor>;
+pub type LocalIndex<B> = index::Hamt<B, ()>;
 pub type Index<B> = Arc<Mutex<index::Hamt<B, PeerTable>>>;
 
 pub const ROUTING_TOPIC: &str = "myel/content-routing";

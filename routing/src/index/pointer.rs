@@ -48,7 +48,7 @@ impl<'a, K, V> TryFrom<&'a Pointer<K, V>> for PointerSer<'a, K, V> {
         match pointer {
             Pointer::Values(vals) => Ok(PointerSer::Vals(vals.as_ref())),
             Pointer::Link { cid, .. } => {
-                let ser_cid = CidCbor::from(cid.clone());
+                let ser_cid = CidCbor::from(*cid);
                 Ok(PointerSer::Link(ser_cid))
             }
             Pointer::Dirty(_) => Err("Cannot serialize cached values"),

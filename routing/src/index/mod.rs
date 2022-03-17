@@ -33,13 +33,6 @@ impl<K, V> KeyValuePair<K, V> {
     pub fn value(&self) -> &V {
         &self.1
     }
-
-    pub fn key_mut(&mut self) -> &mut K {
-        &mut self.0
-    }
-    pub fn value_mut(&mut self) -> &mut V {
-        &mut self.1
-    }
 }
 
 impl<K, V> KeyValuePair<K, V> {
@@ -135,7 +128,8 @@ where
             .extend(key, value, self.store.clone(), self.bit_width)
     }
 
-    pub fn shrink<Q, A>(&mut self, key: &K, value: Q) -> Result<bool, Error>
+    // if the values are themselves a map that can be reduced in size then delete a sub-value
+    pub fn delete_subvalue<Q, A>(&mut self, key: &K, value: Q) -> Result<bool, Error>
     where
         V: PartialEq + ShrinkableMap<Q, A>,
     {
@@ -150,18 +144,6 @@ where
         V: DeserializeOwned,
     {
         match self.root.get(k, self.store.clone(), self.bit_width)? {
-            Some(v) => Ok(Some(v)),
-            None => Ok(None),
-        }
-    }
-
-    pub fn get_mut<Q: ?Sized>(&mut self, k: &Q) -> Result<Option<&mut V>, Error>
-    where
-        K: Borrow<Q>,
-        Q: Hash + Eq,
-        V: DeserializeOwned + PartialEq + core::fmt::Debug,
-    {
-        match self.root.get_mut(k, self.store.clone(), self.bit_width)? {
             Some(v) => Ok(Some(v)),
             None => Ok(None),
         }
@@ -196,7 +178,7 @@ where
     pub fn flush(&mut self) -> Result<Cid, Error> {
         self.root.flush(self.store.clone())?;
         let data = to_vec(&self.root).map_err(|_| Error::InvalidNode)?;
-        let cid = (dag_service::add(self.store.clone(), &data).map_err(|e| Error::Other(e))?)
+        let cid = (dag_service::add(self.store.clone(), &data).map_err(Error::Other)?)
             .ok_or(Error::InvalidNode)?;
 
         Ok(cid)

@@ -1,16 +1,17 @@
 mod cbor_helpers;
 mod discovery;
-mod index;
+pub mod index;
 mod routing;
 mod utils;
 pub use crate::routing::{
     RoutingNetEvent, RoutingNetwork, RoutingRecord, EMPTY_QUEUE_SHRINK_THRESHOLD,
 };
-use cbor_helpers::PeerIdCbor;
+use blockstore::types::BlockStore;
+pub use cbor_helpers::PeerIdCbor;
 pub use discovery::Config as DiscoveryConfig;
 pub use discovery::{DiscoveryEvent, HubDiscovery, PeerTable};
 use filecoin::{cid_helpers::CidCbor, types::Cbor};
-use libipld::{Cid, Ipld};
+use libipld::Cid;
 use libp2p::gossipsub::{Gossipsub, GossipsubEvent, GossipsubMessage, IdentTopic};
 use libp2p::swarm::{
     NetworkBehaviour, NetworkBehaviourAction, NetworkBehaviourEventProcess, PollParameters,
@@ -22,14 +23,14 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 pub use utils::gossip_init;
+
 pub type LocalIndex = HashSet<CidCbor>;
-pub type SerializableIndex = HashMap<CidCbor, PeerTable>;
-use blockstore::types::BlockStore;
+pub type Index<B> = Arc<Mutex<index::Hamt<B, PeerTable>>>;
 
 pub const ROUTING_TOPIC: &str = "myel/content-routing";
 pub const SYNCING_TOPIC: &str = "myel/index-syncing";
 
-fn tcid(v: Cid) -> index::BytesKey {
+pub fn tcid(v: Cid) -> index::BytesKey {
     index::BytesKey(v.to_bytes())
 }
 
@@ -91,7 +92,7 @@ pub struct Routing<B: 'static + BlockStore> {
     pending_events: VecDeque<RoutingEvent>,
     // a map of who has the content we made requests for
     #[behaviour(ignore)]
-    pub routing_table: Arc<Mutex<index::Hamt<B, PeerTable>>>,
+    pub routing_table: Index<B>,
 }
 
 impl<B: 'static + BlockStore> Routing<B> {
@@ -225,7 +226,8 @@ impl<B: 'static + BlockStore> Routing<B> {
                     // check sent cids are valid
                     if let Some(c) = cid.to_cid() {
                         let mut lock = self.routing_table.lock().unwrap();
-                        lock.shrink(&tcid(c), PeerIdCbor::from(peer_id)).map_err(|e| e.to_string())?;;
+                        lock.delete_subvalue(&tcid(c), PeerIdCbor::from(peer_id))
+                            .map_err(|e| e.to_string())?;
                     }
                     // quit if a single CID is invalid, this can be relaxed
                     else {
@@ -343,7 +345,10 @@ impl<B: 'static + BlockStore> NetworkBehaviourEventProcess<RoutingNetEvent> for 
             RoutingNetEvent::Response(_, resp) => {
                 if let Some(peers) = resp.peers {
                     if let Some(r) = resp.root.to_cid() {
-                        self.process_routing_response(peers, r);
+                        match self.process_routing_response(peers, r) {
+                            Ok(_) => {}
+                            Err(e) => println!("failed to process routing response: {}", e),
+                        }
                     }
                 }
             }
@@ -393,7 +398,6 @@ mod tests {
     use libp2p::yamux::YamuxConfig;
     use libp2p::{PeerId, Swarm, Transport};
     use rand::prelude::*;
-    use smallvec::SmallVec;
     use std::time::Duration;
 
     fn mk_transport() -> (PeerId, Boxed<(PeerId, StreamMuxerBox)>) {
@@ -439,7 +443,7 @@ mod tests {
             }
         }
 
-        fn get_routing_table(&self) -> Arc<Mutex<index::Hamt<MemoryBlockStore, PeerTable>>> {
+        fn get_routing_table(&self) -> Index<MemoryBlockStore> {
             return self.swarm.behaviour().routing_table.clone();
         }
 
@@ -551,12 +555,12 @@ mod tests {
         let mut peer1 = Peer::new(false);
 
         // will have themselves in hub table
-        let mut peer2 = Peer::new(true);
+        let peer2 = Peer::new(true);
 
         peer1.add_address(&peer2);
         //
         // //  print logs for peer 2
-        let mut hub_routing_table = peer2.get_routing_table();
+        let hub_routing_table = peer2.get_routing_table();
         println!("before {:?}", hub_routing_table);
         let peer2id = peer2.spawn("peer2");
 

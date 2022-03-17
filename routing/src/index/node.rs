@@ -152,24 +152,6 @@ where
         Ok(value)
     }
 
-    pub fn get_mut<Q: ?Sized, S: BlockStore>(
-        &mut self,
-        k: &Q,
-        store: Arc<S>,
-        bit_width: u32,
-    ) -> Result<Option<&mut V>, Error>
-    where
-        K: Borrow<Q>,
-        Q: Eq + Hash,
-        V: PartialEq + Debug,
-    {
-        let hash = Sha256::hash(k);
-        let value = self
-            .get_value_mut(&mut HashBits::new(&hash), bit_width, 0, k, store)?
-            .map(|kv| kv.value_mut());
-        Ok(value)
-    }
-
     pub fn remove_entry<Q: ?Sized, S>(
         &mut self,
         k: &Q,
@@ -230,46 +212,8 @@ where
         }
     }
 
-    fn get_value_mut<Q: ?Sized, S: BlockStore>(
-        &mut self,
-        hashed_key: &mut HashBits,
-        bit_width: u32,
-        depth: usize,
-        key: &Q,
-        store: Arc<S>,
-    ) -> Result<Option<&mut KeyValuePair<K, V>>, Error>
-    where
-        K: Borrow<Q>,
-        Q: Eq + Hash,
-        V: PartialEq,
-    {
-        let idx = hashed_key.next(bit_width)?;
-
-        if !self.bitfield.test_bit(idx) {
-            return Ok(None);
-        }
-
-        let cindex = self.index_for_bit_pos(idx);
-        let child = self.get_child_mut(cindex);
-        match child {
-            Pointer::Link { cid, cache } => {
-                let node = Box::new(Node::try_from(
-                    &dag_service::cat(store.clone(), *cid)
-                        .map_err(|_| Error::CidNotFound(cid.to_string()))?,
-                )?);
-
-                // Intentionally ignoring error, cache will always be the same.
-                cache.get_or_init(|| node);
-                let child_node = cache.get_mut().expect("filled line above");
-
-                child_node.get_value_mut(hashed_key, bit_width, depth + 1, key, store)
-            }
-            Pointer::Dirty(n) => n.get_value_mut(hashed_key, bit_width, depth + 1, key, store),
-            Pointer::Values(vals) => Ok(vals.iter_mut().find(|kv| key.eq(kv.key().borrow()))),
-        }
-    }
-
     /// Internal method to modify values.
+    #[allow(clippy::too_many_arguments)]
     fn modify_value<S: BlockStore>(
         &mut self,
         hashed_key: &mut HashBits,
@@ -487,7 +431,7 @@ where
         }
     }
 
-    /// Internal method to remove shrinkable values -- only works for HAMTs with HashMaps vals
+    /// Internal method to remove shrinkable values -- only works for HAMTs with sub-values
     pub fn shrink_values<S: BlockStore, Q, A>(
         &mut self,
         hashed_key: &mut HashBits,
@@ -578,6 +522,7 @@ where
     }
 
     /// Internal method to delete entries.
+
     fn rm_value<Q: ?Sized, S: BlockStore>(
         &mut self,
         hashed_key: &mut HashBits,
@@ -660,7 +605,7 @@ where
 
                 let data = to_vec(node).map_err(|_| Error::InvalidNode)?;
 
-                let cid = (dag_service::add(store.clone(), &data).map_err(|e| Error::Other(e))?)
+                let cid = (dag_service::add(store.clone(), &data).map_err(Error::Other)?)
                     .ok_or(Error::InvalidNode)?;
 
                 // Can keep the flushed node in link cache

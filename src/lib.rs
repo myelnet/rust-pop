@@ -9,8 +9,10 @@ pub use self::native::node::*;
 
 use bimap::BiMap;
 use blockstore::types::BlockStore;
+use data_transfer::{ChannelId, DataTransferBehaviour, DataTransferEvent, PullParams};
 use filecoin::{cid_helpers::CidCbor, types::Cbor};
 use graphsync::traversal::{RecursionLimit, Selector};
+use graphsync::Graphsync;
 use libipld::codec::Decode;
 use libipld::store::StoreParams;
 use libipld::{Cid, Ipld};
@@ -19,20 +21,14 @@ use libp2p::swarm::{
 };
 use libp2p::{Multiaddr, NetworkBehaviour, PeerId};
 use routing::{
-    PeerTable, PeerTable, Routing, RoutingConfig as PopConfig, RoutingEvent, RoutingTableEntry,
+    tcid, Routing, RoutingConfig as PopConfig, RoutingEvent, RoutingTableEntry,
     EMPTY_QUEUE_SHRINK_THRESHOLD,
 };
 use serde_tuple::{Deserialize_tuple, Serialize_tuple};
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::{Arc, RwLock};
-use std::task::{Context, Poll};
-pub type Index = HashMap<Cid, PeerTable>;
-pub type LocalIndex = HashSet<Cid>;
-pub type SerializableIndex = HashMap<Vec<u8>, PeerTable>;
-pub type SerializableLocalIndex = HashSet<Vec<u8>>;
-use data_transfer::{ChannelId, DataTransferBehaviour, DataTransferEvent, PullParams};
-use graphsync::Graphsync;
+use std::collections::{HashSet, VecDeque};
 use std::str::FromStr;
+use std::sync::Arc;
+use std::task::{Context, Poll};
 
 pub const ROUTING_TOPIC: &str = "myel/content-routing";
 pub const SYNCING_TOPIC: &str = "myel/index-syncing";
@@ -50,7 +46,7 @@ pub struct Pop<S: 'static + BlockStore>
 where
     Ipld: Decode<<S::Params as StoreParams>::Codecs>,
 {
-    routing: Routing,
+    routing: Routing<S>,
     data_transfer: DataTransferBehaviour<S>,
 
     #[behaviour(ignore)]
@@ -75,7 +71,7 @@ where
 
         Self {
             data_transfer,
-            store,
+            store: store.clone(),
             routing: Routing::new(config, None, store),
             pending_events: VecDeque::default(),
             pending_cids: HashSet::new(),
@@ -139,14 +135,17 @@ where
             if self.pending_requests.get_by_left(&root).is_none() {
                 //  if the sent Cid is valid
                 let table = self.routing.routing_table.clone();
-                if let Some(peer_table) = table.get(&root) {
-                    let peer = peer_table.keys().next().unwrap();
-                    let addresses = peer_table.get(peer).unwrap();
+                let lock = table.lock().unwrap();
+                if let Some(peer_table) = lock.get(&tcid(root)).map_err(|e| e.to_string())? {
+                    let peer_bytes = peer_table.keys().next().unwrap();
+                    let addresses = peer_table.get(peer_bytes).unwrap();
+                    let pid = peer_bytes.to_pid().unwrap();
                     for addr in addresses {
-                        self.add_address(peer, addr.clone());
+                        //  we can safely unwrap as only valid Pids are inserted when using Routing
+                        self.add_address(&pid, addr.clone());
                     }
 
-                    let ch = self.pull_all(*peer, root).map_err(|e| e)?;
+                    let ch = self.pull_all(pid, root).map_err(|e| e)?;
                     self.pending_requests.insert(root, ch.clone());
                     return Ok(ch);
                 }
@@ -265,7 +264,7 @@ mod tests {
     use libp2p::yamux::YamuxConfig;
     use libp2p::{PeerId, Swarm, Transport};
     use rand::prelude::*;
-    use smallvec::SmallVec;
+    use routing::{Index, PeerIdCbor};
     use std::time::Duration;
 
     fn mk_transport() -> (PeerId, Boxed<(PeerId, StreamMuxerBox)>) {
@@ -309,7 +308,7 @@ mod tests {
             }
         }
 
-        fn get_routing_table(&mut self) -> Index {
+        fn get_routing_table(&mut self) -> Index<MemoryBlockStore> {
             return self.swarm.behaviour_mut().routing.routing_table.clone();
         }
 
@@ -392,18 +391,6 @@ mod tests {
             }
         }
 
-        async fn next_routing(&mut self) -> Option<RoutingEvent> {
-            loop {
-                let ev = self.swarm.next().await?;
-                if let SwarmEvent::Behaviour(event) = ev {
-                    match event {
-                        RoutingEvent::RoutingTableUpdated(_) => return Some(event),
-                        _ => {}
-                    }
-                }
-            }
-        }
-
         async fn next_content_fulfilled(&mut self) -> Option<String> {
             loop {
                 let ev = self.swarm.next().await?;
@@ -417,46 +404,45 @@ mod tests {
         }
     }
 
-    #[async_std::test]
-    async fn test_can_make_request() {
-        //  will have empty hub table as not a hub
-        let mut peer1 = Peer::new(false);
-
-        // will have themselves in hub table
-        let mut peer2 = Peer::new(false);
-        // will have themselves in hub table
-        let peer3 = Peer::new(false);
-        let entry = peer2.make_index();
-
-        peer1.add_address(&peer2);
-
-        let peer2id = peer2.spawn("peer2");
-
-        let selector = Selector::ExploreRecursive {
-            limit: RecursionLimit::None,
-            sequence: Box::new(Selector::ExploreAll {
-                next: Box::new(Selector::ExploreRecursiveEdge),
-            }),
-            current: None,
-        };
-
-        let cid = match entry {
-            RoutingTableEntry::Insertion {
-                multiaddresses: _,
-                cids,
-            } => Some(cids.first().unwrap().to_cid().unwrap()),
-            _ => None,
-        };
-
-        peer1
-            .swarm()
-            .behaviour_mut()
-            .data_transfer
-            .pull(peer2id, cid.unwrap(), selector, PullParams::default())
-            .unwrap();
-
-        peer1.next_indexing().await;
-    }
+    // #[async_std::test]
+    // async fn test_can_make_request() {
+    //     //  will have empty hub table as not a hub
+    //     let mut peer1 = Peer::new(false);
+    //
+    //     // will have themselves in hub table
+    //     let mut peer2 = Peer::new(false);
+    //
+    //     let entry = peer2.make_index();
+    //
+    //     peer1.add_address(&peer2);
+    //
+    //     let peer2id = peer2.spawn("peer2");
+    //
+    //     let selector = Selector::ExploreRecursive {
+    //         limit: RecursionLimit::None,
+    //         sequence: Box::new(Selector::ExploreAll {
+    //             next: Box::new(Selector::ExploreRecursiveEdge),
+    //         }),
+    //         current: None,
+    //     };
+    //
+    //     let cid = match entry {
+    //         RoutingTableEntry::Insertion {
+    //             multiaddresses: _,
+    //             cids,
+    //         } => Some(cids.first().unwrap().to_cid().unwrap()),
+    //         _ => None,
+    //     };
+    //
+    //     peer1
+    //         .swarm()
+    //         .behaviour_mut()
+    //         .data_transfer
+    //         .pull(peer2id, cid.unwrap(), selector, PullParams::default())
+    //         .unwrap();
+    //
+    //     peer1.next_indexing().await;
+    // }
 
     #[async_std::test]
     async fn test_can_sync_index_on_hanshake() {
@@ -490,18 +476,31 @@ mod tests {
         };
         let (cid, ma) = res.unwrap();
 
-        assert!(hub_routing_table.contains_key(&cid));
+        assert!(hub_routing_table
+            .lock()
+            .unwrap()
+            .contains_key(&tcid(cid))
+            .unwrap());
 
-        assert!(hub_routing_table.get(&cid).unwrap().contains_key(&peer2id));
+        assert!(hub_routing_table
+            .lock()
+            .unwrap()
+            .get(&tcid(cid))
+            .unwrap()
+            .unwrap()
+            .contains_key(&PeerIdCbor::from(peer2id)));
 
         assert_eq!(
             hub_routing_table
-                .get(&cid)
+                .lock()
                 .unwrap()
-                .get(&peer2id)
+                .get(&tcid(cid))
+                .unwrap()
+                .unwrap()
+                .get(&PeerIdCbor::from(peer2id))
                 .unwrap()
                 .clone(),
-            SmallVec::<[Multiaddr; 4]>::from(ma)
+            ma
         );
     }
 

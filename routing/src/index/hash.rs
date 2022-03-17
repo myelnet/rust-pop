@@ -36,9 +36,6 @@ impl Sha256 {
     }
 }
 
-/// Key type to be used to serialize as byte string instead of a `u8` array.
-/// This type is used as a default for the `Hamt` as this is the only allowed type
-/// with the go implementation.
 #[derive(Eq, PartialOrd, Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(transparent)]
 pub struct BytesKey(#[serde(with = "serde_bytes")] pub Vec<u8>);

@@ -1,11 +1,11 @@
 use super::bitfield::Bitfield;
 use super::hash::HashBits;
+use super::ShrinkableMap;
 use super::pointer::Pointer;
 use super::{
     hash::{Hash, Sha256},
     Error, KeyValuePair, MAX_ARRAY_WIDTH,
 };
-use crate::utils::ShrinkableMap;
 use blockstore::types::BlockStore;
 use once_cell::sync::OnceCell;
 use serde::de::DeserializeOwned;
@@ -497,24 +497,18 @@ where
                 // Delete value
                 if let Some(i) = vals.iter().position(|p| p.key() == key) {
                     if vals[i].value().contains_key(&value) {
-                        for (i, p) in vals.iter().enumerate() {
-                            if key.eq(p.key()) {
-                                if vals.len() == 1 {
-                                    if let Pointer::Values(new_v) = self.rm_child(cindex, idx) {
-                                        new_v.into_iter().next().unwrap()
-                                    } else {
-                                        unreachable!()
-                                    }
-                                } else {
-                                    vals.remove(i)
-                                };
-                                return Ok(true);
-                            }
-                        }
-                    } else {
                         vals[i].1.remove(&value);
-                        //  didn't remove the entire K,V pair so don't need to clean node
-                        return Ok(false);
+                        if vals[i].1.is_empty() {
+                            if let Pointer::Values(new_v) = self.rm_child(cindex, idx) {
+                                new_v.into_iter().next().unwrap()
+                            } else {
+                                unreachable!()
+                            };
+                            return Ok(true);
+                        } else {
+                            //  didn't remove the entire K,V pair so don't need to clean node
+                            return Ok(false);
+                        };
                     }
                 }
 

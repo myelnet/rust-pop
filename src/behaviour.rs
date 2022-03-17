@@ -208,7 +208,6 @@ where
     Ipld: Decode<<S::Params as StoreParams>::Codecs>,
 {
     fn inject_event(&mut self, event: DataTransferEvent) {
-        println!("data transfer event {:?}", event);
         match event {
             DataTransferEvent::Completed(ch, res) => {
                 self.process_transfer_completion(ch, res).unwrap();
@@ -395,8 +394,6 @@ mod tests {
             }
         }
     }
-
-
 
     #[async_std::test]
     async fn test_can_sync_index_on_hanshake() {

@@ -7,7 +7,6 @@ pub use self::{
     error::Error,
     hash::{BytesKey, Hash},
 };
-use crate::utils::ShrinkableMap;
 use blockstore::types::BlockStore;
 use libipld::Cid;
 use node::Node;
@@ -22,6 +21,12 @@ const MAX_ARRAY_WIDTH: usize = 3;
 const DEFAULT_BIT_WIDTH: u32 = 8;
 
 type HashedKey = [u8; 32];
+
+pub trait ShrinkableMap<Q: ?Sized, V> {
+    fn remove(&mut self, k: &Q) -> Option<V>;
+    fn contains_key(&self, k: &Q) -> bool;
+    fn is_empty(&self) -> bool;
+}
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
 pub struct KeyValuePair<K, V>(K, V);

@@ -6,12 +6,6 @@ use libp2p::gossipsub::{
 };
 use std::time::Duration;
 
-pub trait ShrinkableMap<Q: ?Sized, V> {
-    fn remove(&mut self, k: &Q) -> Option<V>;
-    fn contains_key(&self, k: &Q) -> bool;
-    }
-
-
 pub fn gossip_init(peer_id: PeerId, topics: Vec<Topic>) -> Gossipsub {
     // We take current time as request id as request content may not be unique
     let message_id_fn = |_message: &GossipsubMessage| MessageId::from(instant::now().to_ne_bytes());

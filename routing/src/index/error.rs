@@ -26,9 +26,3 @@ pub enum Error {
     #[error("{0}")]
     Other(String),
 }
-
-impl From<Box<dyn StdError>> for Error {
-    fn from(e: Box<dyn StdError>) -> Self {
-        Self::Dynamic(e)
-    }
-}

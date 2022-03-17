@@ -7,14 +7,7 @@ use std::hash::Hasher;
 use std::ops::Deref;
 use std::{mem, slice};
 
-/// Algorithm used as the hasher for the Hamt.
-pub trait HashAlgorithm {
-    fn hash<X: ?Sized>(key: &X) -> HashedKey
-    where
-        X: Hash;
-}
-
-/// Type is needed because the Sha256 hasher does not implement `std::hash::Hasher`
+// does not implement Hasher by default
 #[derive(Default)]
 struct Sha2HasherWrapper(Sha256Hasher);
 
@@ -29,12 +22,11 @@ impl Hasher for Sha2HasherWrapper {
     }
 }
 
-/// Sha256 hashing algorithm used for hashing keys in the Hamt.
 #[derive(Debug)]
 pub enum Sha256 {}
 
-impl HashAlgorithm for Sha256 {
-    fn hash<X: ?Sized>(key: &X) -> HashedKey
+impl Sha256 {
+    pub fn hash<X: ?Sized>(key: &X) -> HashedKey
     where
         X: Hash,
     {

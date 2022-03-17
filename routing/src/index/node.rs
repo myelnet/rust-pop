@@ -2,7 +2,7 @@ use super::bitfield::Bitfield;
 use super::hash::HashBits;
 use super::pointer::Pointer;
 use super::{
-    hash::{Hash, HashAlgorithm, Sha256},
+    hash::{Hash, Sha256},
     Error, KeyValuePair, MAX_ARRAY_WIDTH,
 };
 use crate::utils::ShrinkableMap;
@@ -486,7 +486,6 @@ where
                 Ok(deleted)
             }
             Pointer::Dirty(n) => {
-                // Delete value and return deleted value
                 let deleted =
                     n.shrink_values(hashed_key, bit_width, depth + 1, key, value, store)?;
 
@@ -525,7 +524,6 @@ where
     }
 
     /// Internal method to delete entries.
-
     fn rm_value<Q: ?Sized, S: BlockStore>(
         &mut self,
         hashed_key: &mut HashBits,

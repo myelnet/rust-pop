@@ -96,14 +96,25 @@ where
         V: PartialEq,
     {
         let hash = Sha256::hash(&key);
-        self.modify_value(
+
+        let val = value.clone();
+        let func = |current_val: &mut V| -> (Option<V>, bool) {
+            if overwrite {
+                let value_changed = current_val != &val;
+                return (Some(std::mem::replace(current_val, val)), value_changed);
+            } else {
+                return (None, false);
+            }
+        };
+
+        self.add(
             &mut HashBits::new(&hash),
             bit_width,
             0,
+            func,
             key,
             value,
             store,
-            overwrite,
         )
     }
 
@@ -118,7 +129,25 @@ where
         V: PartialEq + Extend<A> + IntoIterator<Item = A>,
     {
         let hash = Sha256::hash(&key);
-        self.extend_value(&mut HashBits::new(&hash), bit_width, 0, key, value, store)
+        let val = value.clone();
+        let func = |current_val: &mut V| -> (Option<V>, bool) {
+            if current_val != &val {
+                current_val.extend(val);
+                return (None, true);
+            } else {
+                return (None, false);
+            }
+        };
+
+        self.add(
+            &mut HashBits::new(&hash),
+            bit_width,
+            0,
+            func,
+            key,
+            value,
+            store,
+        )
     }
 
     pub fn shrink<S: BlockStore, Q, A>(
@@ -132,29 +161,31 @@ where
         V: PartialEq + ShrinkableMap<Q, A>,
     {
         let hash = Sha256::hash(&key);
-        self.shrink_value(&mut HashBits::new(&hash), bit_width, 0, key, value, store)
+        let func = |vals: &mut Vec<KeyValuePair<K, V>>| -> bool {
+            // Delete value
+            if let Some(i) = vals.iter().position(|p| p.key() == key) {
+                if vals[i].value().contains_key(&value) {
+                    vals[i].1.remove(&value);
+                    if vals[i].1.is_empty() {
+                        vals.remove(i);
+                        return true;
+                    } else {
+                        //  didn't remove the entire K,V pair so don't need to clean node
+                        return false;
+                    };
+                }
+            }
+
+            false
+        };
+
+        self.del(&mut HashBits::new(&hash), bit_width, 0, func, key, store)
     }
 
-    pub fn get<Q: ?Sized, S: BlockStore>(
-        &self,
-        k: &Q,
-        store: Arc<S>,
-        bit_width: u32,
-    ) -> Result<Option<&V>, Error>
-    where
-        K: Borrow<Q>,
-        Q: Eq + Hash,
-    {
-        let hash = Sha256::hash(k);
-        let value = self
-            .get_value(&mut HashBits::new(&hash), bit_width, 0, k, store)?
-            .map(|kv| kv.value());
-        Ok(value)
-    }
 
     pub fn remove_entry<Q: ?Sized, S>(
         &mut self,
-        k: &Q,
+        key: &Q,
         store: Arc<S>,
         bit_width: u32,
     ) -> Result<bool, Error>
@@ -163,9 +194,39 @@ where
         Q: Eq + Hash,
         S: BlockStore,
     {
-        let hash = Sha256::hash(k);
-        self.rm_value(&mut HashBits::new(&hash), bit_width, 0, k, store)
+        let hash = Sha256::hash(key);
+        let func = |vals: &mut Vec<KeyValuePair<K, V>>| -> bool {
+            // Delete value
+            for (i, p) in vals.iter().enumerate() {
+                if key.eq(p.key().borrow()) {
+                    vals.remove(i);
+                    return true;
+                }
+            }
+
+            false
+        };
+
+        self.del(&mut HashBits::new(&hash), bit_width, 0, func, key, store)
     }
+
+
+        pub fn get<Q: ?Sized, S: BlockStore>(
+            &self,
+            k: &Q,
+            store: Arc<S>,
+            bit_width: u32,
+        ) -> Result<Option<&V>, Error>
+        where
+            K: Borrow<Q>,
+            Q: Eq + Hash,
+        {
+            let hash = Sha256::hash(k);
+            let value = self
+                .get_value(&mut HashBits::new(&hash), bit_width, 0, k, store)?
+                .map(|kv| kv.value());
+            Ok(value)
+        }
 
     pub fn is_empty(&self) -> bool {
         self.pointers.is_empty()
@@ -309,61 +370,6 @@ where
         }
     }
 
-    /// Internal method to modify values.
-    #[allow(clippy::too_many_arguments)]
-    fn modify_value<S: BlockStore>(
-        &mut self,
-        hashed_key: &mut HashBits,
-        bit_width: u32,
-        depth: usize,
-        key: K,
-        value: V,
-        store: Arc<S>,
-        overwrite: bool,
-    ) -> Result<(Option<V>, bool), Error>
-    where
-        V: PartialEq + Clone,
-    {
-        let val = value.clone();
-        let func = |current_val: &mut V| -> (Option<V>, bool) {
-            if overwrite {
-                let value_changed = current_val != &val;
-                return (Some(std::mem::replace(current_val, val)), value_changed);
-            } else {
-                return (None, false);
-            }
-        };
-
-        self.add(hashed_key, bit_width, depth, func, key, value, store)
-    }
-
-    /// Internal method to modify values that are extensible.
-    #[allow(clippy::too_many_arguments)]
-    fn extend_value<S: BlockStore, A>(
-        &mut self,
-        hashed_key: &mut HashBits,
-        bit_width: u32,
-        depth: usize,
-        key: K,
-        value: V,
-        store: Arc<S>,
-    ) -> Result<(Option<V>, bool), Error>
-    where
-        V: PartialEq + Extend<A> + IntoIterator<Item = A>,
-    {
-        let val = value.clone();
-        let func = |current_val: &mut V| -> (Option<V>, bool) {
-            if current_val != &val {
-                current_val.extend(val);
-                return (None, true);
-            } else {
-                return (None, false);
-            }
-        };
-
-        self.add(hashed_key, bit_width, depth, func, key, value, store)
-    }
-
     /// Internal method to delete data.
     fn del<Q: ?Sized, S: BlockStore, F: FnOnce(&mut Vec<KeyValuePair<K, V>>) -> bool>(
         &mut self,
@@ -400,8 +406,7 @@ where
                 cache.get_or_try_init(res)?;
                 let child_node = cache.get_mut().expect("filled line above");
 
-                let deleted =
-                    child_node.del(hashed_key, bit_width, depth + 1, func, key, store)?;
+                let deleted = child_node.del(hashed_key, bit_width, depth + 1, func, key, store)?;
                 if deleted {
                     *child = Pointer::Dirty(std::mem::take(child_node));
 
@@ -430,70 +435,6 @@ where
                 Ok(deleted)
             }
         }
-    }
-
-    /// Internal method to delete sub-values (i.e V is also a key-value mapping).
-    #[allow(clippy::too_many_arguments)]
-    fn shrink_value<S: BlockStore, Q, A>(
-        &mut self,
-        hashed_key: &mut HashBits,
-        bit_width: u32,
-        depth: usize,
-        key: &K,
-        value: Q,
-        store: Arc<S>,
-    ) -> Result<bool, Error>
-    where
-        V: PartialEq + ShrinkableMap<Q, A>,
-    {
-        let func = |vals: &mut Vec<KeyValuePair<K, V>>| -> bool {
-            // Delete value
-            if let Some(i) = vals.iter().position(|p| p.key() == key) {
-                if vals[i].value().contains_key(&value) {
-                    vals[i].1.remove(&value);
-                    if vals[i].1.is_empty() {
-                        vals.remove(i);
-                        return true;
-                    } else {
-                        //  didn't remove the entire K,V pair so don't need to clean node
-                        return false;
-                    };
-                }
-            }
-
-            false
-        };
-
-        self.del(hashed_key, bit_width, depth, func, key, store)
-    }
-
-    /// Internal method to delete values.
-    #[allow(clippy::too_many_arguments)]
-    fn rm_value<S: BlockStore, Q: ?Sized>(
-        &mut self,
-        hashed_key: &mut HashBits,
-        bit_width: u32,
-        depth: usize,
-        key: &Q,
-        store: Arc<S>,
-    ) -> Result<bool, Error>
-    where
-        K: Borrow<Q>,
-        Q: Hash + Eq,
-    {
-        let func = |vals: &mut Vec<KeyValuePair<K, V>>| -> bool {
-            // Delete value
-            for (i, p) in vals.iter().enumerate() {
-                if key.eq(p.key().borrow()) {
-                    vals.remove(i);
-                    return true;
-                }
-            }
-
-            false
-        };
-
-        self.del(hashed_key, bit_width, depth, func, key, store)
     }
 
     pub fn flush<S: BlockStore>(&mut self, store: Arc<S>) -> Result<(), Error> {

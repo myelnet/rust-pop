@@ -432,6 +432,7 @@ where
     }
 
     /// Internal method to remove shrinkable values -- only works for HAMTs with sub-values
+    //  returns true if an entire (K,V) pairing was deleted
     pub fn shrink_values<S: BlockStore, Q, A>(
         &mut self,
         hashed_key: &mut HashBits,
@@ -474,6 +475,7 @@ where
                     value,
                     store,
                 )?;
+                // only clean if deleted entire K,V pair
                 if deleted {
                     *child = Pointer::Dirty(std::mem::take(child_node));
 
@@ -512,7 +514,8 @@ where
                         }
                     } else {
                         vals[i].1.remove(&value);
-                        return Ok(true);
+                        //  didn't remove the entire K,V pair so don't need to clean node
+                        return Ok(false);
                     }
                 }
 

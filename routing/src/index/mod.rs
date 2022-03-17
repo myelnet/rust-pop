@@ -77,7 +77,7 @@ impl<'a, K: PartialEq, V: PartialEq, S: BlockStore> PartialEq for Hamt<S, V, K> 
 impl<BS, V, K> Hamt<BS, V, K>
 where
     K: Hash + Eq + PartialOrd + Serialize + DeserializeOwned,
-    V: Serialize + DeserializeOwned,
+    V: Serialize + DeserializeOwned + Clone,
     BS: BlockStore,
 {
     pub fn new(store: Arc<BS>) -> Self {
@@ -125,7 +125,7 @@ where
             .map(|(r, _)| r)
     }
 
-    pub fn extend<A>(&mut self, key: K, value: V) -> Result<bool, Error>
+    pub fn extend<A>(&mut self, key: K, value: V) -> Result<(Option<V>, bool), Error>
     where
         V: PartialEq + Extend<A> + IntoIterator<Item = A>,
     {
@@ -165,7 +165,7 @@ where
             .is_some())
     }
 
-    pub fn delete<Q: ?Sized>(&mut self, k: &Q) -> Result<Option<(K, V)>, Error>
+    pub fn delete<Q: ?Sized>(&mut self, k: &Q) -> Result<bool, Error>
     where
         K: Borrow<Q>,
         Q: Hash + Eq,
@@ -307,7 +307,7 @@ mod tests {
         );
 
         let mut h2 = Hamt::<_, BytesKey>::load(&c, store.clone()).unwrap();
-        assert!(h2.delete(&b"foo".to_vec()).unwrap().is_some());
+        assert!(h2.delete(&b"foo".to_vec()).unwrap());
         assert_eq!(h2.get(&b"foo".to_vec()).unwrap(), None);
 
         let c2 = h2.flush().unwrap();
@@ -333,7 +333,7 @@ mod tests {
         );
 
         let mut h2 = Hamt::<_, ByteBuf>::load(&c, store.clone()).unwrap();
-        assert!(h2.delete(&[0].to_vec()).unwrap().is_some());
+        assert!(h2.delete(&[0].to_vec()).unwrap());
         assert_eq!(h2.get(&[0].to_vec()).unwrap(), None);
 
         let c2 = h2.flush().unwrap();
@@ -370,7 +370,7 @@ mod tests {
         );
 
         for i in 200..400 {
-            assert!(hamt.delete(&tstring(i)).unwrap().is_some());
+            assert!(hamt.delete(&tstring(i)).unwrap());
         }
         // Ensure first 200 keys still exist
         for i in 0..200 {

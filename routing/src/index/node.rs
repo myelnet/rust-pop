@@ -1,7 +1,7 @@
 use super::bitfield::Bitfield;
 use super::hash::HashBits;
-use super::ShrinkableMap;
 use super::pointer::Pointer;
+use super::ShrinkableMap;
 use super::{
     hash::{Hash, Sha256},
     Error, KeyValuePair, MAX_ARRAY_WIDTH,
@@ -82,7 +82,7 @@ impl<K, V> Default for Node<K, V> {
 impl<K, V> Node<K, V>
 where
     K: Hash + Eq + PartialOrd + Serialize + DeserializeOwned,
-    V: Serialize + DeserializeOwned,
+    V: Serialize + DeserializeOwned + Clone,
 {
     pub fn set<S: BlockStore>(
         &mut self,
@@ -113,7 +113,7 @@ where
         value: V,
         store: Arc<S>,
         bit_width: u32,
-    ) -> Result<bool, Error>
+    ) -> Result<(Option<V>, bool), Error>
     where
         V: PartialEq + Extend<A> + IntoIterator<Item = A>,
     {
@@ -132,7 +132,7 @@ where
         V: PartialEq + ShrinkableMap<Q, A>,
     {
         let hash = Sha256::hash(&key);
-        self.shrink_values(&mut HashBits::new(&hash), bit_width, 0, key, value, store)
+        self.shrink_value(&mut HashBits::new(&hash), bit_width, 0, key, value, store)
     }
 
     pub fn get<Q: ?Sized, S: BlockStore>(
@@ -157,7 +157,7 @@ where
         k: &Q,
         store: Arc<S>,
         bit_width: u32,
-    ) -> Result<Option<(K, V)>, Error>
+    ) -> Result<bool, Error>
     where
         K: Borrow<Q>,
         Q: Eq + Hash,
@@ -212,17 +212,16 @@ where
         }
     }
 
-    /// Internal method to modify values.
-    #[allow(clippy::too_many_arguments)]
-    fn modify_value<S: BlockStore>(
+    /// Internal method to add data
+    fn add_value<S: BlockStore, F: Clone + FnOnce(&mut V) -> (Option<V>, bool)>(
         &mut self,
         hashed_key: &mut HashBits,
         bit_width: u32,
         depth: usize,
+        func: F,
         key: K,
         value: V,
         store: Arc<S>,
-        overwrite: bool,
     ) -> Result<(Option<V>, bool), Error>
     where
         V: PartialEq,
@@ -250,68 +249,53 @@ where
                 cache.get_or_try_init(res)?;
                 let child_node = cache.get_mut().expect("filled line above");
 
-                let (old, modified) = child_node.modify_value(
+                let (old, modified) = child_node.add_value(
                     hashed_key,
                     bit_width,
                     depth + 1,
+                    func,
                     key,
                     value,
                     store,
-                    overwrite,
                 )?;
                 if modified {
                     *child = Pointer::Dirty(std::mem::take(child_node));
                 }
                 Ok((old, modified))
             }
-            Pointer::Dirty(n) => Ok(n.modify_value(
-                hashed_key,
-                bit_width,
-                depth + 1,
-                key,
-                value,
-                store,
-                overwrite,
-            )?),
+            Pointer::Dirty(n) => {
+                Ok(n.add_value(hashed_key, bit_width, depth + 1, func, key, value, store)?)
+            }
             Pointer::Values(vals) => {
                 // Update, if the key already exists.
                 if let Some(i) = vals.iter().position(|p| p.key() == &key) {
-                    if overwrite {
-                        let value_changed = vals[i].value() != &value;
-                        return Ok((
-                            Some(std::mem::replace(&mut vals[i].1, value)),
-                            value_changed,
-                        ));
-                    } else {
-                        // Can't overwrite, return None and false that the Node was not modified.
-                        return Ok((None, false));
-                    }
+                    return Ok(func(&mut vals[i].1));
                 }
 
                 // If the array is full, create a subshard and insert everything
                 if vals.len() >= MAX_ARRAY_WIDTH {
                     let mut sub = Node::<K, V>::default();
                     let consumed = hashed_key.consumed;
-                    let modified = sub.modify_value(
+                    let modified = sub.add_value(
                         hashed_key,
                         bit_width,
                         depth + 1,
+                        func.clone(),
                         key,
                         value,
                         store.clone(),
-                        overwrite,
                     )?;
                     let kvs = std::mem::take(vals);
                     for p in kvs.into_iter() {
                         let hash = Sha256::hash(p.key());
-                        sub.modify_value(
+                        sub.add_value(
                             &mut HashBits::new_at_index(&hash, consumed),
                             bit_width,
                             depth + 1,
+                            func.clone(),
                             p.0,
                             p.1,
                             store.clone(),
-                            overwrite,
                         )?;
                     }
 
@@ -332,7 +316,36 @@ where
         }
     }
 
-    /// Internal method to extend extensible values.
+    /// Internal method to modify values.
+    #[allow(clippy::too_many_arguments)]
+    fn modify_value<S: BlockStore>(
+        &mut self,
+        hashed_key: &mut HashBits,
+        bit_width: u32,
+        depth: usize,
+        key: K,
+        value: V,
+        store: Arc<S>,
+        overwrite: bool,
+    ) -> Result<(Option<V>, bool), Error>
+    where
+        V: PartialEq + Clone,
+    {
+        let val = value.clone();
+        let func = |current_val: &mut V| -> (Option<V>, bool) {
+            if overwrite {
+                let value_changed = current_val != &val;
+                return (Some(std::mem::replace(current_val, val)), value_changed);
+            } else {
+                return (None, false);
+            }
+        };
+
+        self.add_value(hashed_key, bit_width, depth, func, key, value, store)
+    }
+
+    /// Internal method to modify values that are extensible.
+    #[allow(clippy::too_many_arguments)]
     fn extend_value<S: BlockStore, A>(
         &mut self,
         hashed_key: &mut HashBits,
@@ -341,109 +354,36 @@ where
         key: K,
         value: V,
         store: Arc<S>,
-    ) -> Result<bool, Error>
+    ) -> Result<(Option<V>, bool), Error>
     where
         V: PartialEq + Extend<A> + IntoIterator<Item = A>,
     {
-        let idx = hashed_key.next(bit_width)?;
-
-        // No existing values at this point.
-        if !self.bitfield.test_bit(idx) {
-            self.insert_child(idx, key, value);
-            return Ok(true);
-        }
-
-        let cindex = self.index_for_bit_pos(idx);
-        let child = self.get_child_mut(cindex);
-
-        match child {
-            Pointer::Link { cid, cache } => {
-                let res = || -> Result<Box<Node<K, V>>, Error> {
-                    let node = Box::new(Node::try_from(
-                        &dag_service::cat(store.clone(), *cid)
-                            .map_err(|_| Error::CidNotFound(cid.to_string()))?,
-                    )?);
-                    Ok(node)
-                };
-                cache.get_or_try_init(res)?;
-                let child_node = cache.get_mut().expect("filled line above");
-
-                let modified =
-                    child_node.extend_value(hashed_key, bit_width, depth + 1, key, value, store)?;
-                if modified {
-                    *child = Pointer::Dirty(std::mem::take(child_node));
-                }
-                Ok(modified)
+        let val = value.clone();
+        let func = |current_val: &mut V| -> (Option<V>, bool) {
+            if current_val != &val {
+                current_val.extend(val);
+                return (None, true);
+            } else {
+                return (None, false);
             }
-            Pointer::Dirty(n) => {
-                Ok(n.extend_value(hashed_key, bit_width, depth + 1, key, value, store)?)
-            }
-            Pointer::Values(vals) => {
-                // Update, if the key already exists.
-                if let Some(i) = vals.iter().position(|p| p.key() == &key) {
-                    if vals[i].value() != &value {
-                        vals[i].1.extend(value);
-                        return Ok(true);
-                    } else {
-                        return Ok(false);
-                    }
-                }
+        };
 
-                // If the array is full, create a subshard and insert everything
-                if vals.len() >= MAX_ARRAY_WIDTH {
-                    let mut sub = Node::<K, V>::default();
-                    let consumed = hashed_key.consumed;
-                    let modified = sub.extend_value(
-                        hashed_key,
-                        bit_width,
-                        depth + 1,
-                        key,
-                        value,
-                        store.clone(),
-                    )?;
-                    let kvs = std::mem::take(vals);
-                    for p in kvs.into_iter() {
-                        let hash = Sha256::hash(p.key());
-                        sub.extend_value(
-                            &mut HashBits::new_at_index(&hash, consumed),
-                            bit_width,
-                            depth + 1,
-                            p.0,
-                            p.1,
-                            store.clone(),
-                        )?;
-                    }
-
-                    *child = Pointer::Dirty(Box::new(sub));
-
-                    return Ok(modified);
-                }
-
-                // Otherwise insert the element into the array in order.
-                let max = vals.len();
-                let idx = vals.iter().position(|c| c.key() > &key).unwrap_or(max);
-
-                let np = KeyValuePair::new(key, value);
-                vals.insert(idx, np);
-
-                Ok(true)
-            }
-        }
+        self.add_value(hashed_key, bit_width, depth, func, key, value, store)
     }
 
-    /// Internal method to remove shrinkable values -- only works for HAMTs with sub-values
-    //  returns true if an entire (K,V) pairing was deleted
-    pub fn shrink_values<S: BlockStore, Q, A>(
+    /// Internal method to delete data.
+    fn sub_value<Q: ?Sized, S: BlockStore, F: FnOnce(&mut Vec<KeyValuePair<K, V>>) -> bool>(
         &mut self,
         hashed_key: &mut HashBits,
         bit_width: u32,
         depth: usize,
-        key: &K,
-        value: Q,
+        func: F,
+        key: &Q,
         store: Arc<S>,
     ) -> Result<bool, Error>
     where
-        V: PartialEq + ShrinkableMap<Q, A>,
+        K: Borrow<Q>,
+        Q: Hash + Eq,
     {
         let idx = hashed_key.next(bit_width)?;
 
@@ -467,15 +407,8 @@ where
                 cache.get_or_try_init(res)?;
                 let child_node = cache.get_mut().expect("filled line above");
 
-                let deleted = child_node.shrink_values(
-                    hashed_key,
-                    bit_width,
-                    depth + 1,
-                    key,
-                    value,
-                    store,
-                )?;
-                // only clean if deleted entire K,V pair
+                let deleted =
+                    child_node.sub_value(hashed_key, bit_width, depth + 1, func, key, store)?;
                 if deleted {
                     *child = Pointer::Dirty(std::mem::take(child_node));
 
@@ -486,110 +419,88 @@ where
                 Ok(deleted)
             }
             Pointer::Dirty(n) => {
-                let deleted =
-                    n.shrink_values(hashed_key, bit_width, depth + 1, key, value, store)?;
+                // Delete value and return deleted value
+                let deleted = n.sub_value(hashed_key, bit_width, depth + 1, func, key, store)?;
 
                 // Clean to ensure canonical form
                 child.clean()?;
                 Ok(deleted)
             }
             Pointer::Values(vals) => {
-                // Delete value
-                if let Some(i) = vals.iter().position(|p| p.key() == key) {
-                    if vals[i].value().contains_key(&value) {
-                        vals[i].1.remove(&value);
-                        if vals[i].1.is_empty() {
-                            if let Pointer::Values(new_v) = self.rm_child(cindex, idx) {
-                                new_v.into_iter().next().unwrap()
-                            } else {
-                                unreachable!()
-                            };
-                            return Ok(true);
-                        } else {
-                            //  didn't remove the entire K,V pair so don't need to clean node
-                            return Ok(false);
-                        };
-                    }
+                let deleted = func(vals);
+                if vals.len() == 0 {
+                    if let Pointer::Values(_) = self.rm_child(cindex, idx) {
+                    } else {
+                        unreachable!()
+                    };
                 }
-
-                Ok(false)
+                Ok(deleted)
             }
         }
     }
 
-    /// Internal method to delete entries.
-    fn rm_value<Q: ?Sized, S: BlockStore>(
+    /// Internal method to delete sub-values (i.e V is also a key-value mapping).
+    #[allow(clippy::too_many_arguments)]
+    fn shrink_value<S: BlockStore, Q, A>(
+        &mut self,
+        hashed_key: &mut HashBits,
+        bit_width: u32,
+        depth: usize,
+        key: &K,
+        value: Q,
+        store: Arc<S>,
+    ) -> Result<bool, Error>
+    where
+        V: PartialEq + ShrinkableMap<Q, A>,
+    {
+        let func = |vals: &mut Vec<KeyValuePair<K, V>>| -> bool {
+            // Delete value
+            if let Some(i) = vals.iter().position(|p| p.key() == key) {
+                if vals[i].value().contains_key(&value) {
+                    vals[i].1.remove(&value);
+                    if vals[i].1.is_empty() {
+                        vals.remove(i);
+                        return true;
+                    } else {
+                        //  didn't remove the entire K,V pair so don't need to clean node
+                        return false;
+                    };
+                }
+            }
+
+            false
+        };
+
+        self.sub_value(hashed_key, bit_width, depth, func, key, store)
+    }
+
+    /// Internal method to delete values.
+    #[allow(clippy::too_many_arguments)]
+    fn rm_value<S: BlockStore, Q: ?Sized>(
         &mut self,
         hashed_key: &mut HashBits,
         bit_width: u32,
         depth: usize,
         key: &Q,
         store: Arc<S>,
-    ) -> Result<Option<(K, V)>, Error>
+    ) -> Result<bool, Error>
     where
         K: Borrow<Q>,
         Q: Hash + Eq,
     {
-        let idx = hashed_key.next(bit_width)?;
-
-        // No existing values at this point.
-        if !self.bitfield.test_bit(idx) {
-            return Ok(None);
-        }
-
-        let cindex = self.index_for_bit_pos(idx);
-        let child = self.get_child_mut(cindex);
-
-        match child {
-            Pointer::Link { cid, cache } => {
-                let res = || -> Result<Box<Node<K, V>>, Error> {
-                    let node = Box::new(Node::try_from(
-                        &dag_service::cat(store.clone(), *cid)
-                            .map_err(|_| Error::CidNotFound(cid.to_string()))?,
-                    )?);
-                    Ok(node)
-                };
-                cache.get_or_try_init(res)?;
-                let child_node = cache.get_mut().expect("filled line above");
-
-                let deleted = child_node.rm_value(hashed_key, bit_width, depth + 1, key, store)?;
-                if deleted.is_some() {
-                    *child = Pointer::Dirty(std::mem::take(child_node));
-
-                    // Clean to retrieve canonical form
-                    child.clean()?;
+        let func = |vals: &mut Vec<KeyValuePair<K, V>>| -> bool {
+            // Delete value
+            for (i, p) in vals.iter().enumerate() {
+                if key.eq(p.key().borrow()) {
+                    vals.remove(i);
+                    return true;
                 }
-
-                Ok(deleted)
             }
-            Pointer::Dirty(n) => {
-                // Delete value and return deleted value
-                let deleted = n.rm_value(hashed_key, bit_width, depth + 1, key, store)?;
 
-                // Clean to ensure canonical form
-                child.clean()?;
-                Ok(deleted)
-            }
-            Pointer::Values(vals) => {
-                // Delete value
-                for (i, p) in vals.iter().enumerate() {
-                    if key.eq(p.key().borrow()) {
-                        let old = if vals.len() == 1 {
-                            if let Pointer::Values(new_v) = self.rm_child(cindex, idx) {
-                                new_v.into_iter().next().unwrap()
-                            } else {
-                                unreachable!()
-                            }
-                        } else {
-                            vals.remove(i)
-                        };
-                        return Ok(Some((old.0, old.1)));
-                    }
-                }
+            false
+        };
 
-                Ok(None)
-            }
-        }
+        self.sub_value(hashed_key, bit_width, depth, func, key, store)
     }
 
     pub fn flush<S: BlockStore>(&mut self, store: Arc<S>) -> Result<(), Error> {

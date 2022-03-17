@@ -11,7 +11,7 @@ pub use network::{
 use blockstore::types::BlockStore;
 use filecoin::{cid_helpers::CidCbor, types::Cbor};
 use fsm::{Channel, ChannelEvent};
-use graphsync::traversal::{resolve_unixfs, Selector};
+use graphsync::traversal::Selector;
 use graphsync::{Extensions, Graphsync, GraphsyncEvent, IncomingRequestHook, RequestId};
 use libipld::codec::Decode;
 use libipld::store::StoreParams;
@@ -20,7 +20,6 @@ use libp2p::swarm::{
     NetworkBehaviour, NetworkBehaviourAction, NetworkBehaviourEventProcess, PollParameters,
 };
 use libp2p::{Multiaddr, NetworkBehaviour, PeerId};
-use mimesniff::{detect_content_type, ContentType};
 use network::{
     DealProposal, DealResponse, DealStatus, MessageType, TransferRequest, TransferResponse,
     EMPTY_QUEUE_SHRINK_THRESHOLD,
@@ -363,6 +362,8 @@ impl DataTransfer {
                             };
                             self.pending_events
                                 .push_back(DataTransferEvent::DtOutbound(peer, tmsg));
+                            self.pending_events
+                                .push_back(DataTransferEvent::Completed(ch_id, Ok(())));
                         }
                         _ => {}
                     }

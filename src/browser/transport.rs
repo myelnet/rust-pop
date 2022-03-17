@@ -57,12 +57,12 @@ impl WsTransport {
         let mut sender = Some(s);
         let onopen = Closure::wrap(Box::new(move |_| {
             let sender = sender.take().unwrap();
-            sender.send(0);
+            drop(sender.send(0));
         }) as Box<dyn FnMut(JsValue)>);
         ws.set_onopen(Some(onopen.as_ref().unchecked_ref()));
         onopen.forget();
 
-        let (mut xs, xr) = mpsc::channel(1000);
+        let (mut xs, xr) = mpsc::channel(64);
         let mut msgs = xs.clone();
         let onmessage = Closure::wrap(Box::new(move |e: MessageEvent| {
             if let Ok(abuf) = e.data().dyn_into::<js_sys::ArrayBuffer>() {

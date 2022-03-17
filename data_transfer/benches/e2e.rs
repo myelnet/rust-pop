@@ -5,7 +5,10 @@ use criterion::BenchmarkId;
 use criterion::Criterion;
 use criterion::{criterion_group, criterion_main, BatchSize, Throughput};
 use dag_service::add;
-use data_transfer::{client::Client, DataTransferBehaviour, DataTransferEvent};
+use data_transfer::{
+    client::{default_executor, Client},
+    DataTransferBehaviour, DataTransferEvent,
+};
 use futures::prelude::*;
 use graphsync::{
     traversal::{RecursionLimit, Selector},
@@ -166,7 +169,7 @@ fn bench_transfer(c: &mut Criterion) {
                     let (peer2, trans) = mk_transport();
                     let store = Arc::new(MemoryDB::default());
 
-                    let client = Client::new(store, trans);
+                    let client = Client::new(store, trans, default_executor().unwrap());
 
                     let selector = Selector::ExploreRecursive {
                         limit: RecursionLimit::None,

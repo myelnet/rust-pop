@@ -8,13 +8,14 @@ use blockstore::types::BlockStore;
 use filecoin::{cid_helpers::CidCbor, types::Cbor};
 use futures::{
     channel::{mpsc, oneshot},
+    executor::ThreadPoolBuilder,
     join,
     prelude::*,
     select,
-    stream::{FuturesUnordered, IntoAsyncRead, TryStreamExt},
+    stream::{IntoAsyncRead, TryStreamExt},
 };
 use graphsync::network::MessageCodec;
-use graphsync::traversal::{resolve_unixfs, AsyncLoader, Error, Progress, Selector};
+use graphsync::traversal::{resolve_unixfs, AsyncLoader, Progress, Selector};
 use graphsync::{
     Extensions, GraphsyncCodec, GraphsyncMessage, GraphsyncProtocol, GraphsyncRequest, Prefix,
     RequestId,
@@ -25,12 +26,13 @@ use libipld::{Block, Cid, Ipld};
 use libp2p::{
     core::muxing::{event_from_ref_and_wrap, outbound_from_ref_and_wrap, StreamMuxerBox},
     core::transport::{Boxed, Transport},
-    core::ProtocolName,
+    core::{Executor, ProtocolName},
     Multiaddr, PeerId,
 };
 use multistream_select::{dialer_select_proto, listener_select_proto};
 use smallvec::SmallVec;
 use std::collections::hash_map::{Entry, HashMap};
+use std::io::{Error, ErrorKind};
 use std::sync::{
     atomic::{AtomicI32, Ordering},
     Arc,
@@ -44,12 +46,25 @@ use async_std::task::spawn_local as spawn;
 
 pub struct PullStream {
     pub content_type: ContentType,
-    pub channel: mpsc::Receiver<Result<Vec<u8>, std::io::Error>>,
+    pub channel: mpsc::Receiver<Result<Vec<u8>, Error>>,
 }
 
 impl PullStream {
-    pub fn reader(self) -> IntoAsyncRead<mpsc::Receiver<Result<Vec<u8>, std::io::Error>>> {
+    pub fn reader(self) -> IntoAsyncRead<mpsc::Receiver<Result<Vec<u8>, Error>>> {
         self.channel.into_async_read()
+    }
+}
+
+pub fn default_executor() -> Option<Box<dyn Executor>> {
+    match ThreadPoolBuilder::new()
+        .name_prefix("client-executor")
+        .create()
+    {
+        Ok(tp) => Some(Box::new(move |f| tp.spawn_ok(f))),
+        Err(err) => {
+            log::warn!("Failed to create executor thread pool: {:?}", err);
+            None
+        }
     }
 }
 
@@ -58,24 +73,34 @@ pub struct Client<S: BlockStore> {
     store: Arc<S>,
     id_counter: Arc<AtomicI32>,
     outbound_events: mpsc::Sender<NetEvent>,
+    executor: Arc<Box<dyn Executor>>,
 }
 
 impl<S: 'static + BlockStore> Client<S>
 where
     Ipld: Decode<<S::Params as StoreParams>::Codecs>,
 {
-    pub fn new(store: Arc<S>, tp: Boxed<(PeerId, StreamMuxerBox)>) -> Self {
+    pub fn new(
+        store: Arc<S>,
+        tp: Boxed<(PeerId, StreamMuxerBox)>,
+        executor: Box<dyn Executor>,
+    ) -> Self {
         let (s, r) = mpsc::channel(128);
         let transport = tp.clone();
-        spawn(async move {
-            if let Err(e) = conn_loop(r, transport).await {
-                println!("connection loop: {:?}", e);
+        let executor = Arc::new(executor);
+        executor.exec(
+            async move {
+                if let Err(e) = conn_loop(r, transport).await {
+                    println!("connection loop: {:?}", e);
+                }
             }
-        });
+            .boxed(),
+        );
         Self {
             store,
             id_counter: Arc::new(AtomicI32::new(1)),
             outbound_events: s,
+            executor,
         }
     }
     pub async fn pull(
@@ -85,7 +110,7 @@ where
         root: Cid,
         sel: Selector,
         params: PullParams,
-    ) -> Result<PullStream, String> {
+    ) -> Result<PullStream, Error> {
         // For now we simplify and use a single id for all protocol requests
         // it will be updated in any case when switching over to UUIDs.
         let id = self.id_counter.fetch_add(1, Ordering::Relaxed);
@@ -112,7 +137,7 @@ where
             }),
             response: None,
         };
-        let buf = message.marshal_cbor().map_err(|e| e.to_string())?;
+        let buf = message.marshal_cbor().map_err(io_err)?;
         let mut extensions = HashMap::new();
         extensions.insert(EXTENSION_KEY.to_string(), buf);
 
@@ -127,7 +152,7 @@ where
             },
         );
         // This channel will receive inbound messages from all protocols
-        let (inbound_send, mut inbound_receive) = mpsc::channel(64);
+        let (inbound_send, inbound_receive) = mpsc::channel(64);
 
         // outbound events are sent to the connection loop to be streamed over the relevant
         // protocols.
@@ -140,7 +165,7 @@ where
                 msg: NetMsg::Graphsync(msg),
                 chan: inbound_send,
             })
-            .map_err(|e| e.to_string())?;
+            .map_err(io_err)?;
 
         // This is the final channel that will consume the transfer data.
         let (mut s, r) = mpsc::channel(64);
@@ -148,7 +173,7 @@ where
         let (os, or) = oneshot::channel();
 
         let store = self.store.clone();
-        spawn(async move {
+        self.executor.exec(async move {
             let mut state = Channel::New {
                 id: Default::default(),
                 deal_id: id as u64,
@@ -199,6 +224,7 @@ where
             })
             .fuse();
 
+            let mut inbound = inbound_receive.fuse();
             loop {
                 // select the first future to complete after each iteration. Once we've both
                 // received all the blocks and the completion message we break out of it.
@@ -215,52 +241,64 @@ where
                          }
                     },
                     // protocol inbound messages are received first.
-                    ev = inbound_receive.select_next_some() => {
-                        match ev {
-                        NetMsg::Graphsync(msg) => {
-                            let blocks: Vec<Block<S::Params>> = msg
-                                .blocks
-                                .iter()
-                                .map_while(|(prefix, data)| {
-                                    let prefix = Prefix::new_from_bytes(prefix).ok()?;
-                                    let cid = prefix.to_cid(data).ok()?;
-                                    Some(Block::new_unchecked(cid, data.to_vec()))
-                                })
-                                .collect();
+                    // If the channel is closed before we recived all the messages something went
+                    // wrong i.e. the provider closed the connection.
+                    res = inbound.next().fuse() => match res {
+                        Some(ev) => {
+                            match ev {
+                                NetMsg::Graphsync(msg) => {
+                                    let blocks: Vec<Block<S::Params>> = msg
+                                        .blocks
+                                        .iter()
+                                        .map_while(|(prefix, data)| {
+                                            let prefix = Prefix::new_from_bytes(prefix).ok()?;
+                                            let cid = prefix.to_cid(data).ok()?;
+                                            Some(Block::new_unchecked(cid, data.to_vec()))
+                                        })
+                                        .collect();
 
-                            for block in blocks {
-                                sender.try_send(block).unwrap();
-                            }
-                        }
-                        NetMsg::Transfer(msg) => {
-                            // pull request clients should not receive requests
-                            assert!(!msg.is_rq);
-                            if let Some(DealResponse::Pull {
-                                status: _deal_status @ DealStatus::Completed,
-                                ..
-                            }) = msg.response.expect("to be a response").voucher
-                            {
-                                // check the last transition to see if we can clean up.
-                                state = state.transition(FsmEvent::Completed);
-                                if let Channel::Completed { .. } = state {
-                                    s.close_channel();
-                                    outbound.start_send(NetEvent::Cleanup { id, peer }).unwrap();
-                                    break;
+                                    for block in blocks {
+                                        sender.try_send(block).unwrap();
+                                    }
+                                }
+                                NetMsg::Transfer(msg) => {
+                                    // pull request clients should not receive requests
+                                    assert!(!msg.is_rq);
+                                    if let Some(DealResponse::Pull {
+                                        status: _deal_status @ DealStatus::Completed,
+                                        ..
+                                    }) = msg.response.expect("to be a response").voucher
+                                    {
+                                        // check the last transition to see if we can clean up.
+                                        state = state.transition(FsmEvent::Completed);
+                                        if let Channel::Completed { .. } = state {
+                                            s.close_channel();
+                                            outbound.start_send(NetEvent::Cleanup { id, peer }).unwrap();
+                                            break;
+                                        }
+                                    }
                                 }
                             }
                         }
+                        None => {
+                            s.start_send(Err(Error::from(ErrorKind::UnexpectedEof))).unwrap();
+                            break;
                         }
                     },
                 };
             }
-        });
+        }.boxed());
         // Wait to receive the content type before returning the stream
-        let content_type = or.await.map_err(|e| e.to_string())?;
+        let content_type = or.await.map_err(io_err)?;
         Ok(PullStream {
             content_type,
             channel: r,
         })
     }
+}
+
+fn io_err<E: Into<Box<dyn std::error::Error + Send + Sync>>>(e: E) -> Error {
+    Error::new(ErrorKind::Other, e)
 }
 
 enum NetMsg {
@@ -295,12 +333,18 @@ enum NetEvent {
     },
 }
 
-enum ChannelEvent {
-    Open {
-        id: RequestId,
-        chan: mpsc::Sender<NetMsg>,
-    },
-    Close(RequestId),
+struct Connection {
+    stream: Arc<StreamMuxerBox>,
+    requests: SmallVec<[RequestId; 4]>,
+}
+
+impl Connection {
+    fn new(stream: Arc<StreamMuxerBox>, req: RequestId) -> Self {
+        Self {
+            stream,
+            requests: SmallVec::from_vec(vec![req]),
+        }
+    }
 }
 
 // The connection loop is responsible for opening new streams with peer or sending to open
@@ -308,98 +352,164 @@ enum ChannelEvent {
 async fn conn_loop(
     mut events: mpsc::Receiver<NetEvent>,
     transport: Boxed<(PeerId, StreamMuxerBox)>,
-) -> Result<(), String> {
+) -> Result<(), Error> {
     // here we maintain a list of open connections with peers. If a peer isn't included in this
     // list we dial and open a new stream. Channel sends outbound messages.
-    let mut outbound: HashMap<PeerId, mpsc::Sender<NetMsg>> = HashMap::new();
+    let mut conns: HashMap<PeerId, Connection> = HashMap::new();
 
-    // here we maintain a list of channels listening for inbound messages for a given peer.
-    let mut inbound: HashMap<PeerId, mpsc::Sender<ChannelEvent>> = HashMap::new();
+    // channels for each request are maintained here
+    let mut inbound: HashMap<RequestId, mpsc::Sender<NetMsg>> = HashMap::new();
 
-    while let Some(ev) = events.next().await {
-        match ev {
-            NetEvent::NewRequest {
-                id,
-                peer,
-                maddr,
-                msg,
-                chan,
-            } => {
-                match (inbound.entry(peer), outbound.entry(peer)) {
-                    (Entry::Occupied(mut in_entry), Entry::Occupied(mut out_entry)) => {
-                        // We already have an open connection from a previous transfer
-                        in_entry
-                            .get_mut()
-                            .start_send(ChannelEvent::Open { id, chan })
-                            .map_err(|e| e.to_string())?;
+    // global inbound channel, all inbound messages are sent through
+    let (in_sender, mut in_receiver) = mpsc::channel(64);
 
-                        out_entry
-                            .get_mut()
-                            .start_send(msg)
-                            .map_err(|e| e.to_string())?;
-                    }
-                    (Entry::Vacant(in_entry), Entry::Vacant(out_entry)) => {
-                        // Dial and open a new general muxed stream.
-                        let (_peer, mux) = transport
-                            .clone()
-                            .dial(maddr)
-                            .map_err(|e| e.to_string())?
-                            .await
-                            .map_err(|e| e.to_string())?;
-                        let mux = Arc::new(mux);
-
-                        let (mut in_sender, in_receiver) = mpsc::channel(64);
-                        in_entry.insert(in_sender.clone());
-
-                        let inmux = mux.clone();
-                        spawn(async move {
-                            // This loop listens for inbound stream events and negociates for any of
-                            // the supported protocols.
-                            if let Err(e) = inbound_loop(in_receiver, inmux).await {
-                                println!("inbound error: {:?}", e);
+    loop {
+        select! {
+            // Receive all the messages for a single peer inbound stream and forward them to the
+            // corresponding channels.
+            result = in_receiver.select_next_some() => {
+                match result {
+                    Ok(msg) => match msg {
+                    NetMsg::Graphsync(msg) => {
+                        let req_ids: Vec<RequestId> =
+                            msg.responses.iter().map(|(_, r)| r.id).collect();
+                        for id in req_ids {
+                            if let Some(sender) = inbound.get_mut(&id) {
+                            // there might be a way to avoid cloning by sending
+                            // blocks separately.
+                            sender
+                                .try_send(NetMsg::Graphsync(msg.clone()))
+                                .map_err(io_err)?;
                             }
-                        });
-                        in_sender
-                            .start_send(ChannelEvent::Open { id, chan })
-                            .map_err(|e| e.to_string())?;
-
-                        // This channel sends outbound requests to an open stream.
-                        let (mut out_sender, out_receiver) = mpsc::channel(64);
-                        out_entry.insert(out_sender.clone());
-
-                        spawn(async move {
-                            // This loop receives messages we want to send to the stream over a given
-                            // protocol.
-                            if let Err(e) = outbound_loop(out_receiver, mux).await {
-                                println!("outbound error: {:?}", e);
-                            }
-                        });
-
-                        // Send the first request message attached to the request event.
-                        out_sender.start_send(msg).map_err(|e| e.to_string())?;
+                        }
                     }
-                    // both in and out should always be open for now
-                    (_, _) => unreachable!(),
+                    NetMsg::Transfer(msg) => {
+                        // make sure the message isn't empty
+                        if let (None, None) = (&msg.request, &msg.response) {
+                            continue;
+                        }
+                        // requests shouldn't be sent individually unless they're push
+                        if msg.is_rq {
+                            unimplemented!("TODO");
+                        } else {
+                            let id = msg.response.as_ref().expect("to be a response").transfer_id;
+                            if let Some(sender) = inbound.get_mut(&(id as i32)) {
+                                sender
+                                    .try_send(NetMsg::Transfer(msg))
+                                    .map_err(io_err)?;
+                            }
+                        }
+                    }
+                    },
+                    Err(e) => {
+                        let e: InboundError = e;
+                        // The peer disconnected so we remove the muxer and shut down any
+                        // open channels.
+                        match e.err.kind() {
+                            ErrorKind::UnexpectedEof
+                            | ErrorKind::BrokenPipe
+                            | ErrorKind::ConnectionReset => {
+                                if let Some(peer) = e.peer {
+                                    if let Some(conn) = conns.remove(&peer) {
+                                        for id in conn.requests {
+                                            if let Some(mut sender) = inbound.remove(&id) {
+                                                sender.close_channel();
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            _ => println!("muxer error {:?}", e),
+                        }
+                    }
                 };
-            }
-            // This event can be used to send a "oneshot" message to a given peer without expecting
-            // any response.
-            NetEvent::Message { peer, msg } => {
-                if let Some(sender) = outbound.get_mut(&peer) {
-                    sender.start_send(msg).map_err(|e| e.to_string())?;
+            },
+            ev = events.select_next_some() => {
+            match ev {
+                NetEvent::NewRequest {
+                    id,
+                    peer,
+                    maddr,
+                    msg,
+                    chan,
+                } => {
+                    match conns.entry(peer) {
+                        Entry::Occupied(mut entry) => {
+                            // We already have an open connection from a previous transfer
+                            inbound.insert(id, chan);
+
+                            // keep track of ongoing requests with the connection
+                            let conn = entry.get_mut();
+                            conn.requests.push(id);
+                            let mux = conn.stream.clone();
+                            spawn(async move {
+                                if let Err(e) = outbound_write(msg, mux).await {
+                                    log::info!("failed to write outbound: {:?}", e);
+                                }
+                            });
+                        }
+                        Entry::Vacant(entry) => {
+                            // Dial and open a new general muxed stream.
+                            let (_peer, mux) = transport
+                                .clone()
+                                .dial(maddr)
+                                .map_err(io_err)?
+                                .await
+                                .map_err(io_err)?;
+                            let mux = Arc::new(mux);
+
+                            inbound.insert(id, chan);
+
+                            let inmux = mux.clone();
+                            let mut inbound_send = in_sender.clone();
+                            spawn(async move {
+                                // This loop listens for inbound stream events and negociates for any of
+                                // the supported protocols.
+                                if let Err(e) = inbound_loop(inbound_send.clone(), inmux).await {
+                                    println!("inbound error: {:?}", e);
+                                    inbound_send
+                                        .try_send(Err(InboundError { err: e, peer: Some(peer) }))
+                                        .unwrap();
+                                }
+                            });
+
+                            let outmux = mux.clone();
+                            spawn(async move {
+                                if let Err(e) = outbound_write(msg, outmux).await {
+                                    log::info!("failed to write outbound: {:?}", e);
+                                }
+                            });
+
+                            entry.insert(Connection::new(mux, id));
+                        }
+                    };
+                }
+                // This event can be used to send a "oneshot" message to a given peer without expecting
+                // any response.
+                NetEvent::Message { peer, msg } => {
+                    if let Some(conn) = conns.get(&peer) {
+                        let outmux = conn.stream.clone();
+                        spawn(async move {
+                            if let Err(e) = outbound_write(msg, outmux).await {
+                                log::info!("failed to write outbound: {:?}", e);
+                            }
+                        });
+                    }
+                }
+                // Close any existing channel for a given request
+                NetEvent::Cleanup { id, peer } => {
+                    if let Some(conn) = conns.get_mut(&peer) {
+                        conn.requests.sort();
+                        if let Ok(idx) = conn.requests.binary_search(&id) {
+                            conn.requests.remove(idx);
+                        }
+                    }
+                    inbound.remove(&id);
                 }
             }
-            // Close any existing channel for a given request
-            NetEvent::Cleanup { id, peer } => {
-                if let Some(sender) = inbound.get_mut(&peer) {
-                    sender
-                        .start_send(ChannelEvent::Close(id))
-                        .map_err(|e| e.to_string())?;
-                }
-            }
+        },
         }
     }
-    Ok(())
 }
 
 enum Protocols {
@@ -416,122 +526,109 @@ impl ProtocolName for Protocols {
     }
 }
 
+#[derive(Debug)]
+struct InboundError {
+    peer: Option<PeerId>,
+    err: Error,
+}
+
 // The inbound loop listens for any muxer inbound event. If an event is received it will try
 // negociating the protocol if supported and send it to the main inbound channel.
+// If an error is polled from the inbound, the loop will terminate and return the error.
 async fn inbound_loop(
-    mut channels: mpsc::Receiver<ChannelEvent>,
+    messages: mpsc::Sender<Result<NetMsg, InboundError>>,
     mux: Arc<StreamMuxerBox>,
-) -> Result<(), String> {
-    let mut open_channels: HashMap<RequestId, mpsc::Sender<NetMsg>> = HashMap::new();
+) -> Result<(), Error> {
     let protos: SmallVec<[Vec<u8>; 2]> = vec![Protocols::Graphsync, Protocols::DataTransfer]
         .into_iter()
         .map(|p| p.protocol_name().to_vec())
         .collect();
-    let mut mux_futures = FuturesUnordered::new();
-    mux_futures.push(event_from_ref_and_wrap(mux.clone()));
-    loop {
-        select! {
-            channel_evt = channels.select_next_some() => {
-                match channel_evt {
-                    ChannelEvent::Open { id, chan } => {
-                        open_channels.insert(id, chan);
-                    }
-                    ChannelEvent::Close(id) => {
-                        open_channels.remove(&id);
-                    }
-                }
-            },
-            event = mux_futures.select_next_some() => {
-                mux_futures.push(event_from_ref_and_wrap(mux.clone()));
-                if let Some(inbound) = event.map_err(|e| e.to_string())?.into_inbound_substream() {
-                    match listener_select_proto(inbound, protos.clone().into_iter()).await {
-                        Ok((proto, mut io)) => match proto {
-                            // handle graphsync protocol messages
-                            gs_proto if gs_proto == Protocols::Graphsync.protocol_name() => {
-                                let mut codec = GraphsyncCodec::<DefaultParams>::default();
-                                // the response stream usually contains multiple messages
-                                while let Ok(msg) = codec.read_message(&GraphsyncProtocol, &mut io).await {
-                                    let req_ids: Vec<RequestId> =
-                                        msg.responses.iter().map(|(_, r)| r.id).collect();
-                                    for id in req_ids {
-                                        if let Some(sender) = open_channels.get_mut(&id) {
-                                            // there might be a way to avoid cloning by sending
-                                            // blocks separately.
-                                            sender
-                                                .try_send(NetMsg::Graphsync(msg.clone()))
-                                                .map_err(|e| e.to_string())?;
-                                        }
-                                    }
-                                }
-                                io.close().await.map_err(|e| e.to_string())?;
-                            }
-                            dt_proto if dt_proto == Protocols::DataTransfer.protocol_name() => {
-                                let mut buf = Vec::new();
-                                io.read_to_end(&mut buf).await.map_err(|e| e.to_string())?;
-                                io.close().await.map_err(|e| e.to_string())?;
-                                let msg = TransferMessage::unmarshal_cbor(&buf)
-                                    .map_err(|_| "Failed to decode CBOR message".to_string())?;
-                                // make sure the message isn't empty
-                                if let (None, None) = (&msg.request, &msg.response) {
-                                    continue;
-                                }
-                                // requests shouldn't be sent individually unless they're push
-                                if msg.is_rq {
-                                    unimplemented!("TODO");
-                                } else {
-                                    let id = msg.response.as_ref().expect("to be a response").transfer_id;
-                                    if let Some(sender) = open_channels.get_mut(&(id as i32)) {
-                                        sender
-                                            .start_send(NetMsg::Transfer(msg))
-                                            .map_err(|e| e.to_string())?;
-                                    }
-                                }
-                            }
-                            _ => unreachable!(),
-                        },
-                        Err(_) => continue,
+    while let Some(inbound) = event_from_ref_and_wrap(mux.clone())
+        .await?
+        .into_inbound_substream()
+    {
+        let ps = protos.clone();
+        let sender = messages.clone();
+        spawn(async move {
+            match listener_select_proto(inbound, ps.into_iter()).await {
+                Ok((proto, mut io)) => {
+                    let mut send_err = sender.clone();
+                    if let Err(e) = read_proto(&mut io, &proto, sender).await {
+                        send_err
+                            .try_send(Err(InboundError { err: e, peer: None }))
+                            .unwrap();
                     }
                 }
-            },
-        };
+                Err(_) => {
+                    // We received inbound messages for unsuported protocols: Ignore.
+                }
+            }
+        });
     }
+    Ok(())
 }
 
-async fn outbound_loop(
-    mut messages: mpsc::Receiver<NetMsg>,
-    mux: Arc<StreamMuxerBox>,
-) -> Result<(), String> {
-    while let Some(msg) = messages.next().await {
-        let outbound = outbound_from_ref_and_wrap(mux.clone())
-            .await
-            .map_err(|e| e.to_string())?;
-
-        let (_proto, mut io) = dialer_select_proto(
-            outbound,
-            vec![msg.protocol_name()].into_iter(),
-            multistream_select::Version::V1,
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-
-        match msg {
-            NetMsg::Graphsync(msg) => {
-                let mut codec = GraphsyncCodec::<DefaultParams>::default();
-                codec
-                    .write_message(&GraphsyncProtocol, &mut io, msg)
-                    .await
-                    .map_err(|e| e.to_string())?;
-                io.close().await.map_err(|e| e.to_string())?;
+async fn read_proto<R>(
+    io: &mut R,
+    proto: &[u8],
+    mut sender: mpsc::Sender<Result<NetMsg, InboundError>>,
+) -> Result<(), Error>
+where
+    R: AsyncRead + AsyncWrite + Unpin + Send,
+{
+    match proto {
+        // handle graphsync protocol messages
+        gs_proto if gs_proto == Protocols::Graphsync.protocol_name() => {
+            let mut codec = GraphsyncCodec::<DefaultParams>::default();
+            // the response stream usually contains multiple messages
+            while let Ok(msg) = codec.read_message(&GraphsyncProtocol, io).await {
+                // there might be a way to avoid cloning by sending
+                // blocks separately.
+                sender
+                    .try_send(Ok(NetMsg::Graphsync(msg)))
+                    .map_err(io_err)?;
             }
-            NetMsg::Transfer(_msg) => (),
+            io.close().await?;
         }
+        dt_proto if dt_proto == Protocols::DataTransfer.protocol_name() => {
+            let mut buf = Vec::new();
+            io.read_to_end(&mut buf).await?;
+            io.close().await?;
+            let msg = TransferMessage::unmarshal_cbor(&buf).map_err(io_err)?;
+            // make sure the message isn't empty
+            sender.try_send(Ok(NetMsg::Transfer(msg))).map_err(io_err)?;
+        }
+        _ => unreachable!(),
+    };
+    Ok(())
+}
+
+async fn outbound_write(msg: NetMsg, mux: Arc<StreamMuxerBox>) -> Result<(), Error> {
+    let outbound = outbound_from_ref_and_wrap(mux).await?;
+
+    let (_proto, mut io) = dialer_select_proto(
+        outbound,
+        vec![msg.protocol_name()].into_iter(),
+        multistream_select::Version::V1,
+    )
+    .await?;
+
+    match msg {
+        NetMsg::Graphsync(msg) => {
+            let mut codec = GraphsyncCodec::<DefaultParams>::default();
+            codec
+                .write_message(&GraphsyncProtocol, &mut io, msg)
+                .await?;
+            io.close().await?;
+        }
+        NetMsg::Transfer(_msg) => (),
     }
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::super::DataTransferBehaviour;
+    use super::super::{DataTransferBehaviour, DataTransferEvent};
     use super::*;
     use async_std::task;
     use blockstore::memory::MemoryDB as MemoryBlockStore;
@@ -553,6 +650,7 @@ mod tests {
     use libp2p::tcp::TcpConfig;
     use libp2p::{mplex, PeerId, Swarm, Transport};
     use rand::prelude::*;
+    use std::thread;
     use std::time::Duration;
 
     fn mk_transport() -> (PeerId, Boxed<(PeerId, StreamMuxerBox)>) {
@@ -603,12 +701,19 @@ mod tests {
             &mut self.swarm
         }
 
-        fn spawn(mut self, _name: &'static str) -> PeerId {
+        fn spawn(mut self, name: &'static str) -> PeerId {
             let peer_id = self.peer_id;
             task::spawn(async move {
                 loop {
                     let event = self.swarm.next().await;
                     println!("event {:?}", event);
+                    if name == "drop_completed" {
+                        if let Some(SwarmEvent::Behaviour(DataTransferEvent::Completed(_, _))) =
+                            event
+                        {
+                            break;
+                        }
+                    }
                 }
             });
             peer_id
@@ -653,7 +758,7 @@ mod tests {
         let (peer2, trans) = mk_transport();
         let store2 = Arc::new(MemoryBlockStore::default());
 
-        let client = Client::new(store2, trans);
+        let client = Client::new(store2, trans, default_executor().unwrap());
 
         let maddr1 = maddr1.with(multiaddr::Protocol::P2p(peer1.into()));
 
@@ -723,5 +828,63 @@ mod tests {
                 assert_eq!(output, data4);
             }
         );
+    }
+
+    // This test disconnects the peer right after completing leaving no time for the client
+    // to read the remaining of the inbound messages.
+    #[async_std::test]
+    async fn test_client_disconnect() {
+        use futures::join;
+
+        let peer1 = Peer::new();
+
+        let store = peer1.store.clone();
+        let maddr1 = peer1.addr.clone();
+        let peer1 = peer1.spawn("drop_completed");
+
+        const FILE_SIZE: usize = 1024 * 1024;
+        let mut data1 = vec![0u8; FILE_SIZE];
+        rand::thread_rng().fill_bytes(&mut data1);
+
+        let root1 = add(store.clone(), &data1).unwrap().unwrap();
+
+        let selector = Selector::ExploreRecursive {
+            limit: RecursionLimit::None,
+            sequence: Box::new(Selector::ExploreAll {
+                next: Box::new(Selector::ExploreRecursiveEdge),
+            }),
+            current: None,
+        };
+
+        let (peer2, trans) = mk_transport();
+        let store2 = Arc::new(MemoryBlockStore::default());
+
+        let client = Client::new(store2, trans, default_executor().unwrap());
+
+        let maddr1 = maddr1.with(multiaddr::Protocol::P2p(peer1.into()));
+
+        match client
+            .pull(
+                peer1,
+                maddr1.clone(),
+                root1,
+                selector.clone(),
+                Default::default(),
+            )
+            .await
+        {
+            Ok(stream) => {
+                let mut reader = stream.reader();
+                let mut output: Vec<u8> = Vec::new();
+                if let Err(e) = reader.read_to_end(&mut output).await {
+                    assert_eq!(e.kind(), ErrorKind::UnexpectedEof);
+                } else {
+                    panic!("transfer should be interupted");
+                }
+            }
+            Err(e) => {
+                assert_eq!(e.kind(), ErrorKind::Other);
+            }
+        };
     }
 }

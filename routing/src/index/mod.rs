@@ -210,6 +210,15 @@ mod tests {
     }
 
     #[test]
+    fn can_use_as_set() {
+        let store = Arc::new(MemoryDB::default());
+        let mut hamt = Hamt::<_, (), _>::new(store.clone());
+        hamt.set(1, ()).unwrap();
+
+        assert_eq!(hamt.get(&1).unwrap(), Some(&()));
+    }
+
+    #[test]
     fn test_load() {
         let store = Arc::new(MemoryDB::default());
 

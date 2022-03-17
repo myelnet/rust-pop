@@ -1,4 +1,4 @@
-use crate::discovery::SerializablePeerTable;
+use crate::discovery::PeerTable;
 use filecoin::{cid_helpers::CidCbor, types::Cbor};
 use futures::future::BoxFuture;
 use futures::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -21,7 +21,7 @@ use std::{
 #[derive(Debug, Clone, PartialEq, Serialize_tuple, Deserialize_tuple, Default)]
 pub struct RoutingRecord {
     pub root: CidCbor,
-    pub peers: Option<SerializablePeerTable>,
+    pub peers: Option<PeerTable>,
 }
 
 impl Cbor for RoutingRecord {}
@@ -141,11 +141,7 @@ impl RoutingNetwork {
         }
     }
 
-    fn try_send_message(
-        &mut self,
-        peer: &PeerId,
-        message: RoutingRecord,
-    ) -> Option<RoutingRecord> {
+    fn try_send_message(&mut self, peer: &PeerId, message: RoutingRecord) -> Option<RoutingRecord> {
         if let Some(connections) = self.connected.get_mut(peer) {
             if connections.is_empty() {
                 return Some(message);

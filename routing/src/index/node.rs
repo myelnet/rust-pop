@@ -213,7 +213,7 @@ where
     }
 
     /// Internal method to add data
-    fn add_value<S: BlockStore, F: Clone + FnOnce(&mut V) -> (Option<V>, bool)>(
+    fn add<S: BlockStore, F: Clone + FnOnce(&mut V) -> (Option<V>, bool)>(
         &mut self,
         hashed_key: &mut HashBits,
         bit_width: u32,
@@ -249,22 +249,15 @@ where
                 cache.get_or_try_init(res)?;
                 let child_node = cache.get_mut().expect("filled line above");
 
-                let (old, modified) = child_node.add_value(
-                    hashed_key,
-                    bit_width,
-                    depth + 1,
-                    func,
-                    key,
-                    value,
-                    store,
-                )?;
+                let (old, modified) =
+                    child_node.add(hashed_key, bit_width, depth + 1, func, key, value, store)?;
                 if modified {
                     *child = Pointer::Dirty(std::mem::take(child_node));
                 }
                 Ok((old, modified))
             }
             Pointer::Dirty(n) => {
-                Ok(n.add_value(hashed_key, bit_width, depth + 1, func, key, value, store)?)
+                Ok(n.add(hashed_key, bit_width, depth + 1, func, key, value, store)?)
             }
             Pointer::Values(vals) => {
                 // Update, if the key already exists.
@@ -276,7 +269,7 @@ where
                 if vals.len() >= MAX_ARRAY_WIDTH {
                     let mut sub = Node::<K, V>::default();
                     let consumed = hashed_key.consumed;
-                    let modified = sub.add_value(
+                    let modified = sub.add(
                         hashed_key,
                         bit_width,
                         depth + 1,
@@ -288,7 +281,7 @@ where
                     let kvs = std::mem::take(vals);
                     for p in kvs.into_iter() {
                         let hash = Sha256::hash(p.key());
-                        sub.add_value(
+                        sub.add(
                             &mut HashBits::new_at_index(&hash, consumed),
                             bit_width,
                             depth + 1,
@@ -341,7 +334,7 @@ where
             }
         };
 
-        self.add_value(hashed_key, bit_width, depth, func, key, value, store)
+        self.add(hashed_key, bit_width, depth, func, key, value, store)
     }
 
     /// Internal method to modify values that are extensible.
@@ -368,11 +361,11 @@ where
             }
         };
 
-        self.add_value(hashed_key, bit_width, depth, func, key, value, store)
+        self.add(hashed_key, bit_width, depth, func, key, value, store)
     }
 
     /// Internal method to delete data.
-    fn sub_value<Q: ?Sized, S: BlockStore, F: FnOnce(&mut Vec<KeyValuePair<K, V>>) -> bool>(
+    fn del<Q: ?Sized, S: BlockStore, F: FnOnce(&mut Vec<KeyValuePair<K, V>>) -> bool>(
         &mut self,
         hashed_key: &mut HashBits,
         bit_width: u32,
@@ -408,7 +401,7 @@ where
                 let child_node = cache.get_mut().expect("filled line above");
 
                 let deleted =
-                    child_node.sub_value(hashed_key, bit_width, depth + 1, func, key, store)?;
+                    child_node.del(hashed_key, bit_width, depth + 1, func, key, store)?;
                 if deleted {
                     *child = Pointer::Dirty(std::mem::take(child_node));
 
@@ -420,7 +413,7 @@ where
             }
             Pointer::Dirty(n) => {
                 // Delete value and return deleted value
-                let deleted = n.sub_value(hashed_key, bit_width, depth + 1, func, key, store)?;
+                let deleted = n.del(hashed_key, bit_width, depth + 1, func, key, store)?;
 
                 // Clean to ensure canonical form
                 child.clean()?;
@@ -471,7 +464,7 @@ where
             false
         };
 
-        self.sub_value(hashed_key, bit_width, depth, func, key, store)
+        self.del(hashed_key, bit_width, depth, func, key, store)
     }
 
     /// Internal method to delete values.
@@ -500,7 +493,7 @@ where
             false
         };
 
-        self.sub_value(hashed_key, bit_width, depth, func, key, store)
+        self.del(hashed_key, bit_width, depth, func, key, store)
     }
 
     pub fn flush<S: BlockStore>(&mut self, store: Arc<S>) -> Result<(), Error> {

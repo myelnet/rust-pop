@@ -169,10 +169,7 @@ where
                     if vals[i].1.is_empty() {
                         vals.remove(i);
                         return true;
-                    } else {
-                        //  didn't remove the entire K,V pair so don't need to clean node
-                        return false;
-                    };
+                    }
                 }
             }
 
@@ -181,7 +178,6 @@ where
 
         self.del(&mut HashBits::new(&hash), bit_width, 0, func, key, store)
     }
-
 
     pub fn remove_entry<Q: ?Sized, S>(
         &mut self,
@@ -210,23 +206,22 @@ where
         self.del(&mut HashBits::new(&hash), bit_width, 0, func, key, store)
     }
 
-
-        pub fn get<Q: ?Sized, S: BlockStore>(
-            &self,
-            k: &Q,
-            store: Arc<S>,
-            bit_width: u32,
-        ) -> Result<Option<&V>, Error>
-        where
-            K: Borrow<Q>,
-            Q: Eq + Hash,
-        {
-            let hash = Sha256::hash(k);
-            let value = self
-                .get_value(&mut HashBits::new(&hash), bit_width, 0, k, store)?
-                .map(|kv| kv.value());
-            Ok(value)
-        }
+    pub fn get<Q: ?Sized, S: BlockStore>(
+        &self,
+        k: &Q,
+        store: Arc<S>,
+        bit_width: u32,
+    ) -> Result<Option<&V>, Error>
+    where
+        K: Borrow<Q>,
+        Q: Eq + Hash,
+    {
+        let hash = Sha256::hash(k);
+        let value = self
+            .get_value(&mut HashBits::new(&hash), bit_width, 0, k, store)?
+            .map(|kv| kv.value());
+        Ok(value)
+    }
 
     pub fn is_empty(&self) -> bool {
         self.pointers.is_empty()

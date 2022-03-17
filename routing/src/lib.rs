@@ -28,7 +28,7 @@ pub type LocalIndex<B> = index::Hamt<B, ()>;
 pub type Index<B> = Arc<Mutex<index::Hamt<B, PeerTable>>>;
 
 pub const ROUTING_TOPIC: &str = "myel/content-routing";
-pub const SYNCING_TOPIC: &str = "myel/index-syncing";
+pub const INDEX_TOPIC: &str = "myel/index-updates";
 
 pub fn tcid(v: Cid) -> index::BytesKey {
     index::BytesKey(v.to_bytes())
@@ -99,7 +99,7 @@ impl<B: 'static + BlockStore> Routing<B> {
             config.peer_id,
             Vec::from([
                 IdentTopic::new(ROUTING_TOPIC),
-                IdentTopic::new(SYNCING_TOPIC),
+                IdentTopic::new(INDEX_TOPIC),
             ]),
         );
 
@@ -129,7 +129,7 @@ impl<B: 'static + BlockStore> Routing<B> {
         // cloned anyway
         self.broadcaster
             .publish(
-                IdentTopic::new(SYNCING_TOPIC),
+                IdentTopic::new(INDEX_TOPIC),
                 msg.marshal_cbor().map_err(|e| e.to_string())?,
             )
             .map_err(|e| e.to_string())?;
@@ -353,7 +353,7 @@ impl<B: 'static + BlockStore> NetworkBehaviourEventProcess<GossipsubEvent> for R
                 if let Some(s) = message.source {
                     if message.topic == IdentTopic::new(ROUTING_TOPIC).hash() {
                         self.process_routing_request(s, message).unwrap();
-                    } else if message.topic == IdentTopic::new(SYNCING_TOPIC).hash() {
+                    } else if message.topic == IdentTopic::new(INDEX_TOPIC).hash() {
                         self.process_sync_request(s, message).unwrap();
                     }
                 }

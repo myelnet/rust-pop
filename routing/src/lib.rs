@@ -70,19 +70,6 @@ pub struct RoutingConfig {
     pub peer_id: PeerId,
 }
 
-impl index::ShrinkableMap<PeerIdCbor, Vec<Multiaddr>> for PeerTable {
-    fn remove(&mut self, k: &PeerIdCbor) -> Option<Vec<Multiaddr>> {
-        self.remove(k)
-    }
-    fn contains_key(&self, k: &PeerIdCbor) -> bool {
-        self.contains_key(k)
-    }
-
-    fn is_empty(&self) -> bool {
-        self.is_empty()
-    }
-}
-
 #[derive(NetworkBehaviour)]
 #[behaviour(out_event = "RoutingEvent", poll_method = "poll", event_process = true)]
 pub struct Routing<B: 'static + BlockStore> {

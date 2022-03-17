@@ -1,4 +1,5 @@
 use crate::cbor_helpers::PeerIdCbor;
+use crate::index::ShrinkableMap;
 use async_std::io;
 use async_trait::async_trait;
 use filecoin::cid_helpers::CidCbor;
@@ -27,6 +28,19 @@ use std::time::Duration;
 
 pub type RequestId = i32;
 pub type PeerTable = HashMap<PeerIdCbor, Vec<Multiaddr>>;
+
+impl ShrinkableMap<PeerIdCbor, Vec<Multiaddr>> for PeerTable {
+    fn remove(&mut self, k: &PeerIdCbor) -> Option<Vec<Multiaddr>> {
+        self.remove(k)
+    }
+    fn contains_key(&self, k: &PeerIdCbor) -> bool {
+        self.contains_key(k)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.is_empty()
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct HubDiscoveryProtocol;

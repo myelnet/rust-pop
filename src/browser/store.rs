@@ -13,7 +13,7 @@ pub async fn open_cache_store() -> Result<Cache, JsValue> {
     Ok(result.unchecked_into::<Cache>())
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct CacheStore;
 
 impl BlockStore for CacheStore {

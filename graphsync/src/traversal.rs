@@ -758,7 +758,7 @@ pub struct AsyncLoader<S: BlockStore, F> {
 
 impl<S: BlockStore, F> AsyncLoader<S, F>
 where
-    F: Fn(BlockData) -> Result<(), String> + Send + Sync,
+    F: FnMut(BlockData) -> Result<(), String> + Send + Sync,
     Ipld: Decode<<S::Params as StoreParams>::Codecs>,
 {
     pub fn new(store: Arc<S>, cb: F) -> Self {
@@ -818,7 +818,7 @@ where
 #[async_trait]
 impl<S: BlockStore, F> LinkLoader for AsyncLoader<S, F>
 where
-    F: Fn(BlockData) -> Result<(), String> + Send + Sync,
+    F: FnMut(BlockData) -> Result<(), String> + Send + Sync,
     Ipld: Decode<<S::Params as StoreParams>::Codecs>,
 {
     async fn load_link(&mut self, link: &Cid) -> Result<Option<Ipld>, String> {

@@ -16,8 +16,8 @@ use libp2p::core::transport::Boxed;
 use libp2p::noise::{Keypair, NoiseConfig, X25519Spec};
 use libp2p::swarm::SwarmEvent;
 use libp2p::tcp::TcpConfig;
-use libp2p::yamux::YamuxConfig;
 use libp2p::{identity, Multiaddr};
+use libp2p::{mplex, multiaddr};
 use libp2p::{PeerId, Swarm, Transport};
 use pprof::criterion::{Output, PProfProfiler};
 use rand::prelude::*;
@@ -36,7 +36,7 @@ fn mk_transport() -> (PeerId, Boxed<(PeerId, StreamMuxerBox)>) {
         .nodelay(true)
         .upgrade(libp2p::core::upgrade::Version::V1)
         .authenticate(noise)
-        .multiplex(YamuxConfig::default())
+        .multiplex(mplex::MplexConfig::new())
         .timeout(Duration::from_secs(20))
         .boxed();
     (peer_id, transport)

@@ -1,3 +1,4 @@
+pub mod client;
 mod fsm;
 pub mod mimesniff;
 mod network;
@@ -361,6 +362,8 @@ impl DataTransfer {
                             };
                             self.pending_events
                                 .push_back(DataTransferEvent::DtOutbound(peer, tmsg));
+                            self.pending_events
+                                .push_back(DataTransferEvent::Completed(ch_id, Ok(())));
                         }
                         _ => {}
                     }
@@ -622,8 +625,7 @@ mod tests {
     use libp2p::noise::{Keypair, NoiseConfig, X25519Spec};
     use libp2p::swarm::SwarmEvent;
     use libp2p::tcp::TcpConfig;
-    use libp2p::yamux::YamuxConfig;
-    use libp2p::{PeerId, Swarm, Transport};
+    use libp2p::{mplex, multiaddr, PeerId, Swarm, Transport};
     use rand::prelude::*;
     use std::time::Duration;
 
@@ -639,7 +641,7 @@ mod tests {
             .nodelay(true)
             .upgrade(libp2p::core::upgrade::Version::V1)
             .authenticate(noise)
-            .multiplex(YamuxConfig::default())
+            .multiplex(mplex::MplexConfig::new())
             .timeout(Duration::from_secs(20))
             .boxed();
         (peer_id, transport)

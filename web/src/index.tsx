@@ -57,23 +57,18 @@ function Spinner() {
 
 class Client {
   node: any;
-  pool: any;
   constructor() {
     //@ts-ignore
-    const { Node, WorkerPool } = wasm_bindgen;
+    const { Node } = wasm_bindgen;
     this.node = new Node();
-    this.pool = new WorkerPool(2);
   }
   fetch(path: string, maddr: string): Promise<Response> {
     const parts = maddr.split("/p2p/");
-    return this.node.spawn_request(
-      {
-        maddress: parts[0],
-        peerId: parts[1],
-        cid: path,
-      },
-      this.pool
-    );
+    return this.node.spawn_request({
+      maddress: maddr,
+      peerId: parts[1],
+      cid: path,
+    });
   }
 }
 

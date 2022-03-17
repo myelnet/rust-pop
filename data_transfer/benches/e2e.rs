@@ -5,7 +5,10 @@ use criterion::BenchmarkId;
 use criterion::Criterion;
 use criterion::{criterion_group, criterion_main, BatchSize, Throughput};
 use dag_service::add;
-use data_transfer::{DataTransfer, DataTransferEvent};
+use data_transfer::{
+    client::{default_executor, Client},
+    DataTransferBehaviour, DataTransferEvent,
+};
 use futures::prelude::*;
 use graphsync::{
     traversal::{RecursionLimit, Selector},
@@ -17,11 +20,9 @@ use libp2p::core::transport::Boxed;
 use libp2p::noise::{Keypair, NoiseConfig, X25519Spec};
 use libp2p::swarm::SwarmEvent;
 use libp2p::tcp::TcpConfig;
-use libp2p::yamux::YamuxConfig;
-use libp2p::{identity, Multiaddr};
+use libp2p::{identity, mplex, multiaddr, Multiaddr};
 use libp2p::{PeerId, Swarm, Transport};
 use rand::prelude::*;
-use routing::PeerDiscovery;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -37,7 +38,7 @@ fn mk_transport() -> (PeerId, Boxed<(PeerId, StreamMuxerBox)>) {
         .nodelay(true)
         .upgrade(libp2p::core::upgrade::Version::V1)
         .authenticate(noise)
-        .multiplex(YamuxConfig::default())
+        .multiplex(mplex::MplexConfig::new())
         .timeout(Duration::from_secs(20))
         .boxed();
     (peer_id, transport)
@@ -46,15 +47,14 @@ fn mk_transport() -> (PeerId, Boxed<(PeerId, StreamMuxerBox)>) {
 struct Peer {
     peer_id: PeerId,
     addr: Multiaddr,
-    swarm: Swarm<DataTransfer<MemoryDB>>,
+    swarm: Swarm<DataTransferBehaviour<MemoryDB>>,
 }
 
 impl Peer {
     fn new(store: Arc<MemoryDB>) -> Self {
         let (peer_id, trans) = mk_transport();
         let gs = Graphsync::new(Default::default(), store.clone());
-        let pd = PeerDiscovery::new(Default::default(), peer_id);
-        let dt = DataTransfer::new(peer_id, gs, pd);
+        let dt = DataTransferBehaviour::new(peer_id, gs);
         let mut swarm = Swarm::new(trans, dt, peer_id);
         Swarm::listen_on(&mut swarm, "/ip4/127.0.0.1/tcp/0".parse().unwrap()).unwrap();
         while swarm.next().now_or_never().is_some() {}
@@ -72,7 +72,7 @@ impl Peer {
             .add_address(&peer.peer_id, peer.addr.clone());
     }
 
-    fn swarm(&mut self) -> &mut Swarm<DataTransfer<MemoryDB>> {
+    fn swarm(&mut self) -> &mut Swarm<DataTransferBehaviour<MemoryDB>> {
         &mut self.swarm
     }
 
@@ -152,6 +152,47 @@ fn bench_transfer(c: &mut Criterion) {
                                 }
                                 _ => {}
                             }
+                        }
+                    }
+                },
+                BatchSize::SmallInput,
+            );
+        });
+        group.bench_with_input(BenchmarkId::new("client", size), size, move |b, &size| {
+            b.iter_batched(
+                || prepare_blocks(size),
+                |dag| async move {
+                    let peer1 = Peer::new(dag.store);
+                    let maddr1 = peer1.addr.clone();
+                    let peer1 = peer1.spawn("peer1");
+
+                    let (peer2, trans) = mk_transport();
+                    let store = Arc::new(MemoryDB::default());
+
+                    let client = Client::new(store, trans, default_executor().unwrap());
+
+                    let selector = Selector::ExploreRecursive {
+                        limit: RecursionLimit::None,
+                        sequence: Box::new(Selector::ExploreAll {
+                            next: Box::new(Selector::ExploreRecursiveEdge),
+                        }),
+                        current: None,
+                    };
+
+                    let maddr1 = maddr1.with(multiaddr::Protocol::P2p(peer1.into()));
+
+                    let stream = client
+                        .pull(peer1, maddr1, dag.root, selector, Default::default())
+                        .await
+                        .unwrap();
+                    let mut reader = stream.reader();
+
+                    let mut output: Vec<u8> = Vec::new();
+                    loop {
+                        if let Ok(_) = reader.read(&mut output).await {
+                            output = Vec::new();
+                        } else {
+                            break;
                         }
                     }
                 },

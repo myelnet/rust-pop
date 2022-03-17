@@ -1,4 +1,4 @@
-use libp2p::{PeerId};
+use libp2p::PeerId;
 use serde_tuple::{Deserialize_tuple, Serialize_tuple};
 use std::fmt;
 

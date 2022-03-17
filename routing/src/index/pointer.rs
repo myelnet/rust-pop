@@ -1,6 +1,3 @@
-// Copyright 2019-2022 ChainSafe Systems
-// SPDX-License-Identifier: Apache-2.0, MIT
-
 use super::node::Node;
 use super::{hash::Hash, Error, KeyValuePair, MAX_ARRAY_WIDTH};
 use filecoin::cid_helpers::CidCbor;

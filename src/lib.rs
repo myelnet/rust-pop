@@ -19,8 +19,8 @@ use libp2p::swarm::{
 };
 use libp2p::{Multiaddr, NetworkBehaviour, PeerId};
 use routing::{
-    PeerTable, Routing, RoutingConfig as PopConfig, RoutingEvent, RoutingTableEntry,
-    SerializablePeerTable, EMPTY_QUEUE_SHRINK_THRESHOLD,
+    PeerTable, PeerTable, Routing, RoutingConfig as PopConfig, RoutingEvent, RoutingTableEntry,
+    EMPTY_QUEUE_SHRINK_THRESHOLD,
 };
 use serde_tuple::{Deserialize_tuple, Serialize_tuple};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -28,7 +28,7 @@ use std::sync::{Arc, RwLock};
 use std::task::{Context, Poll};
 pub type Index = HashMap<Cid, PeerTable>;
 pub type LocalIndex = HashSet<Cid>;
-pub type SerializableIndex = HashMap<Vec<u8>, SerializablePeerTable>;
+pub type SerializableIndex = HashMap<Vec<u8>, PeerTable>;
 pub type SerializableLocalIndex = HashSet<Vec<u8>>;
 use data_transfer::{ChannelId, DataTransferBehaviour, DataTransferEvent, PullParams};
 use graphsync::Graphsync;
@@ -76,7 +76,7 @@ where
         Self {
             data_transfer,
             store,
-            routing: Routing::new(config, None),
+            routing: Routing::new(config, None, store),
             pending_events: VecDeque::default(),
             pending_cids: HashSet::new(),
             pending_requests: BiMap::new(),

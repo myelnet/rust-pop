@@ -3,11 +3,11 @@ mod error;
 mod hash;
 mod node;
 mod pointer;
-
-use self::{
+pub use self::{
     error::Error,
     hash::{BytesKey, Hash},
 };
+use crate::utils::ShrinkableMap;
 use blockstore::types::BlockStore;
 use libipld::Cid;
 use node::Node;
@@ -23,7 +23,7 @@ const DEFAULT_BIT_WIDTH: u32 = 8;
 
 type HashedKey = [u8; 32];
 
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
 pub struct KeyValuePair<K, V>(K, V);
 
 impl<K, V> KeyValuePair<K, V> {
@@ -32,6 +32,13 @@ impl<K, V> KeyValuePair<K, V> {
     }
     pub fn value(&self) -> &V {
         &self.1
+    }
+
+    pub fn key_mut(&mut self) -> &mut K {
+        &mut self.0
+    }
+    pub fn value_mut(&mut self) -> &mut V {
+        &mut self.1
     }
 }
 
@@ -42,7 +49,7 @@ impl<K, V> KeyValuePair<K, V> {
 }
 
 /// Implementation of the HAMT data structure for Blockstore.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Hamt<BS: BlockStore, V, K = BytesKey> {
     root: Node<K, V>,
     store: Arc<BS>,
@@ -120,6 +127,22 @@ where
             .map(|(r, _)| r)
     }
 
+    pub fn extend<A>(&mut self, key: K, value: V) -> Result<bool, Error>
+    where
+        V: PartialEq + Extend<A> + IntoIterator<Item = A>,
+    {
+        self.root
+            .extend(key, value, self.store.clone(), self.bit_width)
+    }
+
+    pub fn shrink<Q, A>(&mut self, key: &K, value: Q) -> Result<bool, Error>
+    where
+        V: PartialEq + ShrinkableMap<Q, A>,
+    {
+        self.root
+            .shrink(key, value, self.store.clone(), self.bit_width)
+    }
+
     pub fn get<Q: ?Sized>(&self, k: &Q) -> Result<Option<&V>, Error>
     where
         K: Borrow<Q>,
@@ -127,6 +150,18 @@ where
         V: DeserializeOwned,
     {
         match self.root.get(k, self.store.clone(), self.bit_width)? {
+            Some(v) => Ok(Some(v)),
+            None => Ok(None),
+        }
+    }
+
+    pub fn get_mut<Q: ?Sized>(&mut self, k: &Q) -> Result<Option<&mut V>, Error>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq,
+        V: DeserializeOwned + PartialEq + core::fmt::Debug,
+    {
+        match self.root.get_mut(k, self.store.clone(), self.bit_width)? {
             Some(v) => Ok(Some(v)),
             None => Ok(None),
         }

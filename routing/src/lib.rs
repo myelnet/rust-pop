@@ -1,17 +1,15 @@
+mod cbor_helpers;
 mod discovery;
 mod index;
 mod routing;
 mod utils;
-pub use crate::discovery::Config as DiscoveryConfig;
-pub use crate::discovery::{DiscoveryEvent, HubDiscovery, PeerTable, SerializablePeerTable};
 pub use crate::routing::{
     RoutingNetEvent, RoutingNetwork, RoutingRecord, EMPTY_QUEUE_SHRINK_THRESHOLD,
 };
-pub use utils::{gossip_init, peer_table_from_bytes, peer_table_to_bytes};
-
-use bimap::BiMap;
+use cbor_helpers::PeerIdCbor;
+pub use discovery::Config as DiscoveryConfig;
+pub use discovery::{DiscoveryEvent, HubDiscovery, PeerTable};
 use filecoin::{cid_helpers::CidCbor, types::Cbor};
-use libipld::codec::Decode;
 use libipld::{Cid, Ipld};
 use libp2p::gossipsub::{Gossipsub, GossipsubEvent, GossipsubMessage, IdentTopic};
 use libp2p::swarm::{
@@ -20,18 +18,20 @@ use libp2p::swarm::{
 use libp2p::{Multiaddr, NetworkBehaviour, PeerId};
 use serde::{Deserialize, Serialize};
 use serde_tuple::{Deserialize_tuple, Serialize_tuple};
-use smallvec::SmallVec;
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
-pub type Index = HashMap<Cid, PeerTable>;
-pub type LocalIndex = HashSet<Cid>;
-pub type SerializableIndex = HashMap<Vec<u8>, SerializablePeerTable>;
-pub type SerializableLocalIndex = HashSet<Vec<u8>>;
-use std::str::FromStr;
+pub use utils::gossip_init;
+pub type LocalIndex = HashSet<CidCbor>;
+pub type SerializableIndex = HashMap<CidCbor, PeerTable>;
+use blockstore::types::BlockStore;
 
 pub const ROUTING_TOPIC: &str = "myel/content-routing";
 pub const SYNCING_TOPIC: &str = "myel/index-syncing";
+
+fn tcid(v: Cid) -> index::BytesKey {
+    index::BytesKey(v.to_bytes())
+}
 
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub enum RoutingTableEntry {
@@ -69,9 +69,18 @@ pub struct RoutingConfig {
     pub peer_id: PeerId,
 }
 
+impl utils::ShrinkableMap<PeerIdCbor, Vec<Multiaddr>> for PeerTable {
+    fn remove(&mut self, k: &PeerIdCbor) -> Option<Vec<Multiaddr>> {
+        self.remove(k)
+    }
+    fn contains_key(&self, k: &PeerIdCbor) -> bool {
+        self.contains_key(k)
+    }
+}
+
 #[derive(NetworkBehaviour)]
 #[behaviour(out_event = "RoutingEvent", poll_method = "poll", event_process = true)]
-pub struct Routing {
+pub struct Routing<B: 'static + BlockStore> {
     broadcaster: Gossipsub,
     pub discovery: HubDiscovery,
     routing_responder: RoutingNetwork,
@@ -82,11 +91,11 @@ pub struct Routing {
     pending_events: VecDeque<RoutingEvent>,
     // a map of who has the content we made requests for
     #[behaviour(ignore)]
-    pub routing_table: Index,
+    pub routing_table: Arc<Mutex<index::Hamt<B, PeerTable>>>,
 }
 
-impl Routing {
-    pub fn new(config: RoutingConfig, index_root: Option<CidCbor>) -> Self {
+impl<B: 'static + BlockStore> Routing<B> {
+    pub fn new(config: RoutingConfig, index_root: Option<CidCbor>, store: Arc<B>) -> Self {
         let discovery = HubDiscovery::new(
             DiscoveryConfig::default(),
             config.peer_id,
@@ -109,7 +118,7 @@ impl Routing {
             routing_responder: RoutingNetwork::new(),
             pending_events: VecDeque::default(),
             // can swap this for something on disk
-            routing_table: HashMap::new(),
+            routing_table: Arc::new(Mutex::new(index::Hamt::new(store))),
         }
     }
 
@@ -152,7 +161,13 @@ impl Routing {
 
     pub fn find_content(&mut self, root: Cid) -> Result<(), String> {
         //  we have an entry in our routing table
-        if self.routing_table.contains_key(&root) {
+        if self
+            .routing_table
+            .lock()
+            .unwrap()
+            .contains_key(&tcid(root))
+            .map_err(|e| e.to_string())?
+        {
             return Ok(());
         }
 
@@ -185,16 +200,19 @@ impl Routing {
                 multiaddresses: ma,
                 cids,
             } => {
-                let mut addr_vec = SmallVec::<[Multiaddr; 4]>::new();
-                // check associated multiaddresses are valid
+                let mut addr_vec = Vec::<Multiaddr>::new();
                 for addr in ma {
                     addr_vec.push(addr)
                 }
-                let peer_table: PeerTable = HashMap::from([(peer_id, addr_vec)]);
+                let peer_table: PeerTable = HashMap::from([(PeerIdCbor::from(peer_id), addr_vec)]);
+                println!("constructed peer table {:?}", peer_table);
                 for cid in cids {
                     // check sent cids iare valid
+                    let mut lock = self.routing_table.lock().unwrap();
                     if let Some(c) = cid.to_cid() {
-                        self.routing_table.insert(c, peer_table.clone());
+                        lock.extend(tcid(c), peer_table.clone())
+                            .map_err(|e| e.to_string())?;
+                        lock.flush().map_err(|e| e.to_string())?;
                     }
                     // quit if a single CID is invalid, this can be relaxed
                     else {
@@ -206,13 +224,8 @@ impl Routing {
                 for cid in cids {
                     // check sent cids are valid
                     if let Some(c) = cid.to_cid() {
-                        if let Some(peer_table) = self.routing_table.get_mut(&c) {
-                            peer_table.remove(&peer_id);
-                            // if empty clear the entry for the CID
-                            if peer_table.is_empty() {
-                                self.routing_table.remove(&c);
-                            }
-                        }
+                        let mut lock = self.routing_table.lock().unwrap();
+                        lock.shrink(&tcid(c), PeerIdCbor::from(peer_id)).map_err(|e| e.to_string())?;;
                     }
                     // quit if a single CID is invalid, this can be relaxed
                     else {
@@ -224,13 +237,15 @@ impl Routing {
         Ok(())
     }
 
-    fn process_routing_response(&mut self, peer_table: PeerTable, root: Cid) {
-        // expand table as new entries come in
-        let mut new_entry = HashMap::new();
-        new_entry.insert(root, peer_table);
-        self.routing_table.extend(new_entry);
+    fn process_routing_response(&mut self, peer_table: PeerTable, root: Cid) -> Result<(), String> {
+        // expand table as new entries come i
+        let mut lock = self.routing_table.lock().unwrap();
+        lock.extend(tcid(root), peer_table)
+            .map_err(|e| e.to_string())?;
+        lock.flush().map_err(|e| e.to_string())?;
         self.pending_events
             .push_back(RoutingEvent::RoutingTableUpdated(root));
+        Ok(())
     }
 
     fn process_sync_request(
@@ -240,9 +255,12 @@ impl Routing {
     ) -> Result<(), String> {
         // only hubs should respond
         if self.config.is_hub {
+            println!("is a ub");
             let entry =
                 RoutingTableEntry::unmarshal_cbor(&message.data).map_err(|e| e.to_string())?;
+            println!("entry {:?}", entry);
             self.insert_routing_entry(peer_id, entry).map_err(|e| e)?;
+            println!("inserted entry");
             self.pending_events.push_back(RoutingEvent::HubIndexUpdated);
         }
 
@@ -263,17 +281,21 @@ impl Routing {
                 println! {"I successfully converted to cid"}
                 // if !self.store.contains(&r).map_err(|e| e.to_string())? {
                 //  if routing table contains the root cid, if not then do nothing
-                if let Some(peer_table) = self.routing_table.get(&r) {
+                if let Some(peer_table) = self
+                    .routing_table
+                    .lock()
+                    .unwrap()
+                    .get(&tcid(r))
+                    .map_err(|e| e.to_string())?
+                {
                     println! {"I have an associated entry"}
                     let message = RoutingRecord {
                         root: req.root,
-                        peers: Some(peer_table_to_bytes(peer_table)),
+                        peers: Some(peer_table.clone()),
                     };
                     self.routing_responder.send_message(&peer_id, message);
                     self.pending_events
                         .push_back(RoutingEvent::FoundContent(r.to_string()));
-                } else {
-                    println! {"I don't have an entry "}
                 }
                 // }
             } else {
@@ -305,7 +327,7 @@ impl Routing {
     }
 }
 
-impl NetworkBehaviourEventProcess<DiscoveryEvent> for Routing {
+impl<B: 'static + BlockStore> NetworkBehaviourEventProcess<DiscoveryEvent> for Routing<B> {
     fn inject_event(&mut self, event: DiscoveryEvent) {
         match event {
             DiscoveryEvent::ResponseReceived(_, peer, index) => self
@@ -315,13 +337,13 @@ impl NetworkBehaviourEventProcess<DiscoveryEvent> for Routing {
     }
 }
 
-impl NetworkBehaviourEventProcess<RoutingNetEvent> for Routing {
+impl<B: 'static + BlockStore> NetworkBehaviourEventProcess<RoutingNetEvent> for Routing<B> {
     fn inject_event(&mut self, event: RoutingNetEvent) {
         match event {
             RoutingNetEvent::Response(_, resp) => {
                 if let Some(peers) = resp.peers {
                     if let Some(r) = resp.root.to_cid() {
-                        self.process_routing_response(peer_table_from_bytes(&peers), r)
+                        self.process_routing_response(peers, r);
                     }
                 }
             }
@@ -329,7 +351,7 @@ impl NetworkBehaviourEventProcess<RoutingNetEvent> for Routing {
     }
 }
 
-impl NetworkBehaviourEventProcess<GossipsubEvent> for Routing {
+impl<B: 'static + BlockStore> NetworkBehaviourEventProcess<GossipsubEvent> for Routing<B> {
     fn inject_event(&mut self, event: GossipsubEvent) {
         match event {
             GossipsubEvent::Message {
@@ -395,7 +417,7 @@ mod tests {
     struct Peer {
         peer_id: PeerId,
         addr: Multiaddr,
-        swarm: Swarm<Routing>,
+        swarm: Swarm<Routing<MemoryBlockStore>>,
         bs: Arc<MemoryBlockStore>,
     }
 
@@ -403,7 +425,8 @@ mod tests {
         fn new(is_hub: bool) -> Self {
             let (peer_id, trans) = mk_transport();
             let config = RoutingConfig { peer_id, is_hub };
-            let rt = Routing::new(config, None);
+            let store = Arc::new(MemoryBlockStore::default());
+            let rt = Routing::new(config, None, store.clone());
             let mut swarm = Swarm::new(trans, rt, peer_id);
             Swarm::listen_on(&mut swarm, "/ip4/127.0.0.1/tcp/0".parse().unwrap()).unwrap();
             while swarm.next().now_or_never().is_some() {}
@@ -412,12 +435,12 @@ mod tests {
                 peer_id,
                 addr,
                 swarm,
-                bs: Arc::new(MemoryBlockStore::default()),
+                bs: store,
             }
         }
 
-        fn get_routing_table(&mut self) -> Index {
-            return self.swarm.behaviour_mut().routing_table.clone();
+        fn get_routing_table(&self) -> Arc<Mutex<index::Hamt<MemoryBlockStore, PeerTable>>> {
+            return self.swarm.behaviour().routing_table.clone();
         }
 
         fn add_address(&mut self, peer: &Peer) {
@@ -470,7 +493,7 @@ mod tests {
             cids
         }
 
-        fn swarm(&mut self) -> &mut Swarm<Routing> {
+        fn swarm(&mut self) -> &mut Swarm<Routing<MemoryBlockStore>> {
             &mut self.swarm
         }
 
@@ -533,13 +556,15 @@ mod tests {
         peer1.add_address(&peer2);
         //
         // //  print logs for peer 2
-        let hub_routing_table = peer2.get_routing_table().clone();
+        let mut hub_routing_table = peer2.get_routing_table();
+        println!("before {:?}", hub_routing_table);
         let peer2id = peer2.spawn("peer2");
 
-        std::thread::sleep(std::time::Duration::from_millis(1000));
         //
         // peer3.swarm().dial(peer2id).unwrap();
         peer1.swarm().dial(peer2id).unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(5000));
 
         peer1.next_discovery().await;
 
@@ -552,25 +577,31 @@ mod tests {
 
         std::thread::sleep(std::time::Duration::from_millis(1000));
 
-        let cid = &cids.first().unwrap().to_cid().unwrap();
+        let cid = &tcid(cids.first().unwrap().to_cid().unwrap());
 
-        assert!(hub_routing_table.contains_key(cid));
+        println!("hub after {:?}", hub_routing_table);
+
+        assert!(hub_routing_table.lock().unwrap().contains_key(cid).unwrap());
 
         assert!(hub_routing_table
+            .lock()
+            .unwrap()
             .get(cid)
             .unwrap()
-            .contains_key(&peer1.peer_id));
+            .unwrap()
+            .contains_key(&PeerIdCbor::from(peer1.peer_id)));
 
         assert_eq!(
             hub_routing_table
+                .lock()
+                .unwrap()
                 .get(cid)
                 .unwrap()
-                .get(&peer1.peer_id)
+                .unwrap()
+                .get(&PeerIdCbor::from(peer1.peer_id))
                 .unwrap()
                 .clone(),
-            SmallVec::<[Multiaddr; 6]>::from(
-                peer1.swarm().behaviour_mut().discovery.multiaddr.to_vec()
-            )
+            Vec::from(peer1.swarm().behaviour_mut().discovery.multiaddr.to_vec())
         );
 
         peer1.push_update(
@@ -582,7 +613,9 @@ mod tests {
 
         std::thread::sleep(std::time::Duration::from_millis(1000));
 
-        assert!(hub_routing_table.is_empty())
+        println!("hub after {:?}", hub_routing_table);
+
+        assert!(hub_routing_table.lock().unwrap().is_empty())
     }
 
     #[async_std::test]
@@ -602,12 +635,15 @@ mod tests {
         peer1.add_address(&hub_peer);
 
         //  print logs for hub peer
-        let hub_table = hub_peer.get_routing_table().clone();
+        let hub_table = hub_peer.get_routing_table();
         let hubid = hub_peer.spawn("hub");
 
         //  print logs for hub peer
         peer1.swarm().dial(hubid).unwrap();
         peer1.next_discovery().await;
+
+        println!("hub  {:?}", hub_table);
+        println!("peer1 before {:?}", peer1.get_routing_table());
 
         //  print logs for hub peer
         println!("discovery done");
@@ -616,19 +652,14 @@ mod tests {
 
         peer1.next_routing().await;
 
-        let lock1 = hub_table;
+        let lock1 = hub_table.lock().unwrap();
 
         let table1 = peer1.get_routing_table();
-        let lock2 = table1;
+        let lock2 = table1.lock().unwrap();
 
-        let mut k1: Vec<&Cid> = lock1.keys().collect();
-        let mut k2: Vec<&Cid> = lock2.keys().collect();
+        println!("peer1 after {:?}", peer1.get_routing_table());
 
-        assert_eq!(k1.sort(), k2.sort());
-
-        let v1: Vec<&HashMap<PeerId, SmallVec<[Multiaddr; 4]>>> = lock1.values().collect();
-        let v3: Vec<&HashMap<PeerId, SmallVec<[Multiaddr; 4]>>> = lock2.values().collect();
-
-        assert_eq!(v1, v3);
+        assert!(lock2.contains_key(&tcid(cid.unwrap())).unwrap());
+        assert_eq!(*lock1, *lock2);
     }
 }

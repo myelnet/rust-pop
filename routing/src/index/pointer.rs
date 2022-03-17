@@ -5,7 +5,7 @@ use super::node::Node;
 use super::{hash::Hash, Error, KeyValuePair, MAX_ARRAY_WIDTH};
 use filecoin::cid_helpers::CidCbor;
 use libipld::Cid;
-use once_cell::unsync::OnceCell;
+use once_cell::sync::OnceCell;
 use serde::de::DeserializeOwned;
 use serde::ser;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -13,7 +13,7 @@ use std::cmp::Ordering;
 use std::convert::TryFrom;
 
 /// Pointer to index values or a link to another child node.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) enum Pointer<K, V> {
     Values(Vec<KeyValuePair<K, V>>),
     Link {

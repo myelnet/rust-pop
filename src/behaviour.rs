@@ -91,7 +91,7 @@ where
     pub fn get(&mut self, root: Cid) -> Result<(), String> {
         //  mark that we are actively interested in content
         self.pending_cids.insert(root);
-        match self.get_from_routing(root) {
+        match self.get_from_routing_table(root) {
             Ok(_) => Ok(()),
             Err(_) => self.routing.find_content(root),
         }
@@ -116,7 +116,7 @@ where
         }
     }
 
-    fn get_from_routing(&mut self, root: Cid) -> Result<ChannelId, String> {
+    fn get_from_routing_table(&mut self, root: Cid) -> Result<ChannelId, String> {
         // check we are still interested in a CID (i.e a transfer for it has no succesfully completed yet)
         if self.pending_cids.contains(&root) {
             //  check no transfer channel has been set up yet
@@ -228,7 +228,7 @@ where
                 self.pending_events
                     .push_back(RoutingEvent::HubTableUpdated(peer, root));
             }
-            RoutingEvent::RoutingTableUpdated(root) => match self.get_from_routing(root) {
+            RoutingEvent::RoutingTableUpdated(root) => match self.get_from_routing_table(root) {
                 Ok(_) => {}
                 Err(e) => println!(
                     "failed to fetch {:?} after updating routing table: {}",

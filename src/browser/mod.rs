@@ -4,7 +4,10 @@ pub mod transport;
 
 use blockstore::memory::MemoryDB as BlockstoreMemory;
 use blockstore::types::BlockStore;
-use data_transfer::{client::Client, PullParams};
+use data_transfer::{
+    client::{Client, ClientOptions},
+    PullParams,
+};
 use futures::channel::{mpsc, oneshot};
 use futures::StreamExt;
 use graphsync::traversal::unixfs_path_selector;
@@ -56,8 +59,6 @@ pub struct ResponseHeaders {
 #[wasm_bindgen]
 pub struct Node {
     client: Client<CacheStore>,
-    local_peer_id: PeerId,
-    store: Arc<CacheStore>,
     pool: Rc<WorkerPool>,
 }
 
@@ -80,29 +81,30 @@ impl Node {
         let transport = build_transport(local_key.clone());
         let epool = pool.clone();
         let client = Client::new(
-            store.clone(),
-            transport,
-            Box::new(move |fut| {
-                epool.run(|| wasm_bindgen_futures::spawn_local(fut));
-            }),
-        );
-        Self {
             local_peer_id,
-            client,
             store,
-            pool,
-        }
+            transport,
+            ClientOptions::default().with_executor(Box::new(move |fut| {
+                epool
+                    .run(|| wasm_bindgen_futures::spawn_local(fut))
+                    .unwrap();
+            })),
+        );
+        Self { client, pool }
     }
     pub fn spawn_request(&self, js_params: JsValue) -> Result<Promise, JsValue> {
         let client = self.client.clone();
 
         // JsValue is not safe to share between thread so we must deserialize on main thread
-        let params: RequestParams = js_params.into_serde().unwrap();
+        let params: RequestParams = js_params.into_serde().map_err(js_err)?;
 
-        let maddr: Multiaddr = params.maddress.parse().unwrap();
-        let peer_id = PeerId::from_str(&params.peer_id).unwrap();
+        let maddr: Multiaddr = params.maddress.parse().map_err(js_err)?;
+        let peer_id = PeerId::from_str(&params.peer_id).map_err(js_err)?;
 
-        let (cid, selector) = unixfs_path_selector(params.cid).unwrap();
+        let (cid, selector) = match unixfs_path_selector(params.cid) {
+            Some((cid, sel)) => (cid, sel),
+            None => return Err(js_err("invalid IPFS path")),
+        };
 
         let params = PullParams {
             selector: Some(selector.clone()),

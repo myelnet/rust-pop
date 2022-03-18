@@ -6,7 +6,7 @@ use criterion::Criterion;
 use criterion::{criterion_group, criterion_main, BatchSize, Throughput};
 use dag_service::add;
 use data_transfer::{
-    client::{default_executor, Client},
+    client::{Client, ClientOptions},
     DataTransferBehaviour, DataTransferEvent,
 };
 use futures::prelude::*;
@@ -120,44 +120,44 @@ fn bench_transfer(c: &mut Criterion) {
     let mut group = c.benchmark_group("data_transfer");
     for size in [MB, 4 * MB, 15 * MB, 60 * MB].iter() {
         group.throughput(Throughput::Bytes(*size as u64));
-        group.bench_with_input(BenchmarkId::new("async", size), size, move |b, &size| {
-            b.iter_batched(
-                || prepare_blocks(size),
-                |dag| async move {
-                    let peer1 = Peer::new(dag.store);
-                    let mut peer2 = Peer::new(Arc::new(MemoryDB::default()));
-                    peer2.add_address(&peer1);
+        // group.bench_with_input(BenchmarkId::new("async", size), size, move |b, &size| {
+        //     b.iter_batched(
+        //         || prepare_blocks(size),
+        //         |dag| async move {
+        //             let peer1 = Peer::new(dag.store);
+        //             let mut peer2 = Peer::new(Arc::new(MemoryDB::default()));
+        //             peer2.add_address(&peer1);
 
-                    let peer1 = peer1.spawn("peer1");
+        //             let peer1 = peer1.spawn("peer1");
 
-                    let selector = Selector::ExploreRecursive {
-                        limit: RecursionLimit::None,
-                        sequence: Box::new(Selector::ExploreAll {
-                            next: Box::new(Selector::ExploreRecursiveEdge),
-                        }),
-                        current: None,
-                    };
+        //             let selector = Selector::ExploreRecursive {
+        //                 limit: RecursionLimit::None,
+        //                 sequence: Box::new(Selector::ExploreAll {
+        //                     next: Box::new(Selector::ExploreRecursiveEdge),
+        //                 }),
+        //                 current: None,
+        //             };
 
-                    let _ = peer2
-                        .swarm()
-                        .behaviour_mut()
-                        .pull(peer1, dag.root, selector, Default::default())
-                        .unwrap();
+        //             let _ = peer2
+        //                 .swarm()
+        //                 .behaviour_mut()
+        //                 .pull(peer1, dag.root, selector, Default::default())
+        //                 .unwrap();
 
-                    loop {
-                        if let Some(event) = peer2.next().await {
-                            match event {
-                                DataTransferEvent::Completed(_chid, Ok(())) => {
-                                    break;
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
-                },
-                BatchSize::SmallInput,
-            );
-        });
+        //             loop {
+        //                 if let Some(event) = peer2.next().await {
+        //                     match event {
+        //                         DataTransferEvent::Completed(_chid, Ok(())) => {
+        //                             break;
+        //                         }
+        //                         _ => {}
+        //                     }
+        //                 }
+        //             }
+        //         },
+        //         BatchSize::SmallInput,
+        //     );
+        // });
         group.bench_with_input(BenchmarkId::new("client", size), size, move |b, &size| {
             b.iter_batched(
                 || prepare_blocks(size),
@@ -169,7 +169,7 @@ fn bench_transfer(c: &mut Criterion) {
                     let (peer2, trans) = mk_transport();
                     let store = Arc::new(MemoryDB::default());
 
-                    let client = Client::new(store, trans, default_executor().unwrap());
+                    let client = Client::new(peer2, store, trans, Default::default());
 
                     let selector = Selector::ExploreRecursive {
                         limit: RecursionLimit::None,
@@ -180,6 +180,55 @@ fn bench_transfer(c: &mut Criterion) {
                     };
 
                     let maddr1 = maddr1.with(multiaddr::Protocol::P2p(peer1.into()));
+
+                    let stream = client
+                        .pull(peer1, maddr1, dag.root, selector, Default::default())
+                        .await
+                        .unwrap();
+                    let mut reader = stream.reader();
+
+                    let mut output: Vec<u8> = Vec::new();
+                    loop {
+                        if let Ok(_) = reader.read(&mut output).await {
+                            output = Vec::new();
+                        } else {
+                            break;
+                        }
+                    }
+                },
+                BatchSize::SmallInput,
+            );
+        });
+
+        group.bench_with_input(BenchmarkId::new("provider", size), size, move |b, &size| {
+            b.iter_batched(
+                || prepare_blocks(size),
+                |dag| async move {
+                    let (peer1, trans) = mk_transport();
+                    let mut provider = Client::new(
+                        peer1.clone(),
+                        dag.store,
+                        trans,
+                        ClientOptions::default()
+                            .as_listener("/ip4/127.0.0.1/tcp/0".parse().unwrap()),
+                    );
+
+                    let mut addresses = provider.addresses().await.unwrap();
+
+                    let (peer2, trans) = mk_transport();
+                    let store = Arc::new(MemoryDB::default());
+
+                    let client = Client::new(peer2, store, trans, Default::default());
+
+                    let selector = Selector::ExploreRecursive {
+                        limit: RecursionLimit::None,
+                        sequence: Box::new(Selector::ExploreAll {
+                            next: Box::new(Selector::ExploreRecursiveEdge),
+                        }),
+                        current: None,
+                    };
+
+                    let maddr1 = addresses.pop().unwrap();
 
                     let stream = client
                         .pull(peer1, maddr1, dag.root, selector, Default::default())

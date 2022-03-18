@@ -93,8 +93,8 @@ impl ClientOptions {
 
 #[derive(Clone)]
 pub struct Client<S: BlockStore> {
-    store: Arc<S>,
-    peer_id: PeerId,
+    pub store: Arc<S>,
+    pub peer_id: PeerId,
     id_counter: Arc<AtomicI32>,
     outbound_events: mpsc::Sender<NetEvent>,
     addresses_query: Option<AddrQuerySendr>,
@@ -113,7 +113,7 @@ where
     ) -> Self {
         let (s, r) = mpsc::channel(128);
         let transport = tp.clone();
-        let executor = Arc::new(options.executor.or(default_executor()).unwrap());
+        let executor = Arc::new(options.executor.or_else(default_executor).unwrap());
         executor.exec(
             async move {
                 if let Err(e) = conn_loop(r, transport).await {
@@ -128,6 +128,7 @@ where
             let (query_sender, query_receiver) = mpsc::channel(4);
             addresses_query.replace(query_sender);
             let store = store.clone();
+            // we don't use the executor here as it's mainly for wasm which doesn't need this loop.
             spawn(async move {
                 match tp.listen_on(addr) {
                     Ok(listener) => {

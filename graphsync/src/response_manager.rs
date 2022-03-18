@@ -187,6 +187,8 @@ where
         let root = request.root;
         let selector = request.selector.clone();
         let hooks = hooks.clone();
+
+        println!("starting request");
         spawn(async move {
             if let Ok(block) = store.get(&root) {
                 builder.add_extensions((hooks.read().unwrap().outgoing_block)(

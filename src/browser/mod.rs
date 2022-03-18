@@ -12,15 +12,11 @@ use futures::channel::{mpsc, oneshot};
 use futures::StreamExt;
 use graphsync::traversal::unixfs_path_selector;
 use js_sys::{Promise, Uint8Array};
-use libipld::{cbor::DagCborCodec, multihash::Code, pb::PbNode, Block, Cid, Ipld};
 use libp2p::{
     core,
     core::muxing::StreamMuxerBox,
     core::transport::{Boxed, OptionalTransport, Transport},
-    core::Executor,
-    identity, mplex, noise,
-    swarm::{Swarm, SwarmBuilder, SwarmEvent},
-    Multiaddr, PeerId,
+    identity, mplex, noise, Multiaddr, PeerId,
 };
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;

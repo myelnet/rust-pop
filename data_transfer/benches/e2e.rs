@@ -200,54 +200,54 @@ fn bench_transfer(c: &mut Criterion) {
             );
         });
 
-        group.bench_with_input(BenchmarkId::new("provider", size), size, move |b, &size| {
-            b.iter_batched(
-                || prepare_blocks(size),
-                |dag| async move {
-                    let (peer1, trans) = mk_transport();
-                    let mut provider = Client::new(
-                        peer1.clone(),
-                        dag.store,
-                        trans,
-                        ClientOptions::default()
-                            .as_listener("/ip4/127.0.0.1/tcp/0".parse().unwrap()),
-                    );
+        // group.bench_with_input(BenchmarkId::new("provider", size), size, move |b, &size| {
+        //     b.iter_batched(
+        //         || prepare_blocks(size),
+        //         |dag| async move {
+        //             let (peer1, trans) = mk_transport();
+        //             let mut provider = Client::new(
+        //                 peer1.clone(),
+        //                 dag.store,
+        //                 trans,
+        //                 ClientOptions::default()
+        //                     .as_listener("/ip4/127.0.0.1/tcp/0".parse().unwrap()),
+        //             );
 
-                    let mut addresses = provider.addresses().await.unwrap();
+        //             let mut addresses = provider.addresses().await.unwrap();
 
-                    let (peer2, trans) = mk_transport();
-                    let store = Arc::new(MemoryDB::default());
+        //             let (peer2, trans) = mk_transport();
+        //             let store = Arc::new(MemoryDB::default());
 
-                    let client = Client::new(peer2, store, trans, Default::default());
+        //             let client = Client::new(peer2, store, trans, Default::default());
 
-                    let selector = Selector::ExploreRecursive {
-                        limit: RecursionLimit::None,
-                        sequence: Box::new(Selector::ExploreAll {
-                            next: Box::new(Selector::ExploreRecursiveEdge),
-                        }),
-                        current: None,
-                    };
+        //             let selector = Selector::ExploreRecursive {
+        //                 limit: RecursionLimit::None,
+        //                 sequence: Box::new(Selector::ExploreAll {
+        //                     next: Box::new(Selector::ExploreRecursiveEdge),
+        //                 }),
+        //                 current: None,
+        //             };
 
-                    let maddr1 = addresses.pop().unwrap();
+        //             let maddr1 = addresses.pop().unwrap();
 
-                    let stream = client
-                        .pull(peer1, maddr1, dag.root, selector, Default::default())
-                        .await
-                        .unwrap();
-                    let mut reader = stream.reader();
+        //             let stream = client
+        //                 .pull(peer1, maddr1, dag.root, selector, Default::default())
+        //                 .await
+        //                 .unwrap();
+        //             let mut reader = stream.reader();
 
-                    let mut output: Vec<u8> = Vec::new();
-                    loop {
-                        if let Ok(_) = reader.read(&mut output).await {
-                            output = Vec::new();
-                        } else {
-                            break;
-                        }
-                    }
-                },
-                BatchSize::SmallInput,
-            );
-        });
+        //             let mut output: Vec<u8> = Vec::new();
+        //             loop {
+        //                 if let Ok(_) = reader.read(&mut output).await {
+        //                     output = Vec::new();
+        //                 } else {
+        //                     break;
+        //                 }
+        //             }
+        //         },
+        //         BatchSize::SmallInput,
+        //     );
+        // });
     }
 }
 

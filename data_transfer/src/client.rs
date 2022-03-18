@@ -2,7 +2,7 @@ use super::fsm::{Channel, ChannelEvent as FsmEvent};
 use super::mimesniff::{detect_content_type, ContentType};
 use super::network::{
     DealProposal, DealResponse, DealStatus, MessageType, PullParams, TransferMessage,
-    TransferRequest, EXTENSION_KEY,
+    TransferRequest, TransferResponse, EXTENSION_KEY,
 };
 use blockstore::types::BlockStore;
 use filecoin::{cid_helpers::CidCbor, types::Cbor};
@@ -15,6 +15,7 @@ use futures::{
     stream::{IntoAsyncRead, TryStreamExt},
 };
 use graphsync::network::MessageCodec;
+use graphsync::res_mgr::ResponseBuilder;
 use graphsync::traversal::{resolve_unixfs, AsyncLoader, Progress, Selector};
 use graphsync::{
     Extensions, GraphsyncCodec, GraphsyncMessage, GraphsyncProtocol, GraphsyncRequest, Prefix,
@@ -25,11 +26,12 @@ use libipld::store::{DefaultParams, StoreParams};
 use libipld::{Block, Cid, Ipld};
 use libp2p::{
     core::muxing::{event_from_ref_and_wrap, outbound_from_ref_and_wrap, StreamMuxerBox},
-    core::transport::{Boxed, Transport},
+    core::transport::{Boxed, ListenerEvent, Transport},
     core::{Executor, ProtocolName},
-    Multiaddr, PeerId,
+    multiaddr, Multiaddr, PeerId,
 };
 use multistream_select::{dialer_select_proto, listener_select_proto};
+use num_bigint::ToBigInt;
 use smallvec::SmallVec;
 use std::collections::hash_map::{Entry, HashMap};
 use std::io::{Error, ErrorKind};
@@ -68,11 +70,34 @@ pub fn default_executor() -> Option<Box<dyn Executor>> {
     }
 }
 
+type AddrSendr = oneshot::Sender<SmallVec<[Multiaddr; 4]>>;
+type AddrQuerySendr = mpsc::Sender<AddrSendr>;
+type AddrQueryRecvr = mpsc::Receiver<AddrSendr>;
+
+#[derive(Default)]
+pub struct ClientOptions {
+    executor: Option<Box<dyn Executor>>,
+    listen_addr: Option<Multiaddr>,
+}
+
+impl ClientOptions {
+    pub fn as_listener(mut self, addr: Multiaddr) -> Self {
+        self.listen_addr = Some(addr);
+        self
+    }
+    pub fn with_executor(mut self, executor: Box<dyn Executor>) -> Self {
+        self.executor = Some(executor);
+        self
+    }
+}
+
 #[derive(Clone)]
 pub struct Client<S: BlockStore> {
     store: Arc<S>,
+    peer_id: PeerId,
     id_counter: Arc<AtomicI32>,
     outbound_events: mpsc::Sender<NetEvent>,
+    addresses_query: Option<AddrQuerySendr>,
     executor: Arc<Box<dyn Executor>>,
 }
 
@@ -81,13 +106,14 @@ where
     Ipld: Decode<<S::Params as StoreParams>::Codecs>,
 {
     pub fn new(
+        peer_id: PeerId,
         store: Arc<S>,
         tp: Boxed<(PeerId, StreamMuxerBox)>,
-        executor: Box<dyn Executor>,
+        options: ClientOptions,
     ) -> Self {
         let (s, r) = mpsc::channel(128);
         let transport = tp.clone();
-        let executor = Arc::new(executor);
+        let executor = Arc::new(options.executor.or(default_executor()).unwrap());
         executor.exec(
             async move {
                 if let Err(e) = conn_loop(r, transport).await {
@@ -96,12 +122,57 @@ where
             }
             .boxed(),
         );
+        // If the host isn't listening we cannot query the current addresses.
+        let mut addresses_query = None;
+        if let Some(addr) = options.listen_addr {
+            let (query_sender, query_receiver) = mpsc::channel(4);
+            addresses_query.replace(query_sender);
+            let store = store.clone();
+            spawn(async move {
+                match tp.listen_on(addr) {
+                    Ok(listener) => {
+                        if let Err(e) = accept_loop::<Boxed<(PeerId, StreamMuxerBox)>, S>(
+                            listener,
+                            store,
+                            query_receiver,
+                        )
+                        .await
+                        {
+                            println!("listener failed: {:?}", e);
+                        }
+                    }
+                    Err(e) => {
+                        println!("failed to start listener: {:?}", e);
+                    }
+                }
+            });
+        }
         Self {
             store,
+            peer_id,
             id_counter: Arc::new(AtomicI32::new(1)),
             outbound_events: s,
+            addresses_query,
             executor,
         }
+    }
+    /// returns the listener addresses. If they have not been anounced yet waits for the first one.
+    /// addresses are formatted as p2p including the peer id.
+    pub async fn addresses(&mut self) -> Option<SmallVec<[Multiaddr; 4]>> {
+        if let Some(query) = self.addresses_query.as_mut() {
+            let (s, r) = oneshot::channel();
+            query.try_send(s).ok()?;
+            let a = r.await.ok()?;
+            return Some(
+                a.iter()
+                    .map(|addr| {
+                        addr.clone()
+                            .with(multiaddr::Protocol::P2p(self.peer_id.into()))
+                    })
+                    .collect(),
+            );
+        }
+        None
     }
     pub async fn pull(
         &self,
@@ -347,6 +418,177 @@ impl Connection {
     }
 }
 
+// The accept loop processes inbound request sent to the listener.
+async fn accept_loop<TTrans, S>(
+    listener: TTrans::Listener,
+    store: Arc<S>,
+    mut addr: AddrQueryRecvr,
+) -> Result<(), Error>
+where
+    TTrans: Transport<Output = (PeerId, StreamMuxerBox)>,
+    TTrans::Error: Send + Sync + 'static,
+    TTrans::ListenerUpgrade:
+        Future<Output = Result<(PeerId, StreamMuxerBox), Error>> + Send + 'static,
+    S: 'static + BlockStore,
+    Ipld: Decode<<S::Params as StoreParams>::Codecs>,
+{
+    let mut listen = Box::pin(listener);
+    let mut addresses: SmallVec<[Multiaddr; 4]> = SmallVec::new();
+
+    let mut pending_addr_query: Option<AddrSendr> = None;
+    loop {
+        select! {
+            result = listen.next().fuse() => match result {
+                Some(Ok(event)) => {
+                    match event {
+                        ListenerEvent::Upgrade {
+                            upgrade,
+                            local_addr: _,
+                            remote_addr: _,
+                        } => {
+                            let store = store.clone();
+                            spawn(async move {
+                                match upgrade.await {
+                                    Ok((_peer, muxer)) => {
+                                        if let Err(e) = listener_upgrade_handler::<S>(muxer, store).await {
+                                            println!("upgrade error: {:?}", e);
+                                        }
+                                    }
+                                    Err(e) => {
+                                        println!("upgrade failed: {:?}", e);
+                                    }
+                                }
+                            });
+                        }
+                        ListenerEvent::NewAddress(addr) => {
+                            if !addresses.contains(&addr) {
+                                addresses.push(addr);
+                            }
+                            if let Some(query) = pending_addr_query.take() {
+                                drop(query.send(addresses.clone()));
+                            };
+                        }
+                        ListenerEvent::AddressExpired(addr) => {
+                            addresses.retain(|x| x != &addr);
+                        }
+                        _ => (),
+                    };
+                }
+                _ => {}
+            },
+            query = addr.select_next_some() => {
+                if addresses.is_empty() {
+                    pending_addr_query.replace(query);
+                } else {
+                    drop(query.send(addresses.clone()));
+                }
+            },
+        }
+    }
+}
+
+async fn listener_upgrade_handler<S>(muxer: StreamMuxerBox, store: Arc<S>) -> Result<(), Error>
+where
+    S: 'static + BlockStore,
+    Ipld: Decode<<S::Params as StoreParams>::Codecs>,
+{
+    let mux = Arc::new(muxer);
+
+    let (in_sender, mut in_receiver) = mpsc::channel(16);
+    let inmux = mux.clone();
+    spawn(async move {
+        if let Err(e) = inbound_loop(in_sender.clone(), inmux).await {
+            println!("inbound error: {:?}", e);
+        }
+    });
+
+    while let Some(Ok(msg)) = in_receiver.next().await {
+        match msg {
+            NetMsg::Graphsync(msg) => {
+                if !msg.requests.is_empty() {
+                    for req in msg.requests.values() {
+                        let outmux = mux.clone();
+                        let request = req.clone();
+                        let store = store.clone();
+                        spawn(async move {
+                            if let Err(e) = graphsync_provider::<S>(store, request, outmux).await {
+                                println!("graphsync provider error: {:?}", e);
+                            }
+                        });
+                    }
+                }
+            }
+            NetMsg::Transfer(msg) => {
+                unimplemented!("TODO");
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn graphsync_provider<S>(
+    store: Arc<S>,
+    request: GraphsyncRequest,
+    mux: Arc<StreamMuxerBox>,
+) -> Result<(), Error>
+where
+    S: 'static + BlockStore,
+    Ipld: Decode<<S::Params as StoreParams>::Codecs>,
+{
+    let outbound = outbound_from_ref_and_wrap(mux.clone()).await?;
+
+    let (_proto, mut io) = dialer_select_proto(
+        outbound,
+        vec![Protocols::Graphsync.protocol_name()].into_iter(),
+        multistream_select::Version::V1,
+    )
+    .await?;
+
+    let mut codec = GraphsyncCodec::<DefaultParams>::default();
+    let mut builder = ResponseBuilder::new(&request, store);
+    while let Some(msg) = builder.next() {
+        codec
+            .write_message(&GraphsyncProtocol, &mut io, msg)
+            .await?;
+    }
+    io.close().await?;
+
+    let id = request.id as u64;
+    let voucher = DealResponse::Pull {
+        id,
+        status: DealStatus::Completed,
+        message: "Thanks for doing business with us".to_string(),
+        payment_owed: (0_isize).to_bigint().unwrap(),
+    };
+    let tmsg = TransferMessage {
+        is_rq: false,
+        request: None,
+        response: Some(TransferResponse {
+            mtype: MessageType::Complete,
+            accepted: true,
+            paused: false,
+            transfer_id: id,
+            voucher_type: voucher.voucher_type(),
+            voucher: Some(voucher),
+        }),
+    };
+
+    let outbound = outbound_from_ref_and_wrap(mux).await?;
+
+    let (_proto, mut io) = dialer_select_proto(
+        outbound,
+        vec![Protocols::DataTransfer.protocol_name()].into_iter(),
+        multistream_select::Version::V1,
+    )
+    .await?;
+
+    let buf = tmsg.marshal_cbor().map_err(io_err)?;
+    io.write_all(&buf).await?;
+    io.close().await?;
+
+    Ok(())
+}
+
 // The connection loop is responsible for opening new streams with peer or sending to open
 // connections. The request contains a sender to collect inbound messages.
 async fn conn_loop(
@@ -419,7 +661,11 @@ async fn conn_loop(
                                     }
                                 }
                             }
-                            _ => println!("muxer error {:?}", e),
+                            _ => {
+                                println!("muxer error {:?}", e);
+                                // TODO: if something goes wrong for a specific channel we
+                                // should notify it so it can close up.
+                            }
                         }
                     }
                 };
@@ -758,7 +1004,7 @@ mod tests {
         let (peer2, trans) = mk_transport();
         let store2 = Arc::new(MemoryBlockStore::default());
 
-        let client = Client::new(store2, trans, default_executor().unwrap());
+        let client = Client::new(peer2, store2, trans, Default::default());
 
         let maddr1 = maddr1.with(multiaddr::Protocol::P2p(peer1.into()));
 
@@ -859,7 +1105,7 @@ mod tests {
         let (peer2, trans) = mk_transport();
         let store2 = Arc::new(MemoryBlockStore::default());
 
-        let client = Client::new(store2, trans, default_executor().unwrap());
+        let client = Client::new(peer2, store2, trans, Default::default());
 
         let maddr1 = maddr1.with(multiaddr::Protocol::P2p(peer1.into()));
 
@@ -886,5 +1132,58 @@ mod tests {
                 assert_eq!(e.kind(), ErrorKind::Other);
             }
         };
+    }
+
+    #[async_std::test]
+    async fn test_provider() {
+        let store1 = Arc::new(MemoryBlockStore::default());
+
+        const FILE_SIZE: usize = 1024 * 1024;
+        let mut data1 = vec![0u8; FILE_SIZE];
+        rand::thread_rng().fill_bytes(&mut data1);
+
+        let root1 = add(store1.clone(), &data1).unwrap().unwrap();
+
+        let (peer1, trans) = mk_transport();
+        let mut provider = Client::new(
+            peer1.clone(),
+            store1,
+            trans,
+            ClientOptions {
+                executor: None,
+                listen_addr: Some("/ip4/127.0.0.1/tcp/0".parse().unwrap()),
+            },
+        );
+
+        let mut addresses = provider.addresses().await.unwrap();
+
+        let selector = Selector::ExploreRecursive {
+            limit: RecursionLimit::None,
+            sequence: Box::new(Selector::ExploreAll {
+                next: Box::new(Selector::ExploreRecursiveEdge),
+            }),
+            current: None,
+        };
+
+        let (peer2, trans) = mk_transport();
+        let store2 = Arc::new(MemoryBlockStore::default());
+
+        let client = Client::new(peer2, store2, trans, Default::default());
+
+        let stream = client
+            .pull(
+                peer1,
+                addresses.pop().unwrap(),
+                root1,
+                selector,
+                Default::default(),
+            )
+            .await
+            .unwrap();
+
+        let mut reader = stream.reader();
+        let mut output: Vec<u8> = Vec::new();
+        assert_eq!(reader.read_to_end(&mut output).await.unwrap(), FILE_SIZE);
+        assert_eq!(output, data1);
     }
 }

@@ -4,6 +4,7 @@ pub mod network;
 mod request_manager;
 mod response_manager;
 
+pub mod res_mgr;
 pub mod traversal;
 
 use async_trait::async_trait;

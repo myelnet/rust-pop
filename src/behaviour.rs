@@ -12,11 +12,11 @@ use libp2p::swarm::{
 };
 use libp2p::{Multiaddr, NetworkBehaviour, PeerId};
 use routing::{
-    index::Hamt, tcid, Routing, RoutingConfig as PopConfig, RoutingEvent, RoutingTableEntry,
+    index::Hamt, tcid, PeerTable, Routing, RoutingConfig as PopConfig, RoutingEvent,
     EMPTY_QUEUE_SHRINK_THRESHOLD,
 };
 use serde_tuple::{Deserialize_tuple, Serialize_tuple};
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -39,6 +39,8 @@ where
 
     #[behaviour(ignore)]
     pending_events: VecDeque<RoutingEvent>,
+    #[behaviour(ignore)]
+    peer_table: PeerTable,
     // a map of who has the content we made requests for
     #[behaviour(ignore)]
     pending_cids: HashSet<Cid>,
@@ -61,6 +63,7 @@ where
             data_transfer,
             store: store.clone(),
             routing: Routing::new(config, store),
+            peer_table: HashMap::new(),
             pending_events: VecDeque::default(),
             pending_cids: HashSet::new(),
             pending_requests: BiMap::new(),
@@ -124,9 +127,18 @@ where
     }
 
     //  when first interacting with a peer hubs fetch their index, if they have one
-    fn process_discovery_response(&mut self, peer_id: PeerId, index_root: Option<CidCbor>) {
+    fn process_discovery_response(
+        &mut self,
+        peer_id: PeerId,
+        index_root: Option<CidCbor>,
+        peer_ma: Option<Multiaddr>,
+    ) {
         //  only hubs should respond
         if self.routing.config.is_hub {
+            if let Some(ma) = peer_ma {
+                self.peer_table
+                    .insert(routing::PeerIdCbor::from(peer_id), Vec::from([ma]));
+            }
             if let Some(r) = index_root {
                 if let Some(cid) = r.to_cid() {
                     if self.pending_requests.get_by_left(&cid).is_none() {
@@ -161,21 +173,25 @@ where
                                 .push_back(RoutingEvent::ContentRequestFulfilled(cid.to_string()));
                         } else {
                             if let Ok(p) = PeerId::from_str(&ch.responder) {
-                                //  do something when a request for an index CID succeeded
-                                let f =
+                                if let Some(ma) = self.peer_table.get(&routing::PeerIdCbor::from(p))
+                                {
+                                    //  do something when a request for an index CID succeeded
+                                    let f =
                                 |k: &routing::index::BytesKey, v: &()| -> Result<(), routing::index::Error> {
-                                    let localhost = std::net::Ipv4Addr::new(127, 0, 0, 1);
-                                    let multiaddr = Vec::from([Multiaddr::from(localhost)]);
-                                    let peer_ma_table = routing::PeerTable::from([(routing::PeerIdCbor::from(p),multiaddr)]);
+                                    let peer_cbor = routing::PeerIdCbor::from(p);
+                                    //  this function should only be called when we have a peer table entry so we should unwrap
+                                    let peer_ma_table = PeerTable::from([(peer_cbor, ma.to_vec())]);
                                     self.routing.routing_table.lock().unwrap().extend(k.clone(), peer_ma_table).map_err(|e| e)?;
                                     Ok(())
                                 };
-                                let mut peer_index = Hamt::<S, ()>::load(cid, self.store.clone())
-                                    .map_err(|e| e.to_string())?;
-                                peer_index.for_each(f).map_err(|e| e.to_string())?;
-                                //  override just in case
+                                    let mut peer_index =
+                                        Hamt::<S, ()>::load(cid, self.store.clone())
+                                            .map_err(|e| e.to_string())?;
+                                    peer_index.for_each(f).map_err(|e| e.to_string())?;
+                                    //  override just in case
 
-                                self.pending_events.push_back(RoutingEvent::HubIndexUpdated);
+                                    self.pending_events.push_back(RoutingEvent::HubIndexUpdated);
+                                }
                             }
                         }
                     }
@@ -231,10 +247,10 @@ where
 {
     fn inject_event(&mut self, event: RoutingEvent) {
         match event {
-            RoutingEvent::HubTableUpdated(peer, root) => {
-                self.process_discovery_response(peer, root.clone());
+            RoutingEvent::HubTableUpdated(peer, root, peer_ma) => {
+                self.process_discovery_response(peer, root.clone(), peer_ma);
                 self.pending_events
-                    .push_back(RoutingEvent::HubTableUpdated(peer, root));
+                    .push_back(RoutingEvent::HubTableUpdated(peer, root, None));
             }
             RoutingEvent::RoutingTableUpdated(root) => match self.get_from_routing_table(root) {
                 Ok(_) => {}
@@ -337,6 +353,17 @@ mod tests {
             root
         }
 
+        fn ma(&self) -> Multiaddr {
+            self.swarm
+                .behaviour()
+                .routing
+                .discovery
+                .multiaddr
+                .first()
+                .unwrap()
+                .clone()
+        }
+
         fn swarm(&mut self) -> &mut Swarm<Pop<IndexableBlockstore<MemoryBlockStore>>> {
             &mut self.swarm
         }
@@ -397,6 +424,7 @@ mod tests {
         // will have themselves in hub table
         let mut peer2 = Peer::new(false);
         let cid = peer2.add_data();
+        let ma = peer2.ma();
 
         peer1.add_address(&peer2);
 
@@ -412,15 +440,6 @@ mod tests {
 
         peer1.next_indexing().await;
 
-        // let res = match entry {
-        //     RoutingTableEntry::Insertion {
-        //         multiaddresses: ma,
-        //         cids,
-        //     } => Some((cids.first().unwrap().to_cid().unwrap(), ma)),
-        //     _ => None,
-        // };
-        // let (cid, ma) = res.unwrap();
-
         assert!(hub_routing_table
             .lock()
             .unwrap()
@@ -435,18 +454,18 @@ mod tests {
             .unwrap()
             .contains_key(&PeerIdCbor::from(peer2id)));
 
-        // assert_eq!(
-        //     hub_routing_table
-        //         .lock()
-        //         .unwrap()
-        //         .get(&tcid(cid))
-        //         .unwrap()
-        //         .unwrap()
-        //         .get(&PeerIdCbor::from(peer2id))
-        //         .unwrap()
-        //         .clone(),
-        //     ma
-        // );
+        assert_eq!(
+            hub_routing_table
+                .lock()
+                .unwrap()
+                .get(&tcid(cid))
+                .unwrap()
+                .unwrap()
+                .get(&PeerIdCbor::from(peer2id))
+                .unwrap()
+                .clone(),
+            Vec::from([ma.clone()])
+        );
     }
 
     #[async_std::test]

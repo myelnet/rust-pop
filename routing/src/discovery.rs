@@ -139,7 +139,7 @@ impl RequestResponseCodec for DiscoveryCodec {
 #[derive(Debug)]
 pub enum DiscoveryEvent {
     // peer and index root
-    ResponseReceived(RequestId, PeerId, Option<CidCbor>),
+    ResponseReceived(RequestId, PeerId, Option<CidCbor>, Option<Multiaddr>),
 }
 
 #[derive(Clone)]
@@ -177,6 +177,7 @@ pub struct DiscoveryResponse {
     pub id: RequestId,
     pub addresses: PeerTable,
     pub index_root: Option<CidCbor>,
+    pub peer_ma: Option<Multiaddr>,
 }
 
 pub struct HubDiscovery<B: BlockStore> {
@@ -378,6 +379,7 @@ impl<B: 'static + BlockStore> NetworkBehaviour for HubDiscovery<B> {
                             id: request.id,
                             addresses: self.hub_table.clone(),
                             index_root,
+                            peer_ma: self.multiaddr.first().cloned(),
                         };
                         self.inner.send_response(channel, msg).unwrap();
                     }
@@ -395,6 +397,7 @@ impl<B: 'static + BlockStore> NetworkBehaviour for HubDiscovery<B> {
                                 response.id,
                                 peer,
                                 response.index_root,
+                                response.peer_ma,
                             ),
                         ));
                     }
@@ -474,6 +477,7 @@ mod tests {
             id: 1,
             addresses,
             index_root: None,
+            peer_ma: Some(Multiaddr::from(localhost)),
         };
 
         let msgc = resp.clone();
@@ -513,7 +517,12 @@ mod tests {
             let (peer_id, trans) = mk_transport();
             let mut swarm = Swarm::new(
                 trans,
-                HubDiscovery::new(Config::default(), peer_id, is_hub, Arc::new(MemoryDB::default())),
+                HubDiscovery::new(
+                    Config::default(),
+                    peer_id,
+                    is_hub,
+                    Arc::new(MemoryDB::default()),
+                ),
                 peer_id,
             );
             for _i in 0..num_addreses {
@@ -565,7 +574,7 @@ mod tests {
     }
 
     fn assert_response_ok(event: Option<DiscoveryEvent>, id: RequestId) {
-        if let Some(DiscoveryEvent::ResponseReceived(resp_id, _, _)) = event {
+        if let Some(DiscoveryEvent::ResponseReceived(resp_id, _, _, _)) = event {
             assert_eq!(resp_id, id);
         } else {
             panic!("{:?} is not a response event", event);

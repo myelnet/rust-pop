@@ -58,7 +58,7 @@ pub enum RoutingEvent {
     ContentRequestFulfilled(String),
     FoundContent(String),
     SyncRequestBroadcast,
-    HubTableUpdated(PeerId, Option<CidCbor>),
+    HubTableUpdated(PeerId, Option<CidCbor>, Option<Multiaddr>),
     HubIndexUpdated,
     RoutingTableUpdated(Cid),
 }
@@ -308,9 +308,9 @@ impl<B: 'static + BlockStore> Routing<B> {
 impl<B: 'static + BlockStore> NetworkBehaviourEventProcess<DiscoveryEvent> for Routing<B> {
     fn inject_event(&mut self, event: DiscoveryEvent) {
         match event {
-            DiscoveryEvent::ResponseReceived(_, peer, index) => self
+            DiscoveryEvent::ResponseReceived(_, peer, index, peer_ma) => self
                 .pending_events
-                .push_back(RoutingEvent::HubTableUpdated(peer, index)),
+                .push_back(RoutingEvent::HubTableUpdated(peer, index, peer_ma)),
         }
     }
 }

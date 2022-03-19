@@ -2,6 +2,7 @@ use crate::cbor_helpers::PeerIdCbor;
 use crate::index::ShrinkableMap;
 use async_std::io;
 use async_trait::async_trait;
+use blockstore::types::BlockStore;
 use filecoin::cid_helpers::CidCbor;
 use futures::io::{AsyncRead, AsyncWrite};
 use futures::prelude::*;
@@ -178,7 +179,7 @@ pub struct DiscoveryResponse {
     pub index_root: Option<CidCbor>,
 }
 
-pub struct HubDiscovery {
+pub struct HubDiscovery<B: BlockStore> {
     //  we implement our own id_counter (instead of libp2p's) to ensure the request / response messages are CBOR encodable
     id_counter: Arc<AtomicI32>,
     inner: RequestResponse<DiscoveryCodec>,
@@ -186,11 +187,11 @@ pub struct HubDiscovery {
     peer_id: PeerIdCbor,
     pub multiaddr: SmallVec<[Multiaddr; 4]>,
     hub: bool,
-    index_root: Option<CidCbor>,
+    store: Arc<B>,
 }
 
-impl HubDiscovery {
-    pub fn new(config: Config, peer_id: PeerId, hub: bool, index_root: Option<CidCbor>) -> Self {
+impl<B: BlockStore> HubDiscovery<B> {
+    pub fn new(config: Config, peer_id: PeerId, hub: bool, store: Arc<B>) -> Self {
         let protocols = std::iter::once((HubDiscoveryProtocol, ProtocolSupport::Full));
         let mut rr_config = RequestResponseConfig::default();
         rr_config.set_connection_keep_alive(config.connection_keep_alive);
@@ -204,7 +205,7 @@ impl HubDiscovery {
             hub_table: HashMap::new(),
             peer_id: PeerIdCbor::from(peer_id),
             hub,
-            index_root,
+            store,
         }
     }
     // only hubs should track leaf nodes, they do so using the inner behaviour's table
@@ -220,10 +221,6 @@ impl HubDiscovery {
         }
     }
 
-    pub fn update_index_root(&mut self, root: CidCbor) {
-        self.index_root = Some(root);
-    }
-
     // want this to be private as we want connections to trigger table swaps. There could be
     //  a situation where call to the request function itself triggers a connection
     // and then we have duplicate requests being made
@@ -235,7 +232,7 @@ impl HubDiscovery {
     }
 }
 
-impl NetworkBehaviour for HubDiscovery {
+impl<B: 'static + BlockStore> NetworkBehaviour for HubDiscovery<B> {
     type ProtocolsHandler = <RequestResponse<DiscoveryCodec> as NetworkBehaviour>::ProtocolsHandler;
     type OutEvent = DiscoveryEvent;
 
@@ -373,10 +370,14 @@ impl NetworkBehaviour for HubDiscovery {
                         request,
                         channel,
                     } => {
+                        let index_root = match &self.store.index_root() {
+                            Some(index) => Some(CidCbor::from(*index)),
+                            _ => None,
+                        };
                         let msg = DiscoveryResponse {
                             id: request.id,
                             addresses: self.hub_table.clone(),
-                            index_root: self.index_root.clone(),
+                            index_root,
                         };
                         self.inner.send_response(channel, msg).unwrap();
                     }
@@ -433,6 +434,7 @@ impl NetworkBehaviour for HubDiscovery {
 mod tests {
     use super::*;
     use async_std::task;
+    use blockstore::memory::MemoryDB;
     use libp2p::core::muxing::StreamMuxerBox;
     use libp2p::core::transport::Boxed;
     use libp2p::identity;
@@ -503,7 +505,7 @@ mod tests {
     struct Peer {
         peer_id: PeerId,
         addr: Vec<Multiaddr>,
-        swarm: Swarm<HubDiscovery>,
+        swarm: Swarm<HubDiscovery<MemoryDB>>,
     }
 
     impl Peer {
@@ -511,7 +513,7 @@ mod tests {
             let (peer_id, trans) = mk_transport();
             let mut swarm = Swarm::new(
                 trans,
-                HubDiscovery::new(Config::default(), peer_id, is_hub, None),
+                HubDiscovery::new(Config::default(), peer_id, is_hub, Arc::new(MemoryDB::default())),
                 peer_id,
             );
             for _i in 0..num_addreses {
@@ -537,7 +539,7 @@ mod tests {
             }
         }
 
-        fn swarm(&mut self) -> &mut Swarm<HubDiscovery> {
+        fn swarm(&mut self) -> &mut Swarm<HubDiscovery<MemoryDB>> {
             &mut self.swarm
         }
 

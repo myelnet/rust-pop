@@ -432,6 +432,38 @@ where
         }
     }
 
+    pub(crate) fn for_each<S, F>(&self, store: &Arc<S>, f: &mut F) -> Result<(), Error>
+    where
+        F: FnMut(&K, &V) -> Result<(), Error>,
+        S: BlockStore,
+    {
+        for p in &self.pointers {
+            match p {
+                Pointer::Link { cid, cache } => {
+                    if let Some(cached_node) = cache.get() {
+                        cached_node.for_each(store, f)?
+                    } else {
+                        let node = Box::new(Node::try_from(
+                            &dag_service::cat(store.clone(), *cid)
+                                .map_err(|_| Error::CidNotFound(cid.to_string()))?,
+                        )?);
+
+                        // Ignore error intentionally, the cache value will always be the same
+                        let cache_node = cache.get_or_init(|| node);
+                        cache_node.for_each(store, f)?
+                    }
+                }
+                Pointer::Dirty(n) => n.for_each(store, f)?,
+                Pointer::Values(kvs) => {
+                    for kv in kvs {
+                        f(kv.0.borrow(), kv.1.borrow())?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn flush<S: BlockStore>(&mut self, store: Arc<S>) -> Result<(), Error> {
         for pointer in &mut self.pointers {
             if let Pointer::Dirty(node) = pointer {

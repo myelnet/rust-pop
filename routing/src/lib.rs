@@ -23,8 +23,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 pub use utils::gossip_init;
-
-pub type LocalIndex<B> = index::Hamt<B, ()>;
+pub type LocalIndex<B> = index::IndexableBlockstore<B>;
 pub type Index<B> = Arc<Mutex<index::Hamt<B, PeerTable>>>;
 
 pub const ROUTING_TOPIC: &str = "myel/content-routing";
@@ -74,7 +73,7 @@ pub struct RoutingConfig {
 #[behaviour(out_event = "RoutingEvent", poll_method = "poll", event_process = true)]
 pub struct Routing<B: 'static + BlockStore> {
     broadcaster: Gossipsub,
-    pub discovery: HubDiscovery,
+    pub discovery: HubDiscovery<B>,
     routing_responder: RoutingNetwork,
 
     #[behaviour(ignore)]
@@ -87,20 +86,17 @@ pub struct Routing<B: 'static + BlockStore> {
 }
 
 impl<B: 'static + BlockStore> Routing<B> {
-    pub fn new(config: RoutingConfig, index_root: Option<CidCbor>, store: Arc<B>) -> Self {
+    pub fn new(config: RoutingConfig, store: Arc<B>) -> Self {
         let discovery = HubDiscovery::new(
             DiscoveryConfig::default(),
             config.peer_id,
             config.is_hub,
-            index_root,
+            store.clone(),
         );
         //  topic with identity hash
         let broadcaster = gossip_init(
             config.peer_id,
-            Vec::from([
-                IdentTopic::new(ROUTING_TOPIC),
-                IdentTopic::new(INDEX_TOPIC),
-            ]),
+            Vec::from([IdentTopic::new(ROUTING_TOPIC), IdentTopic::new(INDEX_TOPIC)]),
         );
 
         Self {
@@ -401,8 +397,8 @@ mod tests {
     struct Peer {
         peer_id: PeerId,
         addr: Multiaddr,
-        swarm: Swarm<Routing<MemoryBlockStore>>,
-        bs: Arc<MemoryBlockStore>,
+        swarm: Swarm<Routing<LocalIndex<MemoryBlockStore>>>,
+        bs: Arc<LocalIndex<MemoryBlockStore>>,
     }
 
     impl Peer {
@@ -410,7 +406,8 @@ mod tests {
             let (peer_id, trans) = mk_transport();
             let config = RoutingConfig { peer_id, is_hub };
             let store = Arc::new(MemoryBlockStore::default());
-            let rt = Routing::new(config, None, store.clone());
+            let store = Arc::new(crate::index::IndexableBlockstore::new(store));
+            let rt = Routing::new(config, store.clone());
             let mut swarm = Swarm::new(trans, rt, peer_id);
             Swarm::listen_on(&mut swarm, "/ip4/127.0.0.1/tcp/0".parse().unwrap()).unwrap();
             while swarm.next().now_or_never().is_some() {}
@@ -423,7 +420,7 @@ mod tests {
             }
         }
 
-        fn get_routing_table(&self) -> Index<MemoryBlockStore> {
+        fn get_routing_table(&self) -> Index<LocalIndex<MemoryBlockStore>> {
             return self.swarm.behaviour().routing_table.clone();
         }
 
@@ -477,7 +474,7 @@ mod tests {
             cids
         }
 
-        fn swarm(&mut self) -> &mut Swarm<Routing<MemoryBlockStore>> {
+        fn swarm(&mut self) -> &mut Swarm<Routing<LocalIndex<MemoryBlockStore>>> {
             &mut self.swarm
         }
 

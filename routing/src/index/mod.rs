@@ -8,12 +8,13 @@ pub use self::{
     hash::{BytesKey, Hash},
 };
 use blockstore::types::BlockStore;
-use libipld::Cid;
+use libipld::DefaultParams;
+use libipld::{Block, Cid};
 use node::Node;
 use serde::{de::DeserializeOwned, Deserialize, Serialize, Serializer};
 use serde_cbor::to_vec;
 use std::borrow::Borrow;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 const MAX_ARRAY_WIDTH: usize = 3;
 
@@ -26,6 +27,62 @@ pub trait ShrinkableMap<Q: ?Sized, V> {
     fn remove(&mut self, k: &Q) -> Option<V>;
     fn contains_key(&self, k: &Q) -> bool;
     fn is_empty(&self) -> bool;
+}
+
+//  thread safe HAMT
+#[derive(Debug)]
+pub struct IndexableBlockstore<B: BlockStore>(RwLock<Hamt<B, ()>>);
+
+impl<B: BlockStore> IndexableBlockstore<B> {
+    pub fn new(store: Arc<B>) -> Self {
+        Self(RwLock::new(Hamt::new(store)))
+    }
+
+    pub fn load(cid: &Cid, store: Arc<B>) -> Result<Self, Error> {
+        let index = Hamt::load(cid, store.clone()).map_err(|e| e)?;
+        Ok(Self(RwLock::new(index)))
+    }
+}
+
+impl<B: BlockStore<Params = DefaultParams>> BlockStore for IndexableBlockstore<B> {
+    type Params = DefaultParams;
+    fn get(&self, cid: &Cid) -> Result<Block<Self::Params>, blockstore::errors::Error> {
+        self.0.read().unwrap().store.get(cid)
+    }
+
+    fn insert(&self, block: &Block<Self::Params>) -> Result<(), blockstore::errors::Error> {
+        self.0
+            .write()
+            .unwrap()
+            .set(crate::tcid(*block.cid()), ())
+            .map_err(|e| blockstore::errors::Error::Other(e.to_string()))?;
+        self.0.read().unwrap().store.insert(block)
+    }
+
+    fn evict(&self, cid: &Cid) -> Result<(), blockstore::errors::Error> {
+        self.0
+            .write()
+            .unwrap()
+            .delete(&crate::tcid(*cid))
+            .map_err(|e| blockstore::errors::Error::Other(e.to_string()))?;
+        self.0.read().unwrap().store.evict(cid)
+    }
+
+    fn contains(&self, cid: &Cid) -> Result<bool, blockstore::errors::Error> {
+        self.0.read().unwrap().store.contains(cid)
+    }
+
+    fn index_root(&self) -> Option<Cid> {
+        if self.0.read().unwrap().is_empty() {
+            None
+        } else {
+            let res = match self.0.write().unwrap().flush() {
+                Ok(cid) => Some(cid),
+                Err(_) => None,
+            };
+            res
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
@@ -177,6 +234,14 @@ where
     /// Returns true if the HAMT has no entries
     pub fn is_empty(&self) -> bool {
         self.root.is_empty()
+    }
+
+    pub fn for_each<F>(&mut self, mut f: F) -> Result<(), Error>
+    where
+        V: DeserializeOwned,
+        F: FnMut(&K, &V) -> Result<(), Error>,
+    {
+        self.root.for_each(&self.store, &mut f)
     }
 
     /// Flush root and return Cid for hamt

@@ -175,6 +175,9 @@ where
                             if let Ok(p) = PeerId::from_str(&ch.responder) {
                                 if let Some(ma) = self.peer_table.get(&routing::PeerIdCbor::from(p))
                                 {
+                                    let mut peer_index =
+                                        Hamt::<S, ()>::load(cid, self.store.clone())
+                                            .map_err(|e| e.to_string())?;
                                     //  do something when a request for an index CID succeeded
                                     let f =
                                 |k: &routing::index::BytesKey, v: &()| -> Result<(), routing::index::Error> {
@@ -184,9 +187,7 @@ where
                                     self.routing.routing_table.lock().unwrap().extend(k.clone(), peer_ma_table).map_err(|e| e)?;
                                     Ok(())
                                 };
-                                    let mut peer_index =
-                                        Hamt::<S, ()>::load(cid, self.store.clone())
-                                            .map_err(|e| e.to_string())?;
+
                                     peer_index.for_each(f).map_err(|e| e.to_string())?;
                                     //  override just in case
 

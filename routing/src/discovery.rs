@@ -410,6 +410,13 @@ impl<B: 'static + BlockStore> NetworkBehaviour for Discovery<B> {
                         //  update our local peer table
                         //  extend overwrites colliding keys (we assume inbound information is most up to date)
                         if let Some(table) = response.hub_table {
+                            for peer_bytes in table.keys().next() {
+                                let pid = peer_bytes.to_pid().unwrap();
+                                for addr in table.get(peer_bytes).unwrap() {
+                                    //  we can safely unwrap as only valid Pids are inserted when using Routing
+                                    self.add_address(&pid, addr.clone());
+                                }
+                            }
                             self.hub_table.extend(table);
                         }
 

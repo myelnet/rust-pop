@@ -412,8 +412,8 @@ impl<B: 'static + BlockStore> NetworkBehaviour for Discovery<B> {
                         if let Some(table) = response.hub_table {
                             for peer_bytes in table.keys().next() {
                                 let pid = peer_bytes.to_pid().unwrap();
+                                //  we can safely unwrap as only valid Pids are inserted
                                 for addr in table.get(peer_bytes).unwrap() {
-                                    //  we can safely unwrap as only valid Pids are inserted when using Routing
                                     self.add_address(&pid, addr.clone());
                                 }
                             }

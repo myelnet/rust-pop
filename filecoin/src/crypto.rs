@@ -75,7 +75,6 @@ pub mod errors {
 #[repr(u8)]
 pub enum SignatureType {
     Secp256k1 = 1,
-    Ed25519 = 2
 }
 
 /// A cryptographic signature, represented in bytes, of any key protocol.

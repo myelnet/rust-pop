@@ -6,11 +6,14 @@ use std::io::{BufReader, BufWriter, ErrorKind};
 use std::path::PathBuf;
 
 use super::errors::Error;
-use filecoin::crypto::SignatureType;
 
 pub const KEYSTORE_NAME: &str = "keystore.json";
 
-pub type KeyType = SignatureType;
+#[derive(Clone, PartialEq, Debug, Eq, Serialize, Deserialize, Copy)]
+pub enum KeyType {
+    Secp256k1 = 1,
+    Ed25519 = 2,
+}
 
 #[derive(Clone, PartialEq, Debug, Eq, Serialize, Deserialize)]
 pub struct KeyInfo {
@@ -180,10 +183,7 @@ impl KeyStore {
 
     /// Return all of the info about keys that are stored in the KeyStore
     pub fn list_info(&self) -> Vec<KeyInfo> {
-        self.key_info
-            .iter()
-            .map(|(_, info)| info.clone())
-            .collect()
+        self.key_info.iter().map(|(_, info)| info.clone()).collect()
     }
 
     /// Return Keyinfo that corresponds to a given key

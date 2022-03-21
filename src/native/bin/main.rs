@@ -102,6 +102,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     match matches.subcommand_name() {
         Some("start") => start().await,
+        Some("info") => info().await,
         Some("add") => {
             let flags = matches.subcommand().unwrap().1;
             //  can safely unwrap subcommand because we have just checked its name
@@ -130,6 +131,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
         _ => unreachable!("parser should ensure only valid subcommand names are used"),
     }
+}
+
+async fn info() -> Result<(), Box<dyn Error>> {
+    let client = reqwest::Client::new();
+    let resp = client.post("http:://127.0.0.1:27403/info").send().await?;
+    println!("{:?}: {:?}", resp.status(), resp.text().await.unwrap());
+    Ok(())
 }
 
 async fn add(path: String) -> Result<(), Box<dyn Error>> {

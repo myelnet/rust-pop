@@ -19,6 +19,7 @@ use rand::prelude::*;
 // use routing::{Config as PeerDiscoveryConfig, PeerDiscovery};
 use std::collections::HashMap;
 use std::sync::Arc;
+use wallet::{KeyInfo, KeyStore, KeyStoreConfig, KeyType};
 use warp::Filter;
 
 const DATA_SIZE: usize = 104857600;
@@ -42,8 +43,11 @@ where
     Ipld: Decode<<<B as BlockStore>::Params as StoreParams>::Codecs>,
 {
     pub fn new(config: NodeConfig<B>) -> Self {
-        let local_key = identity::Keypair::generate_ed25519();
+        //  unwrap because we want to panic if there was an issue
+        let local_key = Self::get_peer_key().unwrap();
+
         let local_peer_id = PeerId::from(local_key.public());
+
         println!("Local peer id: {:?}", local_peer_id);
 
         let transport = build_transport(local_key.clone());
@@ -53,7 +57,6 @@ where
         let behaviour = DataTransferBehaviour::new(
             local_peer_id,
             Graphsync::new(GraphsyncConfig::default(), store.clone()),
-            // PeerDiscovery::new(PeerDiscoveryConfig::default(), local_peer_id),
         );
 
         let mut swarm = Swarm::new(transport, behaviour, local_peer_id);
@@ -65,6 +68,47 @@ where
         Node {
             swarm: Arc::new(Mutex::new(swarm)),
             store: { store.clone() },
+        }
+    }
+
+    pub fn get_peer_key() -> Result<identity::Keypair, String> {
+        match dirs::home_dir() {
+            Some(mut pop_dir) => {
+                pop_dir.push(".pop");
+                let mut key_store = KeyStore::new(KeyStoreConfig::Persistent(pop_dir)).unwrap();
+                //  check we have at least one Ed25519 keys in the store
+                let peer_infos = key_store.list_info();
+                let peer_infos: Vec<&KeyInfo> = peer_infos
+                    .iter()
+                    .filter(|info| info.key_type == KeyType::Ed25519)
+                    .collect();
+                // if not then generate a new one and insert it into keystore
+                if peer_infos.is_empty() {
+                    let local_key = identity::Keypair::generate_ed25519();
+                    // use public peer ID as the key
+                    let pub_key = local_key.public().to_peer_id().to_string();
+                    // we'll use protobuf encoding for storage
+                    let priv_key = local_key
+                        .to_protobuf_encoding()
+                        .map_err(|e| e.to_string())?;
+                    key_store
+                        .put(pub_key, KeyInfo::new(KeyType::Ed25519, priv_key))
+                        .map_err(|e| e.to_string())?;
+                    //  flush to disk
+                    key_store.flush().map_err(|e| e.to_string())?;
+                    Ok(local_key)
+                } else {
+                    //  can safely unwrap cause we've checked its not empty
+                    let key = peer_infos.first().unwrap();
+                    let local_key = identity::Keypair::from_protobuf_encoding(&key.private_key())
+                        .map_err(|e| e.to_string())?;
+                    Ok(local_key)
+                }
+            }
+            None => {
+                println!("Failed to find home directory. New peer id won't be persisted",);
+                Ok(identity::Keypair::generate_ed25519())
+            }
         }
     }
 

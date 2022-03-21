@@ -8,6 +8,7 @@ members = [
   "blockstore",
   "data_transfer",
   "routing",
+
 ]
 
 [package]
@@ -51,8 +52,13 @@ bimap = "0.6.2"
 serde_repr = "0.1"
 smallvec = "1.8.0"
 serde_tuple = "0.5"
+dirs="4.0.0"
 
+#  discovery and routing related
 routing = { path = "./routing", default_features = false, optional=true }
+
+# for peer id persistence on native nodes
+wallet = { path = "./wallet", default_features = false, optional=true }
 
 #  cli related imports
 warp = { version = "0.3.2", optional = true }
@@ -97,6 +103,7 @@ native = [
   "clap",
   "reqwest",
   "async-std/tokio1",
+  "wallet"
 ]
 browser = [
   "libp2p-wasm-ext",

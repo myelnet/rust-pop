@@ -1,67 +1,227 @@
-pub mod client;
 mod fsm;
-pub mod mimesniff;
+mod mimesniff;
 mod network;
-
-pub use network::{
-    ChannelId, DataTransferNetwork, DtNetEvent, PullParams, PushParams, TransferMessage,
-    EXTENSION_KEY,
-};
 
 use blockstore::types::BlockStore;
 use filecoin::{cid_helpers::CidCbor, types::Cbor};
-use fsm::{Channel, ChannelEvent};
-use graphsync::traversal::Selector;
-use graphsync::{Extensions, Graphsync, GraphsyncEvent, IncomingRequestHook, RequestId};
-use libipld::codec::Decode;
-use libipld::store::StoreParams;
-use libipld::{Cid, Ipld};
-use libp2p::swarm::{
-    NetworkBehaviour, NetworkBehaviourAction, NetworkBehaviourEventProcess, PollParameters,
+use fsm::{DtEvent, DtState};
+use futures::{
+    channel::{mpsc, oneshot},
+    executor::ThreadPoolBuilder,
+    join,
+    prelude::*,
+    select,
+    stream::{IntoAsyncRead, TryStreamExt},
 };
-use libp2p::{Multiaddr, NetworkBehaviour, PeerId};
-use network::{
-    DealProposal, DealResponse, DealStatus, MessageType, TransferRequest, TransferResponse,
-    EMPTY_QUEUE_SHRINK_THRESHOLD,
+use graphsync::network::MessageCodec;
+use graphsync::res_mgr::ResponseBuilder;
+use graphsync::traversal::{resolve_unixfs, AsyncLoader, Progress, Selector};
+use graphsync::{
+    GraphsyncCodec, GraphsyncMessage, GraphsyncProtocol, GraphsyncRequest, Prefix, RequestId,
+    ResponseStatusCode,
+};
+use libipld::codec::Decode;
+use libipld::store::{DefaultParams, StoreParams};
+use libipld::{Block, Cid, Ipld};
+use libp2p::{
+    core::muxing::{event_from_ref_and_wrap, outbound_from_ref_and_wrap, StreamMuxerBox},
+    core::transport::{Boxed, ListenerEvent, Transport},
+    core::{Executor, ProtocolName},
+    multiaddr, Multiaddr, PeerId,
+};
+use mimesniff::{detect_content_type, ContentType};
+use multistream_select::{dialer_select_proto, listener_select_proto};
+pub use network::{
+    DealProposal, DealResponse, DealStatus, MessageType, PullParams, TransferMessage,
+    TransferRequest, TransferResponse, EXTENSION_KEY,
 };
 use num_bigint::ToBigInt;
-use std::{
-    collections::{HashMap, VecDeque},
-    sync::Arc,
-    task::{Context, Poll},
+use smallvec::SmallVec;
+use std::collections::hash_map::{Entry, HashMap};
+use std::io::{Error, ErrorKind};
+use std::sync::{
+    atomic::{AtomicI32, Ordering},
+    Arc,
 };
 
-pub struct DataTransfer {
-    peer_id: PeerId,
-    next_request_id: u64,
-    pending_events: VecDeque<DataTransferEvent>,
-    channels: HashMap<ChannelId, Channel>,
-    pub channel_ids: HashMap<RequestId, ChannelId>,
+#[cfg(not(target_os = "unknown"))]
+use async_std::task::spawn;
+
+#[cfg(target_os = "unknown")]
+use async_std::task::spawn_local as spawn;
+
+pub struct PullStream {
+    pub content_type: ContentType,
+    pub channel: mpsc::Receiver<Result<Vec<u8>, Error>>,
 }
 
-impl DataTransfer {
-    pub fn new(peer_id: PeerId) -> Self {
-        let now_unix = instant::now() as u64;
-        Self {
-            peer_id,
-            next_request_id: now_unix,
-            pending_events: VecDeque::default(),
-            channel_ids: HashMap::new(),
-            channels: HashMap::new(),
+impl PullStream {
+    pub fn reader(self) -> IntoAsyncRead<mpsc::Receiver<Result<Vec<u8>, Error>>> {
+        self.channel.into_async_read()
+    }
+    pub async fn discard_read(self) -> Result<(), Error> {
+        let mut stream = self.channel;
+        while let Some(result) = stream.next().await {
+            if let Err(e) = result {
+                return Err(e);
+            }
+        }
+        Ok(())
+    }
+}
+
+pub fn default_executor() -> Option<Box<dyn Executor + Send>> {
+    match ThreadPoolBuilder::new()
+        .name_prefix("client-executor")
+        .create()
+    {
+        Ok(tp) => Some(Box::new(move |f| tp.spawn_ok(f))),
+        Err(err) => {
+            log::warn!("Failed to create executor thread pool: {:?}", err);
+            None
         }
     }
+}
 
-    pub fn open_pull_channel(
-        &mut self,
+type AddrSendr = oneshot::Sender<SmallVec<[Multiaddr; 4]>>;
+
+enum ListenerCmd {
+    Addresses(AddrSendr),
+    Shutdown(oneshot::Sender<()>),
+}
+
+type ListenerCmdSendr = mpsc::Sender<ListenerCmd>;
+type ListenerCmdRecvr = mpsc::Receiver<ListenerCmd>;
+
+/// Optional configurations for the data transfer system.
+#[derive(Default)]
+pub struct DtOptions {
+    executor: Option<Box<dyn Executor + Send>>,
+    listen_addr: Option<Multiaddr>,
+}
+
+impl DtOptions {
+    pub fn as_listener(mut self, addr: Multiaddr) -> Self {
+        self.listen_addr = Some(addr);
+        self
+    }
+    pub fn with_executor(mut self, executor: Box<dyn Executor + Send>) -> Self {
+        self.executor = Some(executor);
+        self
+    }
+}
+
+/// A full DataTransfer implementation. The struct can be safely shared between threads.
+#[derive(Clone)]
+pub struct Dt<S: BlockStore> {
+    pub store: Arc<S>,
+    pub peer_id: PeerId,
+    id_counter: Arc<AtomicI32>,
+    outbound_events: mpsc::Sender<NetEvent>,
+    listener_cmds: Option<ListenerCmdSendr>,
+    executor: Arc<Box<dyn Executor + Send>>,
+}
+
+impl<S: 'static + BlockStore> Dt<S>
+where
+    Ipld: Decode<<S::Params as StoreParams>::Codecs>,
+{
+    pub fn new(
         peer_id: PeerId,
+        store: Arc<S>,
+        tp: Boxed<(PeerId, StreamMuxerBox)>,
+        options: DtOptions,
+    ) -> Self {
+        let (s, r) = mpsc::channel(128);
+        let transport = tp.clone();
+        let executor = Arc::new(options.executor.or_else(default_executor).unwrap());
+        executor.exec(
+            async move {
+                if let Err(e) = conn_loop(r, transport).await {
+                    println!("connection loop: {:?}", e);
+                }
+            }
+            .boxed(),
+        );
+        // If the host isn't listening we cannot send commands.
+        let mut listener_cmds = None;
+        if let Some(addr) = options.listen_addr {
+            let (cmd_sender, cmd_receiver) = mpsc::channel(4);
+            listener_cmds.replace(cmd_sender);
+            let store = store.clone();
+            // we don't use the executor here as it's mainly for wasm which doesn't need this loop.
+            spawn(async move {
+                match tp.listen_on(addr) {
+                    Ok(listener) => {
+                        if let Err(e) = accept_loop::<Boxed<(PeerId, StreamMuxerBox)>, S>(
+                            listener,
+                            store,
+                            cmd_receiver,
+                        )
+                        .await
+                        {
+                            println!("listener failed: {:?}", e);
+                        }
+                    }
+                    Err(e) => {
+                        println!("failed to start listener: {:?}", e);
+                    }
+                }
+            });
+        }
+        Self {
+            store,
+            peer_id,
+            id_counter: Arc::new(AtomicI32::new(1)),
+            outbound_events: s,
+            listener_cmds,
+            executor,
+        }
+    }
+    /// returns the listener addresses. If they have not been anounced yet waits for the first one.
+    /// addresses are formatted as p2p including the peer id.
+    pub async fn addresses(&mut self) -> Option<SmallVec<[Multiaddr; 4]>> {
+        if let Some(query) = self.listener_cmds.as_mut() {
+            let (s, r) = oneshot::channel();
+            query.try_send(ListenerCmd::Addresses(s)).ok()?;
+            let a = r.await.ok()?;
+            return Some(
+                a.iter()
+                    .map(|addr| {
+                        addr.clone()
+                            .with(multiaddr::Protocol::P2p(self.peer_id.into()))
+                    })
+                    .collect(),
+            );
+        }
+        None
+    }
+    /// shutdown the data transfer listener.
+    pub async fn shutdown(&mut self) -> Result<(), Error> {
+        if let Some(query) = self.listener_cmds.as_mut() {
+            let (s, r) = oneshot::channel();
+            query.try_send(ListenerCmd::Shutdown(s)).map_err(io_err)?;
+            return r.await.map_err(io_err);
+        }
+        Err(io_err("data transfer is not a listener"))
+    }
+    /// retrieve content from the given provider with the given params and selector.
+    /// The multiaddr must be a valid p2p multi address.
+    pub async fn pull(
+        &self,
+        peer: PeerId,
+        maddr: Multiaddr,
         root: Cid,
-        selector: Selector,
+        sel: Selector,
         params: PullParams,
-    ) -> (ChannelId, TransferMessage) {
+    ) -> Result<PullStream, Error> {
+        // For now we simplify and use a single id for all protocol requests
+        // it will be updated in any case when switching over to UUIDs.
+        let id = self.id_counter.fetch_add(1, Ordering::Relaxed);
+
         let cid = CidCbor::from(root);
-        let request_id = self.next_request_id();
         let voucher = DealProposal::Pull {
-            id: request_id,
+            id: id as u64,
             payload_cid: cid.clone(),
             params,
         };
@@ -73,542 +233,756 @@ impl DataTransfer {
                 pause: false,
                 partial: false,
                 pull: true,
-                selector: selector.clone(),
+                selector: sel.clone(),
                 voucher_type: voucher.voucher_type(),
                 voucher: Some(voucher),
-                transfer_id: request_id,
+                transfer_id: id as u64,
                 restart_channel: Default::default(),
             }),
             response: None,
         };
+        let buf = message.marshal_cbor().map_err(io_err)?;
+        let mut extensions = HashMap::new();
+        extensions.insert(EXTENSION_KEY.to_string(), buf);
 
-        let ch_id = self.channel_id(request_id, peer_id);
-        self.channels.insert(
-            ch_id.clone(),
-            Channel::New {
-                id: ch_id.clone(),
-                deal_id: request_id,
-            },
-        );
-        (ch_id, message)
-    }
-
-    pub fn open_push_channel(
-        &mut self,
-        peer_id: PeerId,
-        root: Cid,
-        selector: Selector,
-        params: PushParams,
-    ) -> (ChannelId, TransferMessage) {
-        let cid = CidCbor::from(root);
-        let request_id = self.next_request_id();
-        let voucher = DealProposal::Push {
-            id: request_id,
-            payload_cid: cid.clone(),
-            params,
-        };
-        let message = TransferMessage {
-            is_rq: true,
-            request: Some(TransferRequest {
-                root: cid,
-                mtype: MessageType::New,
-                pause: false,
-                partial: false,
-                pull: false,
-                selector: selector.clone(),
-                voucher_type: voucher.voucher_type(),
-                voucher: Some(voucher),
-                transfer_id: request_id,
-                restart_channel: Default::default(),
-            }),
-            response: None,
-        };
-        let ch_id = self.channel_id(request_id, peer_id);
-        self.channels.insert(
-            ch_id.clone(),
-            Channel::New {
-                id: ch_id.clone(),
-                deal_id: request_id,
-            },
-        );
-        (ch_id, message)
-    }
-
-    /// Constructs a channel id
-    fn channel_id(&self, id: u64, responder: PeerId) -> ChannelId {
-        ChannelId {
-            initiator: self.peer_id.to_base58(),
-            responder: responder.to_base58(),
+        let mut msg = GraphsyncMessage::default();
+        msg.requests.insert(
             id,
-        }
-    }
+            GraphsyncRequest {
+                id,
+                root,
+                selector: sel.clone(),
+                extensions,
+            },
+        );
+        // This channel will receive inbound messages from all protocols
+        let (inbound_send, mut inbound_receive) = mpsc::channel(4);
 
-    /// Returns the next request ID.
-    fn next_request_id(&mut self) -> u64 {
-        let request_id = self.next_request_id;
-        self.next_request_id += 1;
-        request_id
-    }
+        // outbound events are sent to the connection loop to be streamed over the relevant
+        // protocols.
+        let mut outbound = self.outbound_events.clone();
+        outbound
+            .start_send(NetEvent::NewRequest {
+                id,
+                peer,
+                maddr,
+                msg: NetMsg::Graphsync(msg),
+                chan: inbound_send,
+            })
+            .map_err(io_err)?;
 
-    fn get_channel_by_req_id(&mut self, req_id: RequestId) -> Option<(ChannelId, Channel)> {
-        let ch_id = self.channel_ids.get(&req_id)?;
-        let ch = self.channels.remove(ch_id)?;
-        Some((ch_id.clone(), ch))
-    }
+        // This is the final channel that will consume the transfer data.
+        let (mut s, mut r) = mpsc::channel(64);
+        // This channel waits for the first bytes to come in.
+        let (os, or) = oneshot::channel();
 
-    fn process_request(&mut self, peer: PeerId, request: TransferRequest) -> ChannelId {
-        let ch_id = self.channel_id(request.transfer_id, peer);
-        match request.voucher {
-            Some(DealProposal::Pull { id, .. }) => {
-                self.channels.insert(
-                    ch_id.clone(),
-                    Channel::New {
-                        id: ch_id.clone(),
-                        deal_id: id,
-                    },
-                );
-            }
-            Some(DealProposal::Push { id, .. }) => {
-                // start the state as accepted as the receiver accepts to receive the content
-                self.channels.insert(
-                    ch_id.clone(),
-                    Channel::Accepted {
-                        id: ch_id.clone(),
-                        deal_id: id,
-                    },
-                );
-                if let Some(cid) = request.root.to_cid() {
-                    let voucher = DealResponse::Push {
-                        id,
-                        status: DealStatus::Accepted,
-                        message: "".to_string(),
-                        secret: "".to_string(),
-                    };
-                    let tmsg = TransferMessage {
-                        is_rq: false,
-                        request: None,
-                        response: Some(TransferResponse {
-                            mtype: MessageType::New,
-                            accepted: true,
-                            paused: false,
-                            transfer_id: request.transfer_id,
-                            voucher_type: voucher.voucher_type(),
-                            voucher: Some(voucher),
+        let store = self.store.clone();
+        self.executor.exec(async move {
+            let mut state = DtState::New;
+
+            // This channel receives validated blocks from the async loader
+            let (mut bs, br) = mpsc::channel(16);
+            let mut loader_sender = bs.clone();
+            let loader = AsyncLoader::new(store, move |blk| {
+                loader_sender.start_send(blk).unwrap();
+                Ok(())
+            });
+            // This channel receives graphsync blocks to be sent to the async loader.
+            let sender = loader.sender();
+
+            let mut progress = Progress::new(loader);
+            let node = Ipld::Link(root);
+
+            // content type sender is take once when receiving the first bytes
+            let mut ct_sender = Some(os);
+            let mut ts = s.clone();
+            // There is a race between the traversal future and when the block stream finishes
+            // so we must wait for both to end before we can register all the blocks are received.
+            let mut traverse = Box::pin(async {
+                join!(
+                    progress
+                        .walk_adv(&node, sel, &|_, _| Ok(()))
+                        .then(|res| async move {
+                            // once the traversal is over we close the validated block channel
+                            // sender to let the block stream fold complete.
+                            bs.close_channel();
+                            res
                         }),
-                    };
-                    let mut extensions = HashMap::new();
-                    extensions.insert(EXTENSION_KEY.to_string(), tmsg.marshal_cbor().unwrap());
-                    // in the case pf a push request, the responder initiates the graphsync request
-                    self.pending_events
-                        .push_back(DataTransferEvent::GsOutbound {
-                            ch_id: ch_id.clone(),
-                            peer_id: peer,
-                            root: cid,
-                            selector: request.selector,
-                            extensions,
-                        });
-                }
-            }
-            _ => {}
-        }
-        ch_id
-    }
+                    // the block receiver is folded to capture the total size of content received.
+                    br.fold(0, |acc, blk| {
+                        // during the fold operation we're actually resolving the content bytes and
+                        // sending them over to the stream.
+                        if let Some(Ipld::Bytes(bytes)) =
+                            resolve_unixfs(&blk.data).or(Some(blk.data))
+                        {
+                            if let Some(os) = ct_sender.take() {
+                                drop(os.send(detect_content_type(&bytes)));
+                            }
+                            ts.start_send(Ok(bytes)).unwrap();
+                        }
+                        future::ready(acc + blk.size)
+                    })
+                )
+            })
+            .fuse();
 
-    fn process_response(&mut self, peer: PeerId, response: TransferResponse) -> ChannelId {
-        let ch_id = self.channel_id(response.transfer_id, peer);
-        if response.accepted {
-            match response.voucher {
-                Some(DealResponse::Pull { status, .. }) => {
-                    match status {
-                        // if it's the response for a pull request, it was attached to the first graphsync
-                        // message.
-                        DealStatus::Accepted => {
-                            let ch = self
-                                .channels
-                                .remove(&ch_id)
-                                .expect("Expected channel to be created before accepted");
-                            let next_state = ch.transition(ChannelEvent::Accepted);
-                            self.channels.insert(ch_id.clone(), next_state.clone());
-                            self.pending_events.push_back(next_state.into());
-                        }
-                        // the completion response for a pull request is sent separately after the
-                        // transfer is completed.
-                        DealStatus::Completed => {
-                            let ch = self
-                                .channels
-                                .remove(&ch_id)
-                                .expect("Expected channel to be created before response");
-                            let next_state = ch.transition(ChannelEvent::Completed);
-                            self.channels.insert(ch_id.clone(), next_state.clone());
-                            self.pending_events.push_back(next_state.into());
-                        }
-                        _ => {}
-                    }
-                }
-                Some(DealResponse::Push { status, .. }) => {
-                    match status {
-                        // the response for a push request is sent as attachment to the graphsync
-                        // request.
-                        DealStatus::Accepted => {
-                            let ch = self
-                                .channels
-                                .remove(&ch_id)
-                                .expect("Expected channel to be created before accepted");
-                            let next_state = ch.transition(ChannelEvent::Accepted);
-                            self.channels.insert(ch_id.clone(), next_state.clone());
-                            self.pending_events.push_back(next_state.into());
-                        }
-                        // completed response is processed on the push receiver side to notify we have
-                        // sent all the blocks.
-                        DealStatus::Completed => {
-                            let ch = self
-                                .channels
-                                .remove(&ch_id)
-                                .expect("Expected channel to be created before response");
-                            let next_state = ch.transition(ChannelEvent::Completed);
-                            self.channels.insert(ch_id.clone(), next_state.clone());
-                            self.pending_events.push_back(next_state.into());
-                        }
-                        _ => {}
-                    }
-                }
-                // response is invalid as it didn't contain a voucher
-                _ => {}
-            }
-        } else {
-            log::info!("response {:?}", response);
-            unimplemented!("TODO");
-        }
-        ch_id
-    }
+            loop {
+                println!("loop");
+                // select the first future to complete after each iteration. Once we've both
+                // received all the blocks and the completion message we break out of it.
+                select! {
+                    (_result, total) = traverse => {
+                        log::info!("received all the blocks");
+                        // for now we register a single block received event at the end. This may changed in
+                        // the future to process payment operations.
+                        state = state.transition(DtEvent::BlockReceived { size: total });
+                        state = state.transition(DtEvent::AllBlocksReceived);
+                         if let DtState::Completed { .. } = state {
+                             s.close_channel();
+                             outbound.start_send(NetEvent::Cleanup { id, peer }).unwrap();
+                             break;
+                         }
+                    },
+                    // protocol inbound messages are received first.
+                    // If the channel is closed before we recived all the messages something went
+                    // wrong i.e. the provider closed the connection.
+                    ev = inbound_receive.select_next_some() => {
+                        match ev {
+                            TransferEvent::Partial(blocks) => {
+                                let blocks: Vec<Block<S::Params>> = blocks
+                                    .iter()
+                                    .map_while(|(prefix, data)| {
+                                        let prefix = Prefix::new_from_bytes(prefix).ok()?;
+                                        let cid = prefix.to_cid(data).ok()?;
+                                        Some(Block::new_unchecked(cid, data.to_vec()))
+                                    })
+                                    .collect();
 
-    pub fn inject_graphsync_event(&mut self, event: GraphsyncEvent) {
-        match event {
-            GraphsyncEvent::RequestAccepted(peer, req) => {
-                if let Ok(msg) = TransferMessage::try_from(&req.extensions) {
-                    if msg.is_rq {
-                        let ch_id = self.process_request(
-                            peer,
-                            msg.request
-                                .expect("Expected graphsync request to contain request"),
-                        );
-                        self.channel_ids.insert(req.id, ch_id);
-                    } else {
-                        let ch_id = self.process_response(
-                            peer,
-                            msg.response
-                                .expect("Expected graphsync request to contain response"),
-                        );
-                        self.channel_ids.insert(req.id, ch_id);
-                    }
-                }
-            }
-            GraphsyncEvent::ResponseCompleted(peer, req_ids) => {
-                for id in req_ids {
-                    // we are removing the channel here
-                    let (ch_id, ch) = self.get_channel_by_req_id(id).expect(
-                        "Expected channel to be created before graphsync response is completed",
-                    );
-                    match ch {
-                        // Accepted state is for push requests
-                        Channel::Accepted { deal_id, .. } => {
-                            let voucher = DealResponse::Push {
-                                id: deal_id,
-                                status: DealStatus::Completed,
-                                message: "".to_string(),
-                                secret: "".to_string(),
-                            };
-                            let tmsg = TransferMessage {
-                                is_rq: false,
-                                request: None,
-                                response: Some(TransferResponse {
-                                    mtype: MessageType::Complete,
-                                    accepted: true,
-                                    paused: false,
-                                    transfer_id: ch_id.id,
-                                    voucher_type: voucher.voucher_type(),
-                                    voucher: Some(voucher),
-                                }),
-                            };
-                            self.pending_events
-                                .push_back(DataTransferEvent::DtOutbound(peer, tmsg));
-                            // after we sent the completed message our transfer is complete.
-                            let next_state = Channel::Completed {
-                                id: ch_id,
-                                received: 0,
-                            };
-                            self.pending_events.push_back(next_state.into());
+                                for block in blocks {
+                                    sender.try_send(block).unwrap();
+                                }
+                                println!("parsed block");
+                            }
+                            // no need to cleanup because the channel was never registered.
+                            TransferEvent::DialFailed(e) => {
+                                s.try_send(Err(e)).unwrap();
+                                break;
+                            }
+                            // rejected is notified via the error oneshot channel
+                            // it will fail the initial future instead of returning a stream.
+                            TransferEvent::Rejected => {
+                                s.try_send(Err(Error::from(ErrorKind::InvalidInput))).unwrap();
+                                outbound.try_send(NetEvent::Cleanup { id, peer }).unwrap();
+                                break;
+                            }
+                            TransferEvent::ContentNotFound => {
+                                s.try_send(Err(Error::from(ErrorKind::NotFound))).unwrap();
+                                outbound.try_send(NetEvent::Cleanup { id, peer }).unwrap();
+                                break;
+                            }
+                            TransferEvent::Disconected(err) => {
+                                s.try_send(Err(err)).unwrap();
+                                break;
+                            }
+                            TransferEvent::CompleteFull => {
+                                log::info!("completed message");
+                                    // pull request clients should not receive requests
+                                    // assert!(!msg.is_rq);
+                                    // if let Some(DealResponse::Pull {
+                                    //     status: _deal_status @ DealStatus::Completed,
+                                    //     ..
+                                    // }) = msg.response.expect("to be a response").voucher
+                                    // {
+                                        // check the last transition to see if we can clean up.
+                                state = state.transition(DtEvent::Completed);
+                                if let DtState::Completed { .. } = state {
+                                    s.close_channel();
+                                    outbound.start_send(NetEvent::Cleanup { id, peer }).unwrap();
+                                    break;
+                                }
+                                    // }
+                            }
                         }
-                        // as the responder we sent the message confirming we are done sending all
-                        // the blocks.
-                        Channel::New { deal_id, .. } => {
-                            let voucher = DealResponse::Pull {
-                                id: deal_id,
-                                status: DealStatus::Completed,
-                                message: "Thanks for doing business with us".to_string(),
-                                payment_owed: (0_isize).to_bigint().unwrap(),
-                            };
-                            let tmsg = TransferMessage {
-                                is_rq: false,
-                                request: None,
-                                response: Some(TransferResponse {
-                                    mtype: MessageType::Complete,
-                                    accepted: true,
-                                    paused: false,
-                                    transfer_id: ch_id.id,
-                                    voucher_type: voucher.voucher_type(),
-                                    voucher: Some(voucher),
-                                }),
-                            };
-                            self.pending_events
-                                .push_back(DataTransferEvent::DtOutbound(peer, tmsg));
-                            self.pending_events
-                                .push_back(DataTransferEvent::Completed(ch_id, Ok(())));
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            GraphsyncEvent::ResponseReceived(peer, responses) => {
-                for res in responses.iter() {
-                    if let Ok(res) = TransferMessage::try_from(&res.extensions) {
-                        if let Some(response) = res.response {
-                            self.process_response(peer, response);
-                        }
-                    };
-                }
-            }
-            GraphsyncEvent::Progress {
-                req_id,
-                link,
-                size,
-                data,
-            } => {
-                let (ch_id, ch) = self
-                    .get_channel_by_req_id(req_id)
-                    .expect("Expected channel to be created before graphsync progress");
-                let event = ChannelEvent::BlockReceived { size };
-                let next_state = ch.transition(event);
-                self.channels.insert(ch_id.clone(), next_state.clone());
-                self.pending_events.push_back(DataTransferEvent::Block {
-                    ch_id,
-                    link,
-                    size,
-                    data,
-                });
-                self.pending_events.push_back(next_state.into());
-            }
-            GraphsyncEvent::Complete(req_id, result) => {
-                let (ch_id, ch) = self
-                    .get_channel_by_req_id(req_id)
-                    .expect("Expected channel to be created before graphsync complete");
-                let event = match result {
-                    Ok(()) => ChannelEvent::AllBlocksReceived,
-                    Err(e) => ChannelEvent::Failure {
-                        reason: e.to_string(),
                     },
                 };
-                let next_state = ch.transition(event);
-                self.channels.insert(ch_id, next_state.clone());
-                self.pending_events.push_back(next_state.into());
             }
-        }
-    }
-
-    pub fn inject_dt_event(&mut self, event: DtNetEvent) {
-        match event {
-            DtNetEvent::Request(peer_id, request) => {
-                self.process_request(peer_id, request);
+        }.boxed());
+        // Wait to receive the content type before returning the stream.
+        // Race for any error that might come up before the first bytes are received.
+        match or.await {
+            Ok(content_type) => {
+                println!("received content type");
+                Ok(PullStream {
+                    content_type,
+                    channel: r,
+                })
             }
-            DtNetEvent::Response(peer_id, response) => {
-                self.process_response(peer_id, response);
-            }
-        }
-    }
-
-    pub fn incoming_request_hook(&self) -> IncomingRequestHook {
-        Arc::new(|_peer, gs_req| {
-            let mut extensions = HashMap::new();
-            if let Ok(rmsg) = TransferMessage::try_from(&gs_req.extensions) {
-                if rmsg.is_rq {
-                    let req = rmsg
-                        .request
-                        .expect("Expected incoming message to have a request");
-                    if let DealProposal::Pull { id, .. } =
-                        req.voucher.expect("Expected request to have a voucher")
-                    {
-                        let voucher = DealResponse::Pull {
-                            id,
-                            status: DealStatus::Accepted,
-                            message: "".to_string(),
-                            payment_owed: (0_isize).to_bigint().unwrap(),
-                        };
-                        let tmsg = TransferMessage {
-                            is_rq: false,
-                            request: None,
-                            response: Some(TransferResponse {
-                                mtype: MessageType::New,
-                                accepted: true,
-                                paused: false,
-                                transfer_id: req.transfer_id,
-                                voucher_type: voucher.voucher_type(),
-                                voucher: Some(voucher),
-                            }),
-                        };
-                        extensions.insert(EXTENSION_KEY.to_string(), tmsg.marshal_cbor().unwrap());
-                    }
+            // channel was dropped because the transfer loop returned.
+            Err(e) => {
+                // check if the channel received any error.
+                if let Some(Err(e)) = r.next().await {
+                    return Err(e);
                 }
-                (true, extensions)
-            } else {
-                (false, extensions)
+                Err(io_err(e))
             }
-        })
+        }
+    }
+}
+
+fn io_err<E: Into<Box<dyn std::error::Error + Send + Sync>>>(e: E) -> Error {
+    Error::new(ErrorKind::Other, e)
+}
+
+enum NetMsg {
+    Graphsync(GraphsyncMessage),
+    Transfer(TransferMessage),
+}
+
+impl ProtocolName for NetMsg {
+    fn protocol_name(&self) -> &[u8] {
+        match *self {
+            NetMsg::Graphsync(_) => b"/ipfs/graphsync/1.0.0",
+            NetMsg::Transfer(_) => b"/fil/datatransfer/1.2.0",
+        }
+    }
+}
+
+enum NetEvent {
+    NewRequest {
+        id: RequestId,
+        peer: PeerId,
+        maddr: Multiaddr,
+        msg: NetMsg,
+        chan: mpsc::Sender<TransferEvent>,
+    },
+    Cleanup {
+        id: RequestId,
+        peer: PeerId,
+    },
+}
+
+struct Connection {
+    stream: Arc<StreamMuxerBox>,
+    requests: SmallVec<[RequestId; 4]>,
+}
+
+impl Connection {
+    fn new(stream: Arc<StreamMuxerBox>, req: RequestId) -> Self {
+        Self {
+            stream,
+            requests: SmallVec::from_vec(vec![req]),
+        }
+    }
+}
+
+// ========================== Client =====================================
+//
+
+enum TransferEvent {
+    DialFailed(Error),
+    Partial(Vec<(Vec<u8>, Vec<u8>)>),
+    ContentNotFound,
+    Rejected,
+    CompleteFull,
+    Disconected(Error),
+}
+
+// map a graphsync status code to a transfer event
+fn process_gs_event(
+    status: ResponseStatusCode,
+    blocks: Vec<(Vec<u8>, Vec<u8>)>,
+) -> Option<TransferEvent> {
+    println!("==> status {:?}", status);
+    match (status, blocks.is_empty()) {
+        (ResponseStatusCode::PartialResponse, false) => Some(TransferEvent::Partial(blocks)),
+        (ResponseStatusCode::RequestCompletedFull, false) => Some(TransferEvent::Partial(blocks)),
+        (ResponseStatusCode::RequestCompletedPartial, false) => {
+            Some(TransferEvent::Partial(blocks))
+        }
+        (ResponseStatusCode::RequestPaused, false) => Some(TransferEvent::Partial(blocks)),
+        (ResponseStatusCode::RequestRejected, _) => Some(TransferEvent::Rejected),
+        (ResponseStatusCode::RequestFailedContentNotFound, _) => {
+            Some(TransferEvent::ContentNotFound)
+        }
+        (_, false) => Some(TransferEvent::Partial(blocks)),
+        _ => None,
+    }
+}
+
+// The connection loop is responsible for opening new streams with peer or sending to open
+// connections. The request contains a sender to collect inbound messages.
+async fn conn_loop(
+    mut events: mpsc::Receiver<NetEvent>,
+    transport: Boxed<(PeerId, StreamMuxerBox)>,
+) -> Result<(), Error> {
+    // here we maintain a list of open connections with peers. If a peer isn't included in this
+    // list we dial and open a new stream. Channel sends outbound messages.
+    let mut conns: HashMap<PeerId, Connection> = HashMap::new();
+
+    // channels for each request are maintained here
+    let mut inbound: HashMap<RequestId, mpsc::Sender<TransferEvent>> = HashMap::new();
+
+    // global inbound channel, all inbound messages are sent through
+    let (in_sender, mut in_receiver) = mpsc::channel(64);
+
+    loop {
+        select! {
+            // Receive all the messages for a single peer inbound stream and forward them to the
+            // corresponding channels.
+            result = in_receiver.select_next_some() => {
+                match result {
+                    Ok(msg) => match msg {
+                    NetMsg::Graphsync(msg) => {
+                        let blocks = msg.blocks;
+                        let single = msg.responses.len() == 1;
+                        let mut responses = msg.responses.values();
+                        // handle single response differently so we don't clone the blocks.
+                        if single {
+                            let res = responses.next().unwrap();
+                            if let Some(ev) = process_gs_event(res.status, blocks) {
+                                if let Some(sender) = inbound.get_mut(&res.id) {
+                                    sender.send(ev).await.map_err(io_err)?;
+                                }
+                            }
+                        } else {
+                            for res in responses {
+                                if let Some(ev) = process_gs_event(res.status, blocks.clone()) {
+                                    if let Some(sender) = inbound.get_mut(&res.id) {
+                                        sender.try_send(ev).map_err(io_err)?;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    NetMsg::Transfer(msg) => {
+                        // make sure the message isn't empty
+                        if let (None, None) = (&msg.request, &msg.response) {
+                            continue;
+                        }
+                        // requests shouldn't be sent individually unless they're push
+                        if msg.is_rq {
+                            unimplemented!("TODO");
+                        } else {
+                            let id = msg.response.as_ref().expect("to be a response").transfer_id;
+                            if let Some(sender) = inbound.get_mut(&(id as i32)) {
+                                sender
+                                    .try_send(TransferEvent::CompleteFull)
+                                    .map_err(io_err)?;
+                            }
+                        }
+                    }
+                    },
+                    Err(e) => {
+                        let e: InboundError = e;
+                        let kind = e.err.kind();
+                        // The peer disconnected so we remove the muxer and shut down any
+                        // open channels.
+                        match kind {
+                            ErrorKind::UnexpectedEof
+                            | ErrorKind::BrokenPipe
+                            | ErrorKind::ConnectionReset => {
+                                log::info!("connection closed");
+                                if let Some(peer) = e.peer {
+                                    if let Some(conn) = conns.remove(&peer) {
+                                        for id in conn.requests {
+                                            if let Some(mut sender) = inbound.remove(&id) {
+                                                sender.try_send(TransferEvent::Disconected(Error::from(kind)))
+                                                    .map_err(io_err)?;
+                                                sender.close_channel();
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            _ => {
+                                log::info!("muxer error {:?}", e);
+                                // TODO: if something goes wrong for a specific channel we
+                                // should notify it so it can close up.
+                            }
+                        }
+                    }
+                };
+            },
+            ev = events.select_next_some() => {
+            match ev {
+                NetEvent::NewRequest {
+                    id,
+                    peer,
+                    maddr,
+                    msg,
+                    mut chan,
+                } => {
+                    match conns.entry(peer) {
+                        Entry::Occupied(mut entry) => {
+                            // We already have an open connection from a previous transfer
+                            inbound.insert(id, chan);
+
+                            // keep track of ongoing requests with the connection
+                            let conn = entry.get_mut();
+                            conn.requests.push(id);
+                            let mux = conn.stream.clone();
+
+                            spawn(async move {
+                                if let Err(e) = outbound_write(msg, mux).await {
+                                    log::info!("failed to write outbound: {:?}", e);
+                                }
+                            });
+                        }
+                        Entry::Vacant(entry) => {
+                            log::info!("dialing peer");
+
+                            let dial = match transport.clone().dial(maddr) {
+                                Ok(dial) => dial,
+                                Err(e) => {
+                                    chan.try_send(TransferEvent::DialFailed(io_err(e))).map_err(io_err)?;
+                                    continue;
+                                }
+                            };
+                            // Dial and open a new general muxed stream.
+                            let (_peer, mux) = match dial.await {
+                                Ok((p, m)) => (p, m),
+                                Err(e) => {
+                                    chan.try_send(TransferEvent::DialFailed(e)).map_err(io_err)?;
+                                    continue;
+                                }
+                            };
+
+                            log::info!("peer connected");
+                            let mux = Arc::new(mux);
+
+                            inbound.insert(id, chan);
+
+                            let inmux = mux.clone();
+                            let mut inbound_send = in_sender.clone();
+                            spawn(async move {
+                                // This loop listens for inbound stream events and negociates for any of
+                                // the supported protocols.
+                                if let Err(e) = inbound_loop(inbound_send.clone(), inmux).await {
+                                    log::info!("inbound error: {:?}", e);
+                                    inbound_send
+                                        .try_send(Err(InboundError { err: e, peer: Some(peer) }))
+                                        .unwrap();
+                                }
+                            });
+
+                            let outmux = mux.clone();
+                            spawn(async move {
+                                if let Err(e) = outbound_write(msg, outmux).await {
+                                    log::info!("failed to write outbound: {:?}", e);
+                                }
+                            });
+
+                            entry.insert(Connection::new(mux, id));
+                        }
+                    };
+                }
+                // Close any existing channel for a given request
+                NetEvent::Cleanup { id, peer } => {
+                    if let Some(conn) = conns.get_mut(&peer) {
+                        conn.requests.sort();
+                        if let Ok(idx) = conn.requests.binary_search(&id) {
+                            conn.requests.remove(idx);
+                        }
+                    }
+                    inbound.remove(&id);
+                }
+            }
+        },
+        }
+    }
+}
+
+enum Protocols {
+    Graphsync,
+    DataTransfer,
+}
+
+impl ProtocolName for Protocols {
+    fn protocol_name(&self) -> &[u8] {
+        match *self {
+            Protocols::Graphsync => b"/ipfs/graphsync/1.0.0",
+            Protocols::DataTransfer => b"/fil/datatransfer/1.2.0",
+        }
     }
 }
 
 #[derive(Debug)]
-pub enum DataTransferEvent {
-    DtOutbound(PeerId, TransferMessage),
-    GsOutbound {
-        ch_id: ChannelId,
-        peer_id: PeerId,
-        root: Cid,
-        selector: Selector,
-        extensions: Extensions,
-    },
-    Started(ChannelId),
-    Accepted(ChannelId),
-    Progress(ChannelId),
-    Block {
-        ch_id: ChannelId,
-        link: Cid,
-        size: usize,
-        data: Ipld,
-    },
-    Completed(ChannelId, Result<(), String>),
+struct InboundError {
+    peer: Option<PeerId>,
+    err: Error,
 }
 
-#[derive(NetworkBehaviour)]
-#[behaviour(
-    out_event = "DataTransferEvent",
-    poll_method = "poll",
-    event_process = true
-)]
-pub struct DataTransferBehaviour<S: BlockStore>
-where
-    Ipld: Decode<<S::Params as StoreParams>::Codecs>,
-{
-    graphsync: Graphsync<S>,
-    network: DataTransferNetwork,
-
-    #[behaviour(ignore)]
-    dt: DataTransfer,
-}
-
-impl<S: 'static + BlockStore> DataTransferBehaviour<S>
-where
-    Ipld: Decode<<S::Params as StoreParams>::Codecs>,
-{
-    pub fn new(peer_id: PeerId, mut graphsync: Graphsync<S>) -> Self {
-        let dt = DataTransfer::new(peer_id);
-        graphsync.register_incoming_request_hook(dt.incoming_request_hook());
-
-        Self {
-            graphsync,
-            network: DataTransferNetwork::new(),
-            dt,
-        }
-    }
-
-    pub fn pull(
-        &mut self,
-        peer_id: PeerId,
-        root: Cid,
-        selector: Selector,
-        params: PullParams,
-    ) -> Result<ChannelId, String> {
-        let (ch_id, message) = self
-            .dt
-            .open_pull_channel(peer_id, root, selector.clone(), params);
-        let buf = message.marshal_cbor().map_err(|e| e.to_string())?;
-        let mut extensions = HashMap::new();
-        extensions.insert(EXTENSION_KEY.to_string(), buf);
-        let rq_id = self.graphsync.request(peer_id, root, selector, extensions);
-        self.dt.channel_ids.insert(rq_id, ch_id.clone());
-        Ok(ch_id)
-    }
-
-    pub fn push(
-        &mut self,
-        peer_id: PeerId,
-        root: Cid,
-        selector: Selector,
-        params: PushParams,
-    ) -> Result<ChannelId, String> {
-        let (ch_id, message) = self
-            .dt
-            .open_push_channel(peer_id, root, selector.clone(), params);
-        self.network.send_message(&peer_id, message);
-        Ok(ch_id)
-    }
-
-    fn poll(
-        &mut self,
-        _: &mut Context,
-        _: &mut impl PollParameters,
-    ) -> Poll<
-        NetworkBehaviourAction<
-            <Self as NetworkBehaviour>::OutEvent,
-            <Self as NetworkBehaviour>::ProtocolsHandler,
-        >,
-    > {
-        if let Some(ev) = self.dt.pending_events.pop_front() {
-            match ev {
-                DataTransferEvent::DtOutbound(peer, msg) => {
-                    self.network.send_message(&peer, msg);
+// The inbound loop listens for any muxer inbound event. If an event is received it will try
+// negociating the protocol if supported and send it to the main inbound channel.
+// If an error is polled from the inbound, the loop will terminate and return the error.
+async fn inbound_loop(
+    messages: mpsc::Sender<Result<NetMsg, InboundError>>,
+    mux: Arc<StreamMuxerBox>,
+) -> Result<(), Error> {
+    let protos: SmallVec<[Vec<u8>; 2]> = vec![Protocols::Graphsync, Protocols::DataTransfer]
+        .into_iter()
+        .map(|p| p.protocol_name().to_vec())
+        .collect();
+    while let Some(inbound) = event_from_ref_and_wrap(mux.clone())
+        .await?
+        .into_inbound_substream()
+    {
+        let ps = protos.clone();
+        let sender = messages.clone();
+        spawn(async move {
+            match listener_select_proto(inbound, ps.into_iter()).await {
+                Ok((proto, mut io)) => {
+                    let mut send_err = sender.clone();
+                    if let Err(e) = read_proto(&mut io, &proto, sender).await {
+                        send_err
+                            .try_send(Err(InboundError { err: e, peer: None }))
+                            .unwrap();
+                    }
                 }
-                DataTransferEvent::GsOutbound {
-                    ch_id,
-                    peer_id,
-                    root,
-                    selector,
-                    extensions,
-                } => {
-                    let rq_id = self.graphsync.request(peer_id, root, selector, extensions);
-                    self.dt.channel_ids.insert(rq_id, ch_id);
-                }
-                _ => {
-                    return Poll::Ready(NetworkBehaviourAction::GenerateEvent(ev));
+                Err(_) => {
+                    // We received inbound messages for unsuported protocols: Ignore.
                 }
             }
-        } else if self.dt.pending_events.capacity() > EMPTY_QUEUE_SHRINK_THRESHOLD {
-            self.dt.pending_events.shrink_to_fit();
+        });
+    }
+    Ok(())
+}
+
+async fn read_proto<R>(
+    io: &mut R,
+    proto: &[u8],
+    mut sender: mpsc::Sender<Result<NetMsg, InboundError>>,
+) -> Result<(), Error>
+where
+    R: AsyncRead + AsyncWrite + Unpin + Send,
+{
+    match proto {
+        // handle graphsync protocol messages
+        gs_proto if gs_proto == Protocols::Graphsync.protocol_name() => {
+            let mut codec = GraphsyncCodec::<DefaultParams>::default();
+            // the response stream usually contains multiple messages
+            while let Ok(msg) = codec.read_message(&GraphsyncProtocol, io).await {
+                // there might be a way to avoid cloning by sending
+                // blocks separately.
+                sender
+                    .try_send(Ok(NetMsg::Graphsync(msg)))
+                    .map_err(io_err)?;
+            }
+            io.close().await?;
         }
-        Poll::Pending
-    }
+        dt_proto if dt_proto == Protocols::DataTransfer.protocol_name() => {
+            let mut buf = Vec::new();
+            io.read_to_end(&mut buf).await?;
+            io.close().await?;
+            let msg = TransferMessage::unmarshal_cbor(&buf).map_err(io_err)?;
+            // make sure the message isn't empty
+            sender.try_send(Ok(NetMsg::Transfer(msg))).map_err(io_err)?;
+        }
+        _ => unreachable!(),
+    };
+    Ok(())
+}
 
-    pub fn add_address(&mut self, peer_id: &PeerId, addr: Multiaddr) {
-        self.graphsync.add_address(peer_id, addr.clone());
+async fn outbound_write(msg: NetMsg, mux: Arc<StreamMuxerBox>) -> Result<(), Error> {
+    let outbound = outbound_from_ref_and_wrap(mux).await?;
+
+    let (_proto, mut io) = dialer_select_proto(
+        outbound,
+        vec![msg.protocol_name()].into_iter(),
+        multistream_select::Version::V1,
+    )
+    .await?;
+
+    match msg {
+        NetMsg::Graphsync(msg) => {
+            let mut codec = GraphsyncCodec::<DefaultParams>::default();
+            codec
+                .write_message(&GraphsyncProtocol, &mut io, msg)
+                .await?;
+            io.close().await?;
+        }
+        NetMsg::Transfer(_msg) => (),
+    }
+    Ok(())
+}
+
+// ============================== Provider =====================================
+
+// The accept loop processes inbound request sent to the listener.
+async fn accept_loop<TTrans, S>(
+    listener: TTrans::Listener,
+    store: Arc<S>,
+    mut cmds: ListenerCmdRecvr,
+) -> Result<(), Error>
+where
+    TTrans: Transport<Output = (PeerId, StreamMuxerBox)>,
+    TTrans::Error: Send + Sync + 'static,
+    TTrans::ListenerUpgrade:
+        Future<Output = Result<(PeerId, StreamMuxerBox), Error>> + Send + 'static,
+    S: 'static + BlockStore,
+    Ipld: Decode<<S::Params as StoreParams>::Codecs>,
+{
+    let mut listen = Box::pin(listener);
+    let mut addresses: SmallVec<[Multiaddr; 4]> = SmallVec::new();
+
+    let mut pending_addr_query: Option<AddrSendr> = None;
+    loop {
+        select! {
+            result = listen.next().fuse() => match result {
+                Some(Ok(event)) => {
+                    match event {
+                        ListenerEvent::Upgrade {
+                            upgrade,
+                            local_addr: _,
+                            remote_addr: _,
+                        } => {
+                            let store = store.clone();
+                            spawn(async move {
+                                match upgrade.await {
+                                    Ok((_peer, muxer)) => {
+                                        if let Err(e) = listener_upgrade_handler::<S>(muxer, store).await {
+                                            println!("upgrade error: {:?}", e);
+                                        }
+                                    }
+                                    Err(e) => {
+                                        println!("upgrade failed: {:?}", e);
+                                    }
+                                }
+                            });
+                        }
+                        ListenerEvent::NewAddress(addr) => {
+                            if !addresses.contains(&addr) {
+                                addresses.push(addr);
+                            }
+                            if let Some(query) = pending_addr_query.take() {
+                                drop(query.send(addresses.clone()));
+                            };
+                        }
+                        ListenerEvent::AddressExpired(addr) => {
+                            addresses.retain(|x| x != &addr);
+                        }
+                        _ => (),
+                    };
+                }
+                _ => {}
+            },
+            cmd = cmds.select_next_some() => match cmd {
+                ListenerCmd::Addresses(sender) => {
+                    if addresses.is_empty() {
+                        pending_addr_query.replace(sender);
+                    } else {
+                        drop(sender.send(addresses.clone()));
+                    }
+                }
+                ListenerCmd::Shutdown(sender) => {
+                    drop(sender.send(()));
+                    return Ok(());
+                }
+            },
+        }
     }
 }
 
-impl<S: 'static + BlockStore> NetworkBehaviourEventProcess<GraphsyncEvent>
-    for DataTransferBehaviour<S>
+async fn listener_upgrade_handler<S>(muxer: StreamMuxerBox, store: Arc<S>) -> Result<(), Error>
 where
+    S: 'static + BlockStore,
     Ipld: Decode<<S::Params as StoreParams>::Codecs>,
 {
-    fn inject_event(&mut self, event: GraphsyncEvent) {
-        self.dt.inject_graphsync_event(event);
+    let mux = Arc::new(muxer);
+
+    let (in_sender, mut in_receiver) = mpsc::channel(16);
+    let inmux = mux.clone();
+    spawn(async move {
+        if let Err(e) = inbound_loop(in_sender.clone(), inmux).await {
+            println!("inbound error: {:?}", e);
+        }
+    });
+
+    while let Some(Ok(msg)) = in_receiver.next().await {
+        match msg {
+            NetMsg::Graphsync(msg) => {
+                if !msg.requests.is_empty() {
+                    for req in msg.requests.values() {
+                        let outmux = mux.clone();
+                        let request = req.clone();
+                        let store = store.clone();
+                        spawn(async move {
+                            if let Err(e) = graphsync_provider::<S>(store, request, outmux).await {
+                                println!("graphsync provider error: {:?}", e);
+                            }
+                        });
+                    }
+                }
+            }
+            NetMsg::Transfer(_msg) => {
+                unimplemented!("TODO");
+            }
+        }
     }
+    Ok(())
 }
 
-impl<S: 'static + BlockStore> NetworkBehaviourEventProcess<DtNetEvent> for DataTransferBehaviour<S>
+async fn graphsync_provider<S>(
+    store: Arc<S>,
+    request: GraphsyncRequest,
+    mux: Arc<StreamMuxerBox>,
+) -> Result<(), Error>
 where
+    S: 'static + BlockStore,
     Ipld: Decode<<S::Params as StoreParams>::Codecs>,
 {
-    fn inject_event(&mut self, event: DtNetEvent) {
-        self.dt.inject_dt_event(event);
+    let outbound = outbound_from_ref_and_wrap(mux.clone()).await?;
+
+    let (_proto, mut io) = dialer_select_proto(
+        outbound,
+        vec![Protocols::Graphsync.protocol_name()].into_iter(),
+        multistream_select::Version::V1,
+    )
+    .await?;
+
+    let mut codec = GraphsyncCodec::<DefaultParams>::default();
+    let mut builder = ResponseBuilder::new(&request, store);
+    while let Some(msg) = builder.next() {
+        codec
+            .write_message(&GraphsyncProtocol, &mut io, msg)
+            .await?;
     }
+    io.close().await?;
+
+    let id = request.id as u64;
+    let voucher = DealResponse::Pull {
+        id,
+        status: DealStatus::Completed,
+        message: "Thanks for doing business with us".to_string(),
+        payment_owed: (0_isize).to_bigint().unwrap(),
+    };
+    let tmsg = TransferMessage {
+        is_rq: false,
+        request: None,
+        response: Some(TransferResponse {
+            mtype: MessageType::Complete,
+            accepted: true,
+            paused: false,
+            transfer_id: id,
+            voucher_type: voucher.voucher_type(),
+            voucher: Some(voucher),
+        }),
+    };
+
+    let outbound = outbound_from_ref_and_wrap(mux).await?;
+
+    let (_proto, mut io) = dialer_select_proto(
+        outbound,
+        vec![Protocols::DataTransfer.protocol_name()].into_iter(),
+        multistream_select::Version::V1,
+    )
+    .await?;
+
+    let buf = tmsg.marshal_cbor().map_err(io_err)?;
+    io.write_all(&buf).await?;
+    io.close().await?;
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -616,17 +990,26 @@ mod tests {
     use super::*;
     use async_std::task;
     use blockstore::memory::MemoryDB as MemoryBlockStore;
+    use blockstore::types::DBStore;
     use dag_service::{add, cat};
     use futures::prelude::*;
-    use graphsync::traversal::RecursionLimit;
+    use graphsync::traversal::{RecursionLimit, Selector};
+    use graphsync::{Config, Graphsync};
+    use libipld::cbor::DagCborCodec;
+    use libipld::ipld;
+    use libipld::multihash::Code;
+    use libipld::{Block, Cid};
     use libp2p::core::muxing::StreamMuxerBox;
     use libp2p::core::transport::Boxed;
     use libp2p::identity;
+    use libp2p::multiaddr;
     use libp2p::noise::{Keypair, NoiseConfig, X25519Spec};
     use libp2p::swarm::SwarmEvent;
     use libp2p::tcp::TcpConfig;
-    use libp2p::{mplex, multiaddr, PeerId, Swarm, Transport};
+    use libp2p::{mplex, PeerId, Swarm, Transport};
     use rand::prelude::*;
+    use std::str::FromStr;
+    use std::thread;
     use std::time::Duration;
 
     fn mk_transport() -> (PeerId, Boxed<(PeerId, StreamMuxerBox)>) {
@@ -642,138 +1025,47 @@ mod tests {
             .upgrade(libp2p::core::upgrade::Version::V1)
             .authenticate(noise)
             .multiplex(mplex::MplexConfig::new())
-            .timeout(Duration::from_secs(20))
+            .timeout(Duration::from_millis(300))
             .boxed();
         (peer_id, transport)
     }
 
-    struct Peer {
-        peer_id: PeerId,
-        addr: Multiaddr,
-        swarm: Swarm<DataTransferBehaviour<MemoryBlockStore>>,
-        store: Arc<MemoryBlockStore>,
-    }
-
-    impl Peer {
-        fn new() -> Self {
-            let (peer_id, trans) = mk_transport();
-            let bs = Arc::new(MemoryBlockStore::default());
-            let gs = Graphsync::new(Default::default(), bs.clone());
-            let dt = DataTransferBehaviour::new(peer_id, gs);
-            let mut swarm = Swarm::new(trans, dt, peer_id);
-            Swarm::listen_on(&mut swarm, "/ip4/127.0.0.1/tcp/0".parse().unwrap()).unwrap();
-            while swarm.next().now_or_never().is_some() {}
-            let addr = Swarm::listeners(&swarm).next().unwrap().clone();
-            Self {
-                peer_id,
-                addr,
-                swarm,
-                store: bs,
-            }
-        }
-
-        fn add_address(&mut self, peer: &Peer) {
-            self.swarm
-                .behaviour_mut()
-                .add_address(&peer.peer_id, peer.addr.clone());
-        }
-
-        fn swarm(&mut self) -> &mut Swarm<DataTransferBehaviour<MemoryBlockStore>> {
-            &mut self.swarm
-        }
-
-        fn spawn(mut self, _name: &'static str) -> PeerId {
-            let peer_id = self.peer_id;
-            task::spawn(async move {
-                loop {
-                    let event = self.swarm.next().await;
-                    println!("event {:?}", event);
-                }
-            });
-            peer_id
-        }
-
-        async fn next(&mut self) -> Option<DataTransferEvent> {
-            loop {
-                let ev = self.swarm.next().await?;
-                if let SwarmEvent::Behaviour(event) = ev {
-                    match event {
-                        _ => return Some(event),
-                    }
-                } else {
-                    println!("swarm: {:?}", ev);
-                }
-            }
-        }
-    }
-
     #[async_std::test]
-    async fn test_pull() {
-        let peer1 = Peer::new();
-        let mut peer2 = Peer::new();
-        peer2.add_address(&peer1);
-
-        let store = peer1.store.clone();
-        let pid1 = peer1.spawn("peer1");
-
-        // generate 4MiB of random bytes
-        const FILE_SIZE: usize = 4 * 1024 * 1024;
-        let mut data = vec![0u8; FILE_SIZE];
-        rand::thread_rng().fill_bytes(&mut data);
-
-        let root = add(store.clone(), &data).unwrap();
-
-        let selector = Selector::ExploreRecursive {
-            limit: RecursionLimit::None,
-            sequence: Box::new(Selector::ExploreAll {
-                next: Box::new(Selector::ExploreRecursiveEdge),
-            }),
-            current: None,
-        };
-
-        let cid = root.unwrap();
-
-        let id = peer2
-            .swarm()
-            .behaviour_mut()
-            .pull(pid1, cid, selector, PullParams::default())
-            .unwrap();
-
-        loop {
-            if let Some(event) = peer2.next().await {
-                match event {
-                    DataTransferEvent::Started(_) => {}
-                    DataTransferEvent::Accepted(_) => {}
-                    DataTransferEvent::Progress(_) => {}
-                    DataTransferEvent::Block { .. } => {}
-                    DataTransferEvent::Completed(chid, Ok(())) => {
-                        assert_eq!(chid, id);
-                        break;
-                    }
-                    e => {
-                        panic!("unexpected event {:?}", e);
-                    }
-                }
-            }
-        }
-    }
-
-    #[async_std::test]
-    async fn test_push() {
+    async fn test_client() {
         use futures::join;
 
-        let mut peer1 = Peer::new();
-        let mut peer2 = Peer::new();
-        peer2.add_address(&peer1);
+        let store = Arc::new(MemoryBlockStore::default());
+        let (peer1, trans) = mk_transport();
+        let mut provider = Dt::new(
+            peer1.clone(),
+            store.clone(),
+            trans,
+            DtOptions {
+                executor: None,
+                listen_addr: Some("/ip4/127.0.0.1/tcp/0".parse().unwrap()),
+            },
+        );
 
-        let store = peer2.store.clone();
+        let mut addresses = provider.addresses().await.unwrap();
+        let maddr1 = addresses.pop().unwrap();
 
-        // generate 4MiB of random bytes
-        const FILE_SIZE: usize = 4 * 1024 * 1024;
-        let mut data = vec![0u8; FILE_SIZE];
-        rand::thread_rng().fill_bytes(&mut data);
+        const FILE_SIZE: usize = 1024 * 1024;
+        let mut data1 = vec![0u8; FILE_SIZE];
+        rand::thread_rng().fill_bytes(&mut data1);
 
-        let root = add(store.clone(), &data).unwrap();
+        let mut data2 = vec![0u8; FILE_SIZE];
+        rand::thread_rng().fill_bytes(&mut data2);
+
+        let mut data3 = vec![0u8; FILE_SIZE];
+        rand::thread_rng().fill_bytes(&mut data3);
+
+        let mut data4 = vec![0u8; FILE_SIZE];
+        rand::thread_rng().fill_bytes(&mut data4);
+
+        let root1 = add(store.clone(), &data1).unwrap().unwrap();
+        let root2 = add(store.clone(), &data2).unwrap().unwrap();
+        let root3 = add(store.clone(), &data3).unwrap().unwrap();
+        let root4 = add(store.clone(), &data4).unwrap().unwrap();
 
         let selector = Selector::ExploreRecursive {
             limit: RecursionLimit::None,
@@ -783,58 +1075,307 @@ mod tests {
             current: None,
         };
 
-        let cid = root.unwrap();
-        let pid1 = peer1.peer_id;
+        let (peer2, trans) = mk_transport();
+        let store2 = Arc::new(MemoryBlockStore::default());
 
-        // wait for both swarms to send a completed even in parallel
+        let client = Dt::new(peer2, store2, trans, Default::default());
+
+        let stream = client
+            .pull(
+                peer1,
+                maddr1.clone(),
+                root1,
+                selector.clone(),
+                Default::default(),
+            )
+            .await
+            .unwrap();
+
+        let mut reader = stream.reader();
+        let mut output: Vec<u8> = Vec::new();
+        assert_eq!(reader.read_to_end(&mut output).await.unwrap(), FILE_SIZE);
+        assert_eq!(output, data1);
+
+        let stream = client
+            .pull(
+                peer1,
+                maddr1.clone(),
+                root2,
+                selector.clone(),
+                Default::default(),
+            )
+            .await
+            .unwrap();
+        let mut reader = stream.reader();
+        let mut output: Vec<u8> = Vec::new();
+        assert_eq!(reader.read_to_end(&mut output).await.unwrap(), FILE_SIZE);
+        assert_eq!(output, data2);
+
+        // now let's try in parallel
         join!(
             async {
-                loop {
-                    if let Some(event) = &peer1.next().await {
-                        match event {
-                            DataTransferEvent::Started(_) => {}
-                            DataTransferEvent::Accepted(_) => {}
-                            DataTransferEvent::Progress(_) => {}
-                            DataTransferEvent::Block { .. } => {}
-                            DataTransferEvent::Completed(_chid, Ok(())) => {
-                                break;
-                            }
-                            e => {
-                                panic!("unexpected event {:?}", e);
-                            }
-                        }
-                    }
-                }
+                let stream = client
+                    .pull(
+                        peer1,
+                        maddr1.clone(),
+                        root3,
+                        selector.clone(),
+                        Default::default(),
+                    )
+                    .await
+                    .unwrap();
+                let mut reader = stream.reader();
+                let mut output: Vec<u8> = Vec::new();
+                assert_eq!(reader.read_to_end(&mut output).await.unwrap(), FILE_SIZE);
+                assert_eq!(output, data3);
             },
             async {
-                let id = peer2
-                    .swarm()
-                    .behaviour_mut()
-                    .push(pid1, cid, selector, PushParams::default())
+                let stream = client
+                    .pull(
+                        peer1,
+                        maddr1.clone(),
+                        root4,
+                        selector.clone(),
+                        Default::default(),
+                    )
+                    .await
                     .unwrap();
+                let mut reader = stream.reader();
+                let mut output: Vec<u8> = Vec::new();
+                assert_eq!(reader.read_to_end(&mut output).await.unwrap(), FILE_SIZE);
+                assert_eq!(output, data4);
+            }
+        );
+    }
 
-                loop {
-                    if let Some(event) = peer2.next().await {
-                        match event {
-                            DataTransferEvent::Started(_) => {}
-                            DataTransferEvent::Accepted(_) => {}
-                            DataTransferEvent::Progress(_) => {}
-                            DataTransferEvent::Block { .. } => {}
-                            DataTransferEvent::Completed(chid, Ok(())) => {
-                                assert_eq!(chid, id);
-                                break;
-                            }
-                            e => {
-                                panic!("unexpected event {:?}", e);
-                            }
-                        }
-                    }
-                }
+    // This test disconnects the peer right after completing leaving no time for the client
+    // to read the remaining of the inbound messages.
+    #[async_std::test]
+    async fn test_client_disconnect() {
+        use futures::join;
+
+        let store = Arc::new(MemoryBlockStore::default());
+        let (peer1, trans) = mk_transport();
+        let mut provider = Dt::new(
+            peer1.clone(),
+            store.clone(),
+            trans,
+            DtOptions {
+                executor: None,
+                listen_addr: Some("/ip4/127.0.0.1/tcp/0".parse().unwrap()),
             },
         );
-        let pstore = peer1.store.clone();
 
-        let buf = cat(pstore, cid).unwrap();
-        assert_eq!(&buf, &data);
+        let mut addresses = provider.addresses().await.unwrap();
+        let maddr1 = addresses.pop().unwrap();
+
+        const FILE_SIZE: usize = 4 * 1024 * 1024;
+        let mut data1 = vec![0u8; FILE_SIZE];
+        rand::thread_rng().fill_bytes(&mut data1);
+
+        let root1 = add(store.clone(), &data1).unwrap().unwrap();
+
+        let selector = Selector::ExploreRecursive {
+            limit: RecursionLimit::None,
+            sequence: Box::new(Selector::ExploreAll {
+                next: Box::new(Selector::ExploreRecursiveEdge),
+            }),
+            current: None,
+        };
+
+        let (peer2, trans) = mk_transport();
+        let store2 = Arc::new(MemoryBlockStore::default());
+
+        let client = Dt::new(peer2, store2, trans, Default::default());
+
+        join!(
+            async {
+                match client
+                    .pull(
+                        peer1,
+                        maddr1.clone(),
+                        root1,
+                        selector.clone(),
+                        Default::default(),
+                    )
+                    .await
+                {
+                    Ok(stream) => {
+                        let mut reader = stream.reader();
+                        let mut output: Vec<u8> = Vec::new();
+                        if let Err(e) = reader.read_to_end(&mut output).await {
+                            assert_eq!(e.kind(), ErrorKind::Other);
+                        } else {
+                            panic!("transfer should be interupted");
+                        }
+                    }
+                    Err(e) => {
+                        println!("received err {:?}", e);
+                        assert_eq!(e.kind(), ErrorKind::Other);
+                    }
+                };
+            },
+            async {
+                provider.shutdown().await.unwrap();
+            },
+        );
+    }
+
+    #[async_std::test]
+    async fn content_not_found() {
+        let store1 = Arc::new(MemoryBlockStore::default());
+
+        let (peer1, trans) = mk_transport();
+        let mut provider = Dt::new(
+            peer1.clone(),
+            store1.clone(),
+            trans,
+            DtOptions {
+                executor: None,
+                listen_addr: Some("/ip4/127.0.0.1/tcp/0".parse().unwrap()),
+            },
+        );
+
+        let mut addresses = provider.addresses().await.unwrap();
+
+        let maddr1 = addresses.pop().unwrap();
+
+        let root1 =
+            Cid::from_str("bafybeih6zpuf6ezaz4ylaeg4hpgaxrx43tprc6sxo2wcfzpsudgk5iig3u").unwrap();
+        let selector = Selector::ExploreRecursive {
+            limit: RecursionLimit::None,
+            sequence: Box::new(Selector::ExploreAll {
+                next: Box::new(Selector::ExploreRecursiveEdge),
+            }),
+            current: None,
+        };
+
+        let (peer2, trans) = mk_transport();
+        let store2 = Arc::new(MemoryBlockStore::default());
+
+        let client = Dt::new(peer2, store2, trans, Default::default());
+
+        match client
+            .pull(
+                peer1,
+                maddr1.clone(),
+                root1,
+                selector.clone(),
+                Default::default(),
+            )
+            .await
+        {
+            Ok(_) => panic!("expected transfer to fail immediately"),
+            Err(e) => assert_eq!(e.kind(), ErrorKind::NotFound),
+        }
+
+        // we can fetch another file after
+        const FILE_SIZE: usize = 1024 * 1024;
+        let mut data1 = vec![0u8; FILE_SIZE];
+        rand::thread_rng().fill_bytes(&mut data1);
+
+        let root1 = add(store1.clone(), &data1).unwrap().unwrap();
+
+        let stream = client
+            .pull(
+                peer1,
+                maddr1.clone(),
+                root1,
+                selector.clone(),
+                Default::default(),
+            )
+            .await
+            .unwrap();
+
+        let mut reader = stream.reader();
+        let mut output: Vec<u8> = Vec::new();
+        assert_eq!(reader.read_to_end(&mut output).await.unwrap(), FILE_SIZE);
+        assert_eq!(output, data1);
+    }
+
+    #[async_std::test]
+    async fn test_dial_failed() {
+        let store = Arc::new(MemoryBlockStore::default());
+
+        let (peer1, trans) = mk_transport();
+        let mut provider = Dt::new(
+            peer1.clone(),
+            store.clone(),
+            trans,
+            DtOptions {
+                executor: None,
+                listen_addr: Some("/ip4/127.0.0.1/tcp/0".parse().unwrap()),
+            },
+        );
+
+        let maddr1 = provider.addresses().await.unwrap().pop().unwrap();
+
+        // peer will not be reachable
+        provider.shutdown().await;
+
+        let root1 =
+            Cid::from_str("bafybeih6zpuf6ezaz4ylaeg4hpgaxrx43tprc6sxo2wcfzpsudgk5iig3u").unwrap();
+        let selector = Selector::ExploreRecursive {
+            limit: RecursionLimit::None,
+            sequence: Box::new(Selector::ExploreAll {
+                next: Box::new(Selector::ExploreRecursiveEdge),
+            }),
+            current: None,
+        };
+
+        let (peer2, trans) = mk_transport();
+        let store2 = Arc::new(MemoryBlockStore::default());
+
+        let client = Dt::new(peer2, store2, trans, Default::default());
+
+        match client
+            .pull(
+                peer1,
+                maddr1.clone(),
+                root1,
+                selector.clone(),
+                Default::default(),
+            )
+            .await
+        {
+            Ok(_) => panic!("expected transfer to fail immediately"),
+            Err(e) => assert_eq!(e.kind(), ErrorKind::Other),
+        }
+
+        // we can try again
+        let (peer1, trans) = mk_transport();
+        let mut provider = Dt::new(
+            peer1.clone(),
+            store.clone(),
+            trans,
+            DtOptions {
+                executor: None,
+                listen_addr: Some("/ip4/127.0.0.1/tcp/0".parse().unwrap()),
+            },
+        );
+
+        let maddr1 = provider.addresses().await.unwrap().pop().unwrap();
+
+        const FILE_SIZE: usize = 1024 * 1024;
+        let mut data1 = vec![0u8; FILE_SIZE];
+        rand::thread_rng().fill_bytes(&mut data1);
+
+        let root1 = add(store.clone(), &data1).unwrap().unwrap();
+
+        let stream = client
+            .pull(
+                peer1,
+                maddr1.clone(),
+                root1,
+                selector.clone(),
+                Default::default(),
+            )
+            .await
+            .unwrap();
+
+        let mut reader = stream.reader();
+        let mut output: Vec<u8> = Vec::new();
+        assert_eq!(reader.read_to_end(&mut output).await.unwrap(), FILE_SIZE);
+        assert_eq!(output, data1);
     }
 }

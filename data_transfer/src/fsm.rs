@@ -1,36 +1,15 @@
-use super::{ChannelId, DataTransferEvent};
-
 #[derive(Debug, PartialEq, Clone)]
-pub enum Channel {
-    New {
-        id: ChannelId,
-        deal_id: u64,
-    },
-    Accepted {
-        id: ChannelId,
-        deal_id: u64,
-    },
-    Ongoing {
-        id: ChannelId,
-        received: usize,
-        all_received: bool,
-    },
-    PendingLastBlocks {
-        id: ChannelId,
-        received: usize,
-    },
-    Failed {
-        id: ChannelId,
-        reason: String,
-    },
-    Completed {
-        id: ChannelId,
-        received: usize,
-    },
+pub enum DtState {
+    New,
+    Accepted,
+    Ongoing { received: usize, all_received: bool },
+    PendingLastBlocks { received: usize },
+    Failed { reason: String },
+    Completed { received: usize },
 }
 
 #[derive(Debug, Clone)]
-pub enum ChannelEvent {
+pub enum DtEvent {
     Accepted,
     BlockReceived { size: usize },
     AllBlocksReceived,
@@ -38,101 +17,63 @@ pub enum ChannelEvent {
     Completed,
 }
 
-impl Channel {
-    pub fn transition(self, event: ChannelEvent) -> Channel {
+impl DtState {
+    pub fn transition(self, event: DtEvent) -> DtState {
         match (self, event) {
-            (Channel::New { id, .. }, ChannelEvent::BlockReceived { size }) => Channel::Ongoing {
-                id,
+            (DtState::New, DtEvent::BlockReceived { size }) => DtState::Ongoing {
                 received: size,
                 all_received: false,
             },
-            (Channel::New { id, .. }, ChannelEvent::Failure { reason }) => {
-                Channel::Failed { id, reason }
-            }
-            (Channel::New { id, deal_id }, ChannelEvent::Accepted) => {
-                Channel::Accepted { id, deal_id }
-            }
-            (Channel::New { id, .. }, ChannelEvent::Completed) => {
-                Channel::PendingLastBlocks { id, received: 0 }
-            }
-            (Channel::Accepted { id, .. }, ChannelEvent::BlockReceived { size }) => {
-                Channel::Ongoing {
-                    id,
-                    received: size,
-                    all_received: false,
-                }
-            }
-            (Channel::Accepted { id, .. }, ChannelEvent::Completed) => {
-                Channel::PendingLastBlocks { id, received: 0 }
-            }
+            (DtState::New, DtEvent::Failure { reason }) => DtState::Failed { reason },
+            (DtState::New, DtEvent::Accepted) => DtState::Accepted,
+            (DtState::New, DtEvent::Completed) => DtState::PendingLastBlocks { received: 0 },
+            (DtState::Accepted, DtEvent::BlockReceived { size }) => DtState::Ongoing {
+                received: size,
+                all_received: false,
+            },
+            (DtState::Accepted, DtEvent::Completed) => DtState::PendingLastBlocks { received: 0 },
             (
-                Channel::Ongoing {
-                    id,
+                DtState::Ongoing {
                     received,
                     all_received,
                 },
-                ChannelEvent::BlockReceived { size },
-            ) => Channel::Ongoing {
-                id,
+                DtEvent::BlockReceived { size },
+            ) => DtState::Ongoing {
                 received: received + size,
                 all_received,
             },
-            (Channel::Ongoing { id, received, .. }, ChannelEvent::AllBlocksReceived) => {
-                Channel::Ongoing {
-                    id,
-                    received,
-                    all_received: true,
-                }
-            }
+            (DtState::Ongoing { received, .. }, DtEvent::AllBlocksReceived) => DtState::Ongoing {
+                received,
+                all_received: true,
+            },
             (
-                Channel::Ongoing {
-                    id,
+                DtState::Ongoing {
                     received,
                     all_received,
                 },
-                ChannelEvent::Completed,
+                DtEvent::Completed,
             ) => {
                 if all_received {
-                    Channel::Completed { id, received }
+                    DtState::Completed { received }
                 } else {
-                    Channel::PendingLastBlocks { id, received }
+                    DtState::PendingLastBlocks { received }
                 }
             }
-            (Channel::Ongoing { id, .. }, ChannelEvent::Failure { reason }) => {
-                Channel::Failed { id, reason }
-            }
-            (Channel::PendingLastBlocks { id, received }, ChannelEvent::BlockReceived { size }) => {
-                Channel::PendingLastBlocks {
-                    id,
+            (DtState::Ongoing { .. }, DtEvent::Failure { reason }) => DtState::Failed { reason },
+            (DtState::PendingLastBlocks { received }, DtEvent::BlockReceived { size }) => {
+                DtState::PendingLastBlocks {
                     received: received + size,
                 }
             }
-            (Channel::PendingLastBlocks { id, received }, ChannelEvent::AllBlocksReceived) => {
-                Channel::Completed { id, received }
+            (DtState::PendingLastBlocks { received }, DtEvent::AllBlocksReceived) => {
+                DtState::Completed { received }
             }
-            (Channel::PendingLastBlocks { id, .. }, ChannelEvent::Failure { reason }) => {
-                Channel::Failed { id, reason }
+            (DtState::PendingLastBlocks { .. }, DtEvent::Failure { reason }) => {
+                DtState::Failed { reason }
             }
             (s, e) => {
                 panic!("Invalid state transition: {:#?} {:#?}", s, e)
             }
-        }
-    }
-}
-
-impl From<Channel> for DataTransferEvent {
-    fn from(ch: Channel) -> DataTransferEvent {
-        match ch {
-            Channel::New { id, .. } => DataTransferEvent::Started(id),
-            Channel::Accepted { id, .. } => DataTransferEvent::Accepted(id),
-            Channel::Ongoing {
-                id,
-                received: _,
-                all_received: _,
-            } => DataTransferEvent::Progress(id),
-            Channel::PendingLastBlocks { id, received: _ } => DataTransferEvent::Progress(id),
-            Channel::Failed { id, reason } => DataTransferEvent::Completed(id, Err(reason)),
-            Channel::Completed { id, received: _ } => DataTransferEvent::Completed(id, Ok(())),
         }
     }
 }

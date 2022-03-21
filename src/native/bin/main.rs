@@ -24,6 +24,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         .help("peer multi-addresses to connect to from start"),
                 ),
         )
+        .subcommand(Command::new("info").override_help("print info about the running node"))
         .subcommand(
             Command::new("add")
                 .override_help("adds a local file to pop node blockstore")

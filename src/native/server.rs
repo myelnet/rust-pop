@@ -1,4 +1,5 @@
 use async_std::task;
+use bitswap::Bitswap;
 use blockstore::types::BlockStore;
 use dag_service::{self, add_entries, car::import_car_file, Entry};
 use data_transfer::{DataTransferBehaviour, PullParams};
@@ -166,7 +167,7 @@ pub async fn retrieve_file<B: 'static + BlockStore>(
     key: String,
     peer: String,
     multiaddr: String,
-    swarm: Arc<Mutex<Swarm<DataTransferBehaviour<B>>>>,
+    swarm: Arc<Mutex<Swarm<Bitswap<B>>>>,
 ) -> Result<impl warp::Reply, warp::Rejection>
 where
     Ipld: Decode<<<B as BlockStore>::Params as StoreParams>::Codecs>,
@@ -186,9 +187,7 @@ where
         selector: Some(selector.clone()),
         ..Default::default()
     };
-    lock.behaviour_mut()
-        .pull(peer, cid, selector, params)
-        .map_err(|e| warp::reject::custom(Failure::TransferFailed { err: e.to_string() }))?;
+    lock.behaviour_mut().get(cid, Vec::from([peer]).into_iter());
 
     let resp = format!("transfer started in background");
     Ok(warp::reply::with_status(resp, http::StatusCode::OK))

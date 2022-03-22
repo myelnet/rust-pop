@@ -7,7 +7,7 @@ use data_transfer::{DataTransferBehaviour, DataTransferEvent, PullParams};
 use graphsync::traversal::{RecursionLimit, Selector};
 use graphsync::{Config as GraphsyncConfig, Graphsync};
 use instant::Instant;
-use libipld::codec::Decode;
+use libipld::codec::{Decode, References};
 use libipld::store::StoreParams;
 use libipld::Cid;
 use libipld::Ipld;
@@ -17,6 +17,7 @@ use libp2p::{self, identity, Multiaddr, PeerId};
 use parking_lot::Mutex;
 use rand::prelude::*;
 // use routing::{Config as PeerDiscoveryConfig, PeerDiscovery};
+use bitswap::{Bitswap, BitswapConfig, BitswapEvent};
 use std::collections::HashMap;
 use std::sync::Arc;
 use warp::Filter;
@@ -26,8 +27,9 @@ const DATA_SIZE: usize = 104857600;
 pub struct Node<B: 'static + BlockStore>
 where
     Ipld: Decode<<<B as BlockStore>::Params as StoreParams>::Codecs>,
+    Ipld: References<<<B as BlockStore>::Params as StoreParams>::Codecs>,
 {
-    pub swarm: Arc<Mutex<Swarm<DataTransferBehaviour<B>>>>,
+    pub swarm: Arc<Mutex<Swarm<Bitswap<B>>>>,
     pub store: Arc<B>,
 }
 
@@ -40,6 +42,7 @@ pub struct NodeConfig<B: 'static + BlockStore> {
 impl<B: BlockStore> Node<B>
 where
     Ipld: Decode<<<B as BlockStore>::Params as StoreParams>::Codecs>,
+    Ipld: References<<<B as BlockStore>::Params as StoreParams>::Codecs>,
 {
     pub fn new(config: NodeConfig<B>) -> Self {
         let local_key = identity::Keypair::generate_ed25519();
@@ -50,11 +53,7 @@ where
 
         let store = Arc::new(config.blockstore);
 
-        let behaviour = DataTransferBehaviour::new(
-            local_peer_id,
-            Graphsync::new(GraphsyncConfig::default(), store.clone()),
-            // PeerDiscovery::new(PeerDiscoveryConfig::default(), local_peer_id),
-        );
+        let behaviour = Bitswap::new(BitswapConfig::default(), store.clone());
 
         let mut swarm = Swarm::new(transport, behaviour, local_peer_id);
 
@@ -138,8 +137,7 @@ where
             .and(warp::body::json())
             .and(swarm_filter.clone())
             .and_then(
-                |simple_map: HashMap<String, String>,
-                 behaviour: Arc<Mutex<Swarm<DataTransferBehaviour<B>>>>| {
+                |simple_map: HashMap<String, String>, behaviour: Arc<Mutex<Swarm<Bitswap<B>>>>| {
                     //  can safely unwrap entries as if they are None the method will just return a failure
                     //  response to the requesting client
                     return retrieve_file(
@@ -180,14 +178,10 @@ where
 
         let start = Instant::now();
 
-        if let Err(e) = self
-            .swarm
+        self.swarm
             .lock()
             .behaviour_mut()
-            .pull(peer, cid, selector, params)
-        {
-            panic!("transfer failed {}", e);
-        }
+            .get(cid, Vec::from([peer]).into_iter());
 
         log::info!("==> Started transfer");
 
@@ -195,7 +189,7 @@ where
             let ev = self.swarm.lock().next().await.unwrap();
             if let SwarmEvent::Behaviour(event) = ev {
                 match event {
-                    DataTransferEvent::Completed(_, Ok(())) => {
+                    BitswapEvent::Complete(_, Ok(())) => {
                         let elapsed = start.elapsed();
                         log::info!("transfer took {:?}", elapsed);
                         break;

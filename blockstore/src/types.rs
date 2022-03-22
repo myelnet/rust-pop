@@ -1,8 +1,9 @@
 use crate::errors::Error;
 use async_trait::async_trait;
 
+use libipld::codec::References;
+use libipld::Ipld;
 use libipld::{store::StoreParams, Block, Cid};
-use std::iter::FromIterator;
 
 #[async_trait]
 pub trait BlockStore: Send + Sync + Sized {
@@ -15,6 +16,23 @@ pub trait BlockStore: Send + Sync + Sized {
     fn evict(&self, cid: &Cid) -> Result<(), Error>;
 
     fn contains(&self, cid: &Cid) -> Result<bool, Error>;
+
+    fn missing_blocks(&self, cid: &Cid) -> Result<Vec<Cid>, Error>
+    where
+        Ipld: References<<Self::Params as StoreParams>::Codecs>,
+    {
+        let mut stack = vec![*cid];
+        let mut missing = vec![];
+        while let Some(cid) = stack.pop() {
+            match self.get(&cid) {
+                Ok(block) => {block
+                    .references(&mut stack)
+                    .map_err(|e| Error::Other(e.to_string()))?;},
+                Err(_) => {missing.push(cid);},
+            }
+        }
+        Ok(missing)
+    }
 }
 
 pub trait DBStore: Send + Sync {

@@ -2,21 +2,25 @@ mod store;
 mod stream;
 pub mod transport;
 
+use bitswap::{Bitswap, BitswapConfig, BitswapEvent};
 use blockstore::memory::MemoryDB as BlockstoreMemory;
 use blockstore::types::BlockStore;
 use data_transfer::{
-    client::{Client, ClientOptions},
-    PullParams,
+    mimesniff::detect_content_type, DataTransferBehaviour, DataTransferEvent, PullParams,
 };
 use futures::channel::{mpsc, oneshot};
 use futures::StreamExt;
-use graphsync::traversal::unixfs_path_selector;
+use graphsync::traversal::{resolve_unixfs, unixfs_path_selector};
+use graphsync::{Config as GraphsyncConfig, Graphsync};
 use js_sys::{Promise, Uint8Array};
+use libipld::{cbor::DagCborCodec, multihash::Code, pb::PbNode, Block, Cid, Ipld};
 use libp2p::{
     core,
     core::muxing::StreamMuxerBox,
     core::transport::{Boxed, OptionalTransport, Transport},
-    identity, mplex, noise, Multiaddr, PeerId,
+    identity, mplex, noise,
+    swarm::{Swarm, SwarmBuilder, SwarmEvent},
+    Multiaddr, PeerId,
 };
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
@@ -41,8 +45,8 @@ pub use console_log::init_with_level as init_console_log;
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RequestParams {
-    pub maddress: String,
-    pub peer_id: String,
+    pub maddress: Vec<String>,
+    pub peer_ids: Vec<String>,
     pub cid: String,
 }
 
@@ -54,8 +58,9 @@ pub struct ResponseHeaders {
 
 #[wasm_bindgen]
 pub struct Node {
-    client: Client<CacheStore>,
-    pool: Rc<WorkerPool>,
+    transport: Boxed<(PeerId, StreamMuxerBox)>,
+    local_peer_id: PeerId,
+    store: Arc<CacheStore>,
 }
 
 // encapsulates a common transport and peer identity for each request.
@@ -71,58 +76,92 @@ impl Node {
         let local_peer_id = PeerId::from(local_key.public());
         log::info!("Local peer id: {:?}", local_peer_id);
 
-        let pool = Rc::new(WorkerPool::new(8).unwrap());
-
         let store = Arc::new(CacheStore::default());
-        let transport = build_transport(local_key.clone());
-        let epool = pool.clone();
-        let client = Client::new(
+        Self {
+            transport: build_transport(local_key.clone()),
             local_peer_id,
             store,
-            transport,
-            ClientOptions::default().with_executor(Box::new(move |fut| {
-                epool
-                    .run(|| wasm_bindgen_futures::spawn_local(fut))
-                    .unwrap();
-            })),
-        );
-        Self { client, pool }
+        }
     }
-    pub fn spawn_request(&self, js_params: JsValue) -> Result<Promise, JsValue> {
-        let client = self.client.clone();
+    pub fn spawn_request(&self, js_params: JsValue, pool: &WorkerPool) -> Result<Promise, JsValue> {
+        let store = self.store.clone();
 
+        let behaviour = Bitswap::new(BitswapConfig::default(), store.clone());
+        // swarm is not safe to share between threads so instead of wrapping into a mutex
+        // we create a new instance each time with the same transport backed by the same peer ID
+        let mut swarm = SwarmBuilder::new(self.transport.clone(), behaviour, self.local_peer_id)
+            .executor(Box::new(|fut| {
+                wasm_bindgen_futures::spawn_local(fut);
+            }))
+            .build();
         // JsValue is not safe to share between thread so we must deserialize on main thread
-        let params: RequestParams = js_params.into_serde().map_err(js_err)?;
+        let params: RequestParams = js_params.into_serde().unwrap();
 
-        let maddr: Multiaddr = params.maddress.parse().map_err(js_err)?;
-        let peer_id = PeerId::from_str(&params.peer_id).map_err(js_err)?;
+        // this sender receives the content type, meaning that we received the first bytes.
+        let (os, or) = oneshot::channel();
+        // the bytes are streamed through this channel.
+        let (mut sender, r) = mpsc::channel(64);
+        pool.run(move || {
+            let maddr: Vec<Multiaddr> =
+                params.maddress.iter().map(|m| m.parse().unwrap()).collect();
+            let peer_ids: Vec<PeerId> = params
+                .peer_ids
+                .iter()
+                .map(|p| PeerId::from_str(&p).unwrap())
+                .collect();
 
-        let (cid, selector) = match unixfs_path_selector(params.cid) {
-            Some((cid, sel)) => (cid, sel),
-            None => return Err(js_err("invalid IPFS path")),
-        };
+            let (cid, selector) = unixfs_path_selector(params.cid).unwrap();
 
-        let params = PullParams {
-            selector: Some(selector.clone()),
-            ..Default::default()
-        };
+            for (peer_id, ma) in peer_ids.iter().zip(maddr.iter()) {
+                swarm.behaviour_mut().add_address(peer_id, ma.clone());
+            }
 
-        let done = async move {
-            match client.pull(peer_id, maddr, cid, selector, params).await {
-                Ok(stream) => {
-                    let ct = stream.content_type;
-                    // the mpsc receiver is mapped into a readable stream source.
-                    let source =
-                        IntoUnderlyingSource::new(Box::new(stream.channel.map(
-                            |item| match item {
-                                Ok(bytes) => {
-                                    let data: JsValue =
-                                        js_sys::Uint8Array::from(bytes.as_slice()).into();
-                                    Ok(data)
+            let params = PullParams {
+                selector: Some(selector.clone()),
+                ..Default::default()
+            };
+
+            swarm.behaviour_mut().get(cid, peer_ids.into_iter());
+
+            log::info!("initiated pull");
+
+            // future is executed locally inside the thread
+            wasm_bindgen_futures::spawn_local(async move {
+                let mut osender = Some(os);
+                // we loop through swarm events and send chunks as shared memory back to the main thread. To
+                // resolve the content from the IPLD DAG we check for the bytes enum as these are the actual
+                // chunks of the DAGifyed content.
+                while let Some(evt) = swarm.next().await {
+                    if let SwarmEvent::Behaviour(event) = evt {
+                        match event {
+                            BitswapEvent::Block(bytes) => {
+                                if let Some(os) = osender.take() {
+                                    let ct = detect_content_type(&bytes);
+                                    drop(os.send(ct));
                                 }
-                                Err(e) => Err(js_err(e)),
-                            },
-                        )));
+                                sender.start_send(bytes).unwrap();
+                            }
+                            BitswapEvent::Complete(_, Ok(())) => {
+                                break;
+                            }
+                            e => {
+                                log::info!("dt => {:?}", e);
+                            }
+                        }
+                    } else {
+                        log::info!("event => {:?}", evt);
+                    }
+                }
+            });
+        })?;
+        let done = async move {
+            match or.await {
+                Ok(ct) => {
+                    // the mpsc receiver is mapped into a readable stream source.
+                    let source = IntoUnderlyingSource::new(Box::new(r.map(|bytes| {
+                        let data: JsValue = js_sys::Uint8Array::from(bytes.as_slice()).into();
+                        Ok(data)
+                    })));
                     // Set HWM to 0 to prevent the JS ReadableStream from buffering chunks in its queue,
                     // since the original Rust stream is better suited to handle that.
                     let strategy = QueuingStrategy::new(0.0);

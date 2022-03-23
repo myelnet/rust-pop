@@ -1,4 +1,3 @@
-use async_std::task;
 use blockstore::memory::MemoryDB;
 use criterion::async_executor::FuturesExecutor;
 use criterion::BenchmarkId;
@@ -6,7 +5,6 @@ use criterion::Criterion;
 use criterion::{criterion_group, criterion_main, BatchSize, Throughput};
 use dag_service::add;
 use data_transfer::{Dt, DtOptions, DtParams};
-use futures::prelude::*;
 use libipld::Cid;
 use libp2p::core::muxing::StreamMuxerBox;
 use libp2p::core::transport::Boxed;

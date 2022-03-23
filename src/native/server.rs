@@ -2,7 +2,8 @@ use async_std::task;
 use blockstore::types::BlockStore;
 use dag_service::{self, add_entries, car::import_car_file, Entry};
 use data_transfer::{Dt, DtParams};
-use graphsync::traversal::unixfs_path_selector;
+use futures::stream::{iter, StreamExt};
+use graphsync::traversal::{resolve_unixfs, unixfs_path_selector, BlockIterator};
 use libipld::codec::Decode;
 use libipld::store::StoreParams;
 use libipld::{Cid, Ipld};
@@ -207,6 +208,30 @@ where
     Err(warp::reject::custom(Failure::Other {
         err: "No addresses available".to_string(),
     }))
+}
+
+pub async fn resolve_file<B: 'static + BlockStore>(
+    path: String,
+    store: Arc<B>,
+) -> Result<impl warp::Reply, warp::Rejection>
+where
+    Ipld: Decode<<<B as BlockStore>::Params as StoreParams>::Codecs>,
+{
+    let (root, selector) = unixfs_path_selector(path)
+        .ok_or_else(|| warp::reject::custom(Failure::InvalidCid { err: String::new() }))?;
+    let it = BlockIterator::new(store, root, selector);
+    let stream = iter(it).filter_map(|blk| async {
+        let ipld = blk.ok()?.ipld().ok()?;
+        if let Ipld::Bytes(bytes) = resolve_unixfs(&ipld).or(Some(ipld))? {
+            return Some(io::Result::Ok(bytes));
+        } else {
+            None
+        }
+    });
+    let body = hyper::Body::wrap_stream(stream);
+    let mut resp = warp::reply::Response::new(body);
+    *resp.status_mut() = http::StatusCode::OK;
+    Ok(resp)
 }
 
 /// Builds the transport stack that LibP2P will communicate over.

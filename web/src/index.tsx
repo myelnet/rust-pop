@@ -79,6 +79,7 @@ function App() {
   const [vid, setVid] = useState("");
   const [loading, setLoading] = useState(false);
   const [client, setClient] = useState<Client | null>(null);
+  const [http, setHttp] = useState(false);
 
   const disabled = !root || !maddr || loading;
 
@@ -108,6 +109,31 @@ function App() {
       })
       .catch(console.error);
   }
+  function httpRequest() {
+    if (disabled) {
+      return;
+    }
+    setLoading(true);
+    localStorage.setItem(CID_KEY, root);
+    const start = performance.now();
+    fetch("http://localhost:27403/" + root)
+      .then((res) => res.blob())
+      .then((blob) => {
+        const url = URL.createObjectURL(blob);
+        setLoading(false);
+        if (/image/.test(blob.type)) {
+          setImg(url);
+        }
+        if (/video/.test(blob.type)) {
+          setVid(url);
+        }
+        const done = performance.now();
+        const duration = done - start;
+        console.log(`done in ${duration}ms (${blob.size / duration}bps)`);
+      })
+      .catch(console.error);
+  }
+
   useEffect(() => {
     // @ts-ignore
     if (wasm_bindgen) {
@@ -148,7 +174,21 @@ function App() {
         value={maddr}
         onChange={(e) => setMaddr(e.target.value)}
       />
-      <button className="btn" onClick={sendRequest} disabled={disabled}>
+      <div className="cbx">
+        <input
+          type="checkbox"
+          id="http"
+          name="http"
+          checked={http}
+          onChange={(_) => setHttp(!http)}
+        />
+        <label htmlFor="scales"> use http</label>
+      </div>
+      <button
+        className="btn"
+        onClick={http ? httpRequest : sendRequest}
+        disabled={disabled}
+      >
         request
       </button>
       <p className="p">{!!client && "wasm loaded"}</p>

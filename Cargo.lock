@@ -4282,6 +4282,7 @@ dependencies = [
  "getrandom 0.2.4",
  "gloo-file",
  "graphsync",
+ "hyper",
  "instant",
  "js-sys",
  "lazy_static",

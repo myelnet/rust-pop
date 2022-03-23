@@ -52,12 +52,6 @@ impl PathSegment {
             PathSegment::Int(int) => IpldIndex::List(*int),
         }
     }
-    pub fn to_string(&self) -> String {
-        match self {
-            PathSegment::String(string) => string.to_string(),
-            PathSegment::Int(int) => int.to_string(),
-        }
-    }
 }
 
 impl From<usize> for PathSegment {

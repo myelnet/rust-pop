@@ -4293,7 +4293,6 @@ dependencies = [
  "parking_lot 0.11.2",
  "rand 0.6.5",
  "rand 0.7.3",
- "rayon",
  "reqwest",
  "routing",
  "serde",

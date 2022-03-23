@@ -293,19 +293,7 @@ impl Cbor for DealResponse {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use async_std::net::{TcpListener, TcpStream};
-    use async_std::task;
-    use futures::prelude::*;
     use hex;
-    use libp2p::core::muxing::StreamMuxerBox;
-    use libp2p::core::transport::Boxed;
-    use libp2p::identity;
-    use libp2p::noise::{Keypair, NoiseConfig, X25519Spec};
-    use libp2p::swarm::SwarmEvent;
-    use libp2p::tcp::TcpConfig;
-    use libp2p::yamux::YamuxConfig;
-    use libp2p::{PeerId, Swarm, Transport};
-    use std::time::Duration;
 
     #[test]
     fn it_decodes_request() {

@@ -111,7 +111,7 @@ pub struct DtParams {
 impl DtParams {
     pub fn new(path: String) -> Result<Self, Error> {
         let (root, selector) = unixfs_path_selector(path)
-            .ok_or(Error::new(ErrorKind::InvalidInput, "invalid IPFS path"))?;
+            .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "invalid IPFS path"))?;
         Ok(Self { root, selector })
     }
     pub fn full_from_root(root: Cid) -> Self {
@@ -292,7 +292,7 @@ where
             },
         );
         // This channel will receive inbound messages from all protocols
-        let (inbound_send, mut inbound_receive) = mpsc::channel(64);
+        let (inbound_send, mut inbound_receive) = mpsc::channel(4);
 
         // outbound events are sent to the connection loop to be streamed over the relevant
         // protocols.
@@ -353,7 +353,7 @@ where
                             resolve_unixfs(&blk.data).or(Some(blk.data))
                         {
                             if let Some(os) = ct_sender.take() {
-                                drop(os.send(detect_content_type(&bytes)));
+                                os.send(detect_content_type(&bytes)).unwrap();
                             }
                             ts.start_send(Ok(bytes)).unwrap();
                         }
@@ -419,21 +419,13 @@ where
                                 break;
                             }
                             TransferEvent::CompleteFull => {
-                                    // pull request clients should not receive requests
-                                    // assert!(!msg.is_rq);
-                                    // if let Some(DealResponse::Pull {
-                                    //     status: _deal_status @ DealStatus::Completed,
-                                    //     ..
-                                    // }) = msg.response.expect("to be a response").voucher
-                                    // {
-                                        // check the last transition to see if we can clean up.
+                                // check the last transition to see if we can clean up.
                                 state = state.transition(DtEvent::Completed);
                                 if let DtState::Completed { .. } = state {
                                     s.close_channel();
                                     outbound.start_send(NetEvent::Cleanup { id, peer }).unwrap();
                                     break;
                                 }
-                                    // }
                             }
                         }
                     },
@@ -571,8 +563,8 @@ async fn conn_loop(
                             let res = responses.next().unwrap();
                             if let Some(ev) = process_gs_event(res.status, blocks) {
                                 if let Some(sender) = inbound.get_mut(&res.id) {
-                                    sender.try_send(ev).map_err(io_err)?;
-                                    // sender.send(ev).await.map_err(io_err)?;
+                                    // sender.try_send(ev).map_err(io_err)?;
+                                    sender.send(ev).await.map_err(io_err)?;
                                 }
                             }
                         } else {
@@ -707,7 +699,7 @@ async fn conn_loop(
                 // Close any existing channel for a given request
                 NetEvent::Cleanup { id, peer } => {
                     if let Some(conn) = conns.get_mut(&peer) {
-                        conn.requests.sort();
+                        conn.requests.sort_unstable();
                         if let Ok(idx) = conn.requests.binary_search(&id) {
                             conn.requests.remove(idx);
                         }
@@ -767,8 +759,9 @@ async fn inbound_loop(
                             .unwrap();
                     }
                 }
-                Err(_) => {
+                Err(e) => {
                     // We received inbound messages for unsuported protocols: Ignore.
+                    log::info!("Protocol unsuported: {:?}", e);
                 }
             }
         });
@@ -829,7 +822,11 @@ async fn outbound_write(msg: NetMsg, mux: Arc<StreamMuxerBox>) -> Result<(), Err
                 .await?;
             io.close().await?;
         }
-        NetMsg::Transfer(_msg) => (),
+        NetMsg::Transfer(msg) => {
+            let buf = msg.marshal_cbor().map_err(io_err)?;
+            io.write_all(&buf).await?;
+            io.close().await?;
+        }
     }
     Ok(())
 }
@@ -883,7 +880,7 @@ where
                                 addresses.push(addr);
                             }
                             if let Some(query) = pending_addr_query.take() {
-                                drop(query.send(addresses.clone()));
+                                query.send(addresses.clone()).unwrap();
                             };
                         }
                         ListenerEvent::AddressExpired(addr) => {
@@ -892,7 +889,8 @@ where
                         _ => (),
                     };
                 }
-                _ => {}
+                Some(Err(e)) => println!("Listener error: {:?}", e),
+                None => return Ok(()),
             },
             cmd = cmds.select_next_some() => match cmd {
                 ListenerCmd::Addresses(sender) => {
@@ -903,7 +901,7 @@ where
                     }
                 }
                 ListenerCmd::Shutdown(sender) => {
-                    drop(sender.send(()));
+                    sender.send(()).unwrap();
                     return Ok(());
                 }
             },
@@ -970,7 +968,7 @@ where
 
     let mut codec = GraphsyncCodec::<DefaultParams>::default();
     let mut builder = ResponseBuilder::new(&request, store);
-    while let Some(msg) = builder.next() {
+    for msg in builder.by_ref() {
         codec
             .write_message(&GraphsyncProtocol, &mut io, msg)
             .await?;
@@ -996,45 +994,21 @@ where
             voucher: Some(voucher),
         }),
     };
-
-    let outbound = outbound_from_ref_and_wrap(mux).await?;
-
-    let (_proto, mut io) = dialer_select_proto(
-        outbound,
-        vec![Protocols::DataTransfer.protocol_name()].into_iter(),
-        multistream_select::Version::V1,
-    )
-    .await?;
-
-    let buf = tmsg.marshal_cbor().map_err(io_err)?;
-    io.write_all(&buf).await?;
-    io.close().await?;
-
-    Ok(())
+    outbound_write(NetMsg::Transfer(tmsg), mux).await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use async_std::task;
     use blockstore::memory::MemoryDB as MemoryBlockStore;
-    use blockstore::types::DBStore;
-    use dag_service::{add, cat};
-    use futures::prelude::*;
-    use graphsync::traversal::{RecursionLimit, Selector};
-    use graphsync::{Config, Graphsync};
-    use libipld::cbor::DagCborCodec;
-    use libipld::ipld;
-    use libipld::multihash::Code;
-    use libipld::{Block, Cid};
+    use dag_service::add;
+    use libipld::Cid;
     use libp2p::core::muxing::StreamMuxerBox;
     use libp2p::core::transport::Boxed;
     use libp2p::identity;
-    use libp2p::multiaddr;
     use libp2p::noise::{Keypair, NoiseConfig, X25519Spec};
-    use libp2p::swarm::SwarmEvent;
     use libp2p::tcp::TcpConfig;
-    use libp2p::{mplex, PeerId, Swarm, Transport};
+    use libp2p::{mplex, PeerId, Transport};
     use rand::prelude::*;
     use std::str::FromStr;
     use std::thread;

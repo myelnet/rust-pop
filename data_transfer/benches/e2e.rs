@@ -5,23 +5,15 @@ use criterion::BenchmarkId;
 use criterion::Criterion;
 use criterion::{criterion_group, criterion_main, BatchSize, Throughput};
 use dag_service::add;
-use data_transfer::{
-    client::{Client, ClientOptions},
-    DataTransferBehaviour, DataTransferEvent,
-};
+use data_transfer::{Dt, DtOptions, DtParams};
 use futures::prelude::*;
-use graphsync::{
-    traversal::{RecursionLimit, Selector},
-    Graphsync,
-};
 use libipld::Cid;
 use libp2p::core::muxing::StreamMuxerBox;
 use libp2p::core::transport::Boxed;
 use libp2p::noise::{Keypair, NoiseConfig, X25519Spec};
-use libp2p::swarm::SwarmEvent;
 use libp2p::tcp::TcpConfig;
 use libp2p::{identity, mplex, multiaddr, Multiaddr};
-use libp2p::{PeerId, Swarm, Transport};
+use libp2p::{PeerId, Transport};
 use rand::prelude::*;
 use std::sync::Arc;
 use std::time::Duration;
@@ -42,58 +34,6 @@ fn mk_transport() -> (PeerId, Boxed<(PeerId, StreamMuxerBox)>) {
         .timeout(Duration::from_secs(20))
         .boxed();
     (peer_id, transport)
-}
-
-struct Peer {
-    peer_id: PeerId,
-    addr: Multiaddr,
-    swarm: Swarm<DataTransferBehaviour<MemoryDB>>,
-}
-
-impl Peer {
-    fn new(store: Arc<MemoryDB>) -> Self {
-        let (peer_id, trans) = mk_transport();
-        let gs = Graphsync::new(Default::default(), store.clone());
-        let dt = DataTransferBehaviour::new(peer_id, gs);
-        let mut swarm = Swarm::new(trans, dt, peer_id);
-        Swarm::listen_on(&mut swarm, "/ip4/127.0.0.1/tcp/0".parse().unwrap()).unwrap();
-        while swarm.next().now_or_never().is_some() {}
-        let addr = Swarm::listeners(&swarm).next().unwrap().clone();
-        Self {
-            peer_id,
-            addr,
-            swarm,
-        }
-    }
-
-    fn add_address(&mut self, peer: &Peer) {
-        self.swarm
-            .behaviour_mut()
-            .add_address(&peer.peer_id, peer.addr.clone());
-    }
-
-    fn swarm(&mut self) -> &mut Swarm<DataTransferBehaviour<MemoryDB>> {
-        &mut self.swarm
-    }
-
-    fn spawn(mut self, _name: &'static str) -> PeerId {
-        let peer_id = self.peer_id;
-        task::spawn(async move {
-            loop {
-                let _ = self.swarm.next().await;
-            }
-        });
-        peer_id
-    }
-
-    async fn next(&mut self) -> Option<DataTransferEvent> {
-        loop {
-            let ev = self.swarm.next().await?;
-            if let SwarmEvent::Behaviour(event) = ev {
-                return Some(event);
-            }
-        }
-    }
 }
 
 fn prepare_blocks(size: usize) -> Dag {
@@ -120,134 +60,36 @@ fn bench_transfer(c: &mut Criterion) {
     let mut group = c.benchmark_group("data_transfer");
     for size in [MB, 4 * MB, 15 * MB, 60 * MB].iter() {
         group.throughput(Throughput::Bytes(*size as u64));
-        // group.bench_with_input(BenchmarkId::new("async", size), size, move |b, &size| {
-        //     b.iter_batched(
-        //         || prepare_blocks(size),
-        //         |dag| async move {
-        //             let peer1 = Peer::new(dag.store);
-        //             let mut peer2 = Peer::new(Arc::new(MemoryDB::default()));
-        //             peer2.add_address(&peer1);
-
-        //             let peer1 = peer1.spawn("peer1");
-
-        //             let selector = Selector::ExploreRecursive {
-        //                 limit: RecursionLimit::None,
-        //                 sequence: Box::new(Selector::ExploreAll {
-        //                     next: Box::new(Selector::ExploreRecursiveEdge),
-        //                 }),
-        //                 current: None,
-        //             };
-
-        //             let _ = peer2
-        //                 .swarm()
-        //                 .behaviour_mut()
-        //                 .pull(peer1, dag.root, selector, Default::default())
-        //                 .unwrap();
-
-        //             loop {
-        //                 if let Some(event) = peer2.next().await {
-        //                     match event {
-        //                         DataTransferEvent::Completed(_chid, Ok(())) => {
-        //                             break;
-        //                         }
-        //                         _ => {}
-        //                     }
-        //                 }
-        //             }
-        //         },
-        //         BatchSize::SmallInput,
-        //     );
-        // });
-        group.bench_with_input(BenchmarkId::new("client", size), size, move |b, &size| {
+        group.bench_with_input(BenchmarkId::new("stream", size), size, move |b, &size| {
             b.iter_batched(
                 || prepare_blocks(size),
                 |dag| async move {
-                    let peer1 = Peer::new(dag.store);
-                    let maddr1 = peer1.addr.clone();
-                    let peer1 = peer1.spawn("peer1");
+                    let (peer1, trans) = mk_transport();
+                    let mut provider = Dt::new(
+                        peer1.clone(),
+                        dag.store,
+                        trans,
+                        DtOptions::default().as_listener("/ip4/127.0.0.1/tcp/0".parse().unwrap()),
+                    );
+
+                    let mut addresses = provider.addresses().await.unwrap();
 
                     let (peer2, trans) = mk_transport();
                     let store = Arc::new(MemoryDB::default());
 
-                    let client = Client::new(peer2, store, trans, Default::default());
+                    let client = Dt::new(peer2, store, trans, Default::default());
 
-                    let selector = Selector::ExploreRecursive {
-                        limit: RecursionLimit::None,
-                        sequence: Box::new(Selector::ExploreAll {
-                            next: Box::new(Selector::ExploreRecursiveEdge),
-                        }),
-                        current: None,
-                    };
-
-                    let maddr1 = maddr1.with(multiaddr::Protocol::P2p(peer1.into()));
+                    let maddr1 = addresses.pop().unwrap();
 
                     let stream = client
-                        .pull(peer1, maddr1, dag.root, selector, Default::default())
+                        .pull(peer1, maddr1, DtParams::full_from_root(dag.root))
                         .await
                         .unwrap();
-                    let mut reader = stream.reader();
-
-                    let mut output: Vec<u8> = Vec::new();
-                    loop {
-                        if let Ok(_) = reader.read(&mut output).await {
-                            output = Vec::new();
-                        } else {
-                            break;
-                        }
-                    }
+                    stream.discard_read().await.unwrap();
                 },
                 BatchSize::SmallInput,
             );
         });
-
-        // group.bench_with_input(BenchmarkId::new("provider", size), size, move |b, &size| {
-        //     b.iter_batched(
-        //         || prepare_blocks(size),
-        //         |dag| async move {
-        //             let (peer1, trans) = mk_transport();
-        //             let mut provider = Client::new(
-        //                 peer1.clone(),
-        //                 dag.store,
-        //                 trans,
-        //                 ClientOptions::default()
-        //                     .as_listener("/ip4/127.0.0.1/tcp/0".parse().unwrap()),
-        //             );
-
-        //             let mut addresses = provider.addresses().await.unwrap();
-
-        //             let (peer2, trans) = mk_transport();
-        //             let store = Arc::new(MemoryDB::default());
-
-        //             let client = Client::new(peer2, store, trans, Default::default());
-
-        //             let selector = Selector::ExploreRecursive {
-        //                 limit: RecursionLimit::None,
-        //                 sequence: Box::new(Selector::ExploreAll {
-        //                     next: Box::new(Selector::ExploreRecursiveEdge),
-        //                 }),
-        //                 current: None,
-        //             };
-
-        //             let maddr1 = addresses.pop().unwrap();
-
-        //             let stream = client
-        //                 .pull(peer1, maddr1, dag.root, selector, Default::default())
-        //                 .await
-        //                 .unwrap();
-        //             let mut reader = stream.reader();
-
-        //             let mut output: Vec<u8> = Vec::new();
-        //             loop {
-        //                 if let Ok(_) = reader.read(&mut output).await {
-        //                     output = Vec::new();
-        //                 } else {
-        //                     break;
-        //                 }
-        //             }
-        //         },
-        //         BatchSize::SmallInput,
-        //     );
-        // });
     }
 }
 

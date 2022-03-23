@@ -6,5 +6,3 @@ pub use self::browser::*;
 mod native;
 #[cfg(feature = "native")]
 pub use self::native::node::*;
-#[cfg(feature = "native")]
-mod behaviour;

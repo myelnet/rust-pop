@@ -1,7 +1,7 @@
 use async_std::task;
 use blockstore::types::BlockStore;
 use dag_service::{self, add_entries, car::import_car_file, Entry};
-use data_transfer::{DataTransferBehaviour, PullParams};
+use data_transfer::{Dt, DtParams};
 use graphsync::traversal::unixfs_path_selector;
 use libipld::codec::Decode;
 use libipld::store::StoreParams;
@@ -10,9 +10,8 @@ use libp2p::{
     core,
     core::muxing::StreamMuxerBox,
     core::transport::{Boxed, OptionalTransport},
-    dns, identity, mplex, noise, tcp, websocket, Multiaddr, PeerId, Swarm, Transport,
+    dns, identity, mplex, noise, tcp, websocket, Multiaddr, PeerId, Transport,
 };
-use parking_lot::Mutex;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -28,6 +27,7 @@ enum Failure {
     InvalidPeerId { err: String },
     InvalidMultiAdd { err: String },
     TransferFailed { err: String },
+    Other { err: String },
 }
 impl Reject for Failure {}
 impl Failure {
@@ -40,6 +40,7 @@ impl Failure {
             Failure::InvalidPeerId { err } => err,
             Failure::InvalidMultiAdd { err } => err,
             Failure::TransferFailed { err } => err,
+            Failure::Other { err } => err,
         }
     }
 }
@@ -166,32 +167,46 @@ pub async fn retrieve_file<B: 'static + BlockStore>(
     key: String,
     peer: String,
     multiaddr: String,
-    swarm: Arc<Mutex<Swarm<DataTransferBehaviour<B>>>>,
+    dt: Dt<B>,
 ) -> Result<impl warp::Reply, warp::Rejection>
 where
     Ipld: Decode<<<B as BlockStore>::Params as StoreParams>::Codecs>,
 {
-    let (cid, selector) =
-        unixfs_path_selector(key).ok_or(warp::reject::custom(Failure::InvalidCid {
-            err: "Failed to parse ipfs path".to_string(),
-        }))?;
+    let params = DtParams::new(key)
+        .map_err(|e| warp::reject::custom(Failure::InvalidCid { err: e.to_string() }))?;
     let peer = PeerId::from_str(&peer)
         .map_err(|e| warp::reject::custom(Failure::InvalidPeerId { err: e.to_string() }))?;
     let multiaddr = Multiaddr::try_from(multiaddr)
         .map_err(|e| warp::reject::custom(Failure::InvalidMultiAdd { err: e.to_string() }))?;
 
-    let mut lock = swarm.lock();
-    lock.behaviour_mut().add_address(&peer, multiaddr);
-    let params = PullParams {
-        selector: Some(selector.clone()),
-        ..Default::default()
-    };
-    lock.behaviour_mut()
-        .pull(peer, cid, selector, params)
+    let stream = dt
+        .pull(peer, multiaddr, params)
+        .await
+        .map_err(|e| warp::reject::custom(Failure::TransferFailed { err: e.to_string() }))?;
+    stream
+        .discard_read()
+        .await
         .map_err(|e| warp::reject::custom(Failure::TransferFailed { err: e.to_string() }))?;
 
     let resp = format!("transfer started in background");
     Ok(warp::reply::with_status(resp, http::StatusCode::OK))
+}
+
+pub async fn node_info<B: 'static + BlockStore>(
+    mut dt: Dt<B>,
+) -> Result<impl warp::Reply, warp::Rejection>
+where
+    Ipld: Decode<<<B as BlockStore>::Params as StoreParams>::Codecs>,
+{
+    if let Some(addrs) = dt.addresses().await {
+        return Ok(warp::reply::with_status(
+            format!("listening addresses: {:?}", addrs),
+            http::StatusCode::OK,
+        ));
+    }
+    Err(warp::reject::custom(Failure::Other {
+        err: "No addresses available".to_string(),
+    }))
 }
 
 /// Builds the transport stack that LibP2P will communicate over.

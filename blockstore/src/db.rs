@@ -5,11 +5,11 @@ use libipld::{Block, Cid};
 pub use rocksdb::{
     perf::get_memory_usage_stats, DBIterator, IteratorMode, Options, WriteBatch, DB,
 };
-use std::path::Path;
+use std::{path::Path, sync::Arc};
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Db {
-    pub db: DB,
+    pub db: Arc<DB>,
 }
 
 impl Db {
@@ -22,7 +22,7 @@ impl Db {
         db_opts.increase_parallelism(num_cpus::get() as i32);
         db_opts.set_write_buffer_size(256 * 1024 * 1024); // increase from 64MB to 256MB
         Ok(Self {
-            db: DB::open(&db_opts, path)?,
+            db: Arc::new(DB::open(&db_opts, path)?),
         })
     }
 }

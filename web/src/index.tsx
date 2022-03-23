@@ -87,6 +87,8 @@ function App() {
       return;
     }
     setLoading(true);
+    localStorage.setItem(CID_KEY, root);
+    localStorage.setItem(ADDR_KEY, maddr);
     const start = performance.now();
     client
       .fetch(root, maddr)
@@ -103,9 +105,6 @@ function App() {
         const done = performance.now();
         const duration = done - start;
         console.log(`done in ${duration}ms (${blob.size / duration}bps)`);
-
-        localStorage.setItem(CID_KEY, root);
-        localStorage.setItem(ADDR_KEY, maddr);
       })
       .catch(console.error);
   }

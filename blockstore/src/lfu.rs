@@ -18,15 +18,16 @@ struct LookupMap(HashMap<Arc<Vec<u8>>, NonNull<LfuEntry>>);
 /// A blockstore that, if limited to a certain capacity, will evict based on the
 /// least recently used value.
 #[allow(clippy::module_name_repetitions)]
+#[derive(Clone)]
 pub struct LfuBlockstore<B>
 where
     B: DBStore,
 {
     db: B,
-    lookup: Mutex<LookupMap>,
-    freq_list: Mutex<FrequencyList>,
+    lookup: Arc<Mutex<LookupMap>>,
+    freq_list: Arc<Mutex<FrequencyList>>,
     capacity: Option<NonZeroUsize>,
-    len: AtomicUsize,
+    len: Arc<AtomicUsize>,
 }
 
 unsafe impl<B: DBStore> Send for LfuBlockstore<B> {}
@@ -48,10 +49,10 @@ where
     pub fn new(capacity: usize, bs: B) -> Result<Self, Error> {
         let lfu = Self {
             db: bs,
-            lookup: Mutex::new(LookupMap(HashMap::new())),
-            freq_list: Mutex::new(FrequencyList::new()),
+            lookup: Arc::new(Mutex::new(LookupMap(HashMap::new()))),
+            freq_list: Arc::new(Mutex::new(FrequencyList::new())),
             capacity: NonZeroUsize::new(capacity),
-            len: AtomicUsize::new(0),
+            len: Arc::new(AtomicUsize::new(0)),
         };
         lfu.sync()
             .map_err(|_| Error::Other("DB sync failed".to_string()))?;
@@ -121,7 +122,6 @@ where
                 &mut self.freq_list.lock().unwrap(),
             );
             self.len.fetch_sub(1, Ordering::Relaxed);
-
         };
         self.db.delete(key).unwrap();
 

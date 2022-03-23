@@ -3,7 +3,7 @@ use blockstore::lfu::LfuBlockstore;
 use clap::{Arg, Command};
 // use libipld::Cid;
 // // use libp2p::{Multiaddr, PeerId};
-use pop::{Node, NodeConfig};
+use pop::{get_peer_key, Node, NodeConfig};
 use std::collections::HashMap;
 use std::error::Error;
 // use std::str::FromStr;
@@ -24,6 +24,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         .help("peer multi-addresses to connect to from start"),
                 ),
         )
+        .subcommand(Command::new("info").override_help("print info about the running node"))
         .subcommand(
             Command::new("add")
                 .override_help("adds a local file to pop node blockstore")
@@ -101,6 +102,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     match matches.subcommand_name() {
         Some("start") => start().await,
+        Some("info") => info().await,
         Some("add") => {
             let flags = matches.subcommand().unwrap().1;
             //  can safely unwrap subcommand because we have just checked its name
@@ -129,6 +131,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
         _ => unreachable!("parser should ensure only valid subcommand names are used"),
     }
+}
+
+async fn info() -> Result<(), Box<dyn Error>> {
+    let client = reqwest::Client::new();
+    let resp = client.post("http://127.0.0.1:27403/info").send().await?;
+    println!("{:?}: {:?}", resp.status(), resp.text().await.unwrap());
+    Ok(())
 }
 
 async fn add(path: String) -> Result<(), Box<dyn Error>> {
@@ -178,14 +187,23 @@ async fn retrieve(path: String, peer: String, multiaddr: String) -> Result<(), B
 }
 
 async fn start() -> Result<(), Box<dyn Error>> {
-    let bs = LfuBlockstore::new(0, BlockstoreDB::open("blocks")?)?;
+    let repo_path = dirs::home_dir()
+        .map(|mut dir| {
+            dir.push(".pop");
+            dir
+        })
+        .or_else(|| Some(".pop".into()))
+        .unwrap();
+    let mut bs_path = repo_path.clone();
+    bs_path.push("blocks");
+    let bs = LfuBlockstore::new(0, BlockstoreDB::open(bs_path)?)?;
+    let peer_key = get_peer_key(repo_path)?;
     let config = NodeConfig {
-        listening_multiaddr: Some("/ip4/0.0.0.0/tcp/0/ws".parse()?),
+        listening_multiaddr: Some("/ip4/0.0.0.0/tcp/21984/ws".parse()?),
         blockstore: bs,
+        peer_key,
     };
 
-    let mut node = Node::new(config);
-    node.run().await;
-
+    Node::new(config).start_server().await;
     Ok(())
 }

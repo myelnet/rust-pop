@@ -1,5 +1,6 @@
 use crate::native::server::{
-    build_transport, export_file, handle_rejection, import_car, node_info, read_file, retrieve_file,
+    build_transport, export_file, handle_rejection, import_car, node_info, read_file, resolve_file,
+    retrieve_file,
 };
 use blockstore::types::BlockStore;
 use data_transfer::{Dt, DtOptions};
@@ -59,6 +60,11 @@ where
         let store_filter = warp::any().map(move || store.clone());
         let dt_filter = warp::any().map(move || dt.clone());
 
+        let cors = warp::cors()
+            .allow_any_origin()
+            .allow_methods(vec!["GET"])
+            .allow_headers(vec!["Content-Type", "User-Agent", "Range"]);
+
         let add_file = warp::post()
             .and(warp::path("add"))
             .and(warp::body::bytes())
@@ -115,14 +121,21 @@ where
             .and(dt_filter.clone())
             .and_then(|dt: Dt<B>| node_info(dt.clone()));
 
+        let get_file = warp::get()
+            .and(warp::path::param())
+            .and(store_filter.clone())
+            .and_then(|path: String, store: Arc<B>| resolve_file(path, store));
+
         let routes = add_file
             .or(import_car)
             .or(export_file)
             .or(retrieve_file)
             .or(get_node_info)
-            .recover(handle_rejection);
-        // serve on port 27403
-        warp::serve(routes).run(([127, 0, 0, 1], 27403)).await
+            .or(get_file)
+            .recover(handle_rejection)
+            .with(cors);
+        // serve on port 2002
+        warp::serve(routes).run(([127, 0, 0, 1], 2002)).await
     }
 }
 

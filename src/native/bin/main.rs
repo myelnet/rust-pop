@@ -189,7 +189,7 @@ async fn retrieve(path: String, peer: String, multiaddr: String) -> Result<(), B
 async fn start() -> Result<(), Box<dyn Error>> {
     let bs = LfuBlockstore::new(0, BlockstoreDB::open("blocks")?)?;
     let config = NodeConfig {
-        listening_multiaddr: Some("/ip4/0.0.0.0/tcp/0/ws".parse()?),
+        listening_multiaddr: Some("/ip4/0.0.0.0/tcp/21984/ws".parse()?),
         blockstore: bs,
     };
 

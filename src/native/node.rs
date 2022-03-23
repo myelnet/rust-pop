@@ -44,7 +44,12 @@ where
 {
     pub fn new(config: NodeConfig<B>) -> Self {
         //  unwrap because we want to panic if there was an issue
-        let local_key =  Self::get_peer_key().unwrap();
+        let local_key = match Self::get_peer_key() {
+            Ok(key) => key,
+            Err(e) => {
+                panic!("failed to generate peer key {}", e)
+            }
+        };
 
         let local_peer_id = PeerId::from(local_key.public());
 

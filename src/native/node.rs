@@ -75,7 +75,7 @@ where
             let ev = swarm.select_next_some();
             // This method must only be called if the current thread logically owns a MutexGuard
             // but that guard has to be discarded using mem::forget. !!!!! This is the case here.
-            //  frees the lock so other processes can act on the swarm whilst the event future awaits
+            // frees the lock so other processes can act on the swarm whilst the event future awaits
             // this also only applies to native builds which have operations being input via cli
             unsafe {
                 self.swarm.force_unlock();

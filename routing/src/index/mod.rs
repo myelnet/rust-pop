@@ -14,7 +14,7 @@ use node::Node;
 use serde::{de::DeserializeOwned, Deserialize, Serialize, Serializer};
 use serde_cbor::to_vec;
 use std::borrow::Borrow;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex};
 
 const MAX_ARRAY_WIDTH: usize = 3;
 
@@ -31,52 +31,48 @@ pub trait ShrinkableMap<Q: ?Sized, V> {
 
 //  thread safe HAMT
 #[derive(Debug)]
-pub struct IndexableBlockstore<B: BlockStore>(RwLock<Hamt<B, ()>>);
+pub struct IndexableBlockstore<B: BlockStore>(Hamt<B, ()>);
 
 impl<B: BlockStore> IndexableBlockstore<B> {
     pub fn new(store: Arc<B>) -> Self {
-        Self(RwLock::new(Hamt::new(store)))
+        Self(Hamt::new(store))
     }
 
     pub fn load(cid: &Cid, store: Arc<B>) -> Result<Self, Error> {
         let index = Hamt::load(cid, store.clone()).map_err(|e| e)?;
-        Ok(Self(RwLock::new(index)))
+        Ok(Self(index))
     }
 }
 
 impl<B: BlockStore<Params = DefaultParams>> BlockStore for IndexableBlockstore<B> {
     type Params = DefaultParams;
     fn get(&self, cid: &Cid) -> Result<Block<Self::Params>, blockstore::errors::Error> {
-        self.0.read().unwrap().store.get(cid)
+        self.0.store.get(cid)
     }
 
     fn insert(&self, block: &Block<Self::Params>) -> Result<(), blockstore::errors::Error> {
         self.0
-            .write()
-            .unwrap()
             .set(crate::tcid(*block.cid()), ())
             .map_err(|e| blockstore::errors::Error::Other(e.to_string()))?;
-        self.0.read().unwrap().store.insert(block)
+        self.0.store.insert(block)
     }
 
     fn evict(&self, cid: &Cid) -> Result<(), blockstore::errors::Error> {
         self.0
-            .write()
-            .unwrap()
             .delete(&crate::tcid(*cid))
             .map_err(|e| blockstore::errors::Error::Other(e.to_string()))?;
-        self.0.read().unwrap().store.evict(cid)
+        self.0.store.evict(cid)
     }
 
     fn contains(&self, cid: &Cid) -> Result<bool, blockstore::errors::Error> {
-        self.0.read().unwrap().store.contains(cid)
+        self.0.store.contains(cid)
     }
 
     fn index_root(&self) -> Option<Cid> {
-        if self.0.read().unwrap().is_empty() {
+        if self.0.is_empty() {
             None
         } else {
-            let res = match self.0.write().unwrap().flush() {
+            let res = match self.0.flush() {
                 Ok(cid) => Some(cid),
                 Err(_) => None,
             };
@@ -104,9 +100,9 @@ impl<K, V> KeyValuePair<K, V> {
 }
 
 /// Implementation of the HAMT data structure for Blockstore.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Hamt<BS: BlockStore, V, K = BytesKey> {
-    root: Node<K, V>,
+    root: Mutex<Node<K, V>>,
     store: Arc<BS>,
     bit_width: u32,
 }
@@ -127,7 +123,7 @@ where
 
 impl<'a, K: PartialEq, V: PartialEq, S: BlockStore> PartialEq for Hamt<S, V, K> {
     fn eq(&self, other: &Self) -> bool {
-        self.root == other.root
+        *self.root.lock().unwrap() == *other.root.lock().unwrap()
     }
 }
 
@@ -144,7 +140,7 @@ where
     /// Construct hamt with a bit width
     pub fn new_with_bit_width(store: Arc<BS>, bit_width: u32) -> Self {
         Self {
-            root: Node::default(),
+            root: Mutex::new(Node::default()),
             store,
             bit_width,
         }
@@ -157,10 +153,10 @@ where
 
     /// Lazily instantiate a hamt from this root Cid with a specified bit width.
     pub fn load_with_bit_width(cid: &Cid, store: Arc<BS>, bit_width: u32) -> Result<Self, Error> {
-        let root = Node::try_from(
+        let root = Mutex::new(Node::try_from(
             &dag_service::cat(store.clone(), *cid)
                 .map_err(|_| Error::CidNotFound(cid.to_string()))?,
-        )?;
+        )?);
         Ok(Self {
             root,
             store,
@@ -173,11 +169,13 @@ where
         self.store.clone()
     }
 
-    pub fn set(&mut self, key: K, value: V) -> Result<Option<V>, Error>
+    pub fn set(&self, key: K, value: V) -> Result<Option<V>, Error>
     where
         V: PartialEq,
     {
         self.root
+            .lock()
+            .unwrap()
             .set(key, value, self.store.clone(), self.bit_width, true)
             .map(|(r, _)| r)
     }
@@ -187,6 +185,8 @@ where
         V: PartialEq + Extend<A> + IntoIterator<Item = A>,
     {
         self.root
+            .lock()
+            .unwrap()
             .extend(key, value, self.store.clone(), self.bit_width)
     }
 
@@ -196,17 +196,20 @@ where
         V: PartialEq + ShrinkableMap<Q, A>,
     {
         self.root
+            .lock()
+            .unwrap()
             .shrink(key, value, self.store.clone(), self.bit_width)
     }
 
-    pub fn get<Q: ?Sized>(&self, k: &Q) -> Result<Option<&V>, Error>
+    pub fn get<Q: ?Sized>(&self, k: &Q) -> Result<Option<V>, Error>
     where
         K: Borrow<Q>,
         Q: Hash + Eq,
         V: DeserializeOwned,
     {
-        match self.root.get(k, self.store.clone(), self.bit_width)? {
-            Some(v) => Ok(Some(v)),
+        let lock = self.root.lock().unwrap();
+        match lock.get(k, self.store.clone(), self.bit_width)? {
+            Some(v) => Ok(Some(v.clone())),
             None => Ok(None),
         }
     }
@@ -218,35 +221,39 @@ where
     {
         Ok(self
             .root
+            .lock()
+            .unwrap()
             .get(k, self.store.clone(), self.bit_width)?
             .is_some())
     }
 
-    pub fn delete<Q: ?Sized>(&mut self, k: &Q) -> Result<bool, Error>
+    pub fn delete<Q: ?Sized>(&self, k: &Q) -> Result<bool, Error>
     where
         K: Borrow<Q>,
         Q: Hash + Eq,
     {
         self.root
+            .lock()
+            .unwrap()
             .remove_entry(k, self.store.clone(), self.bit_width)
     }
 
     /// Returns true if the HAMT has no entries
     pub fn is_empty(&self) -> bool {
-        self.root.is_empty()
+        self.root.lock().unwrap().is_empty()
     }
 
-    pub fn for_each<F>(&mut self, mut f: F) -> Result<(), Error>
+    pub fn for_each<F>(&self, mut f: F) -> Result<(), Error>
     where
         V: DeserializeOwned,
         F: FnMut(&K, &V) -> Result<(), Error>,
     {
-        self.root.for_each(&self.store, &mut f)
+        self.root.lock().unwrap().for_each(&self.store, &mut f)
     }
 
     /// Flush root and return Cid for hamt
-    pub fn flush(&mut self) -> Result<Cid, Error> {
-        self.root.flush(self.store.clone())?;
+    pub fn flush(&self) -> Result<Cid, Error> {
+        self.root.lock().unwrap().flush(self.store.clone())?;
         let data = to_vec(&self.root).map_err(|_| Error::InvalidNode)?;
         let cid = (dag_service::add(self.store.clone(), &data).map_err(Error::Other)?)
             .ok_or(Error::InvalidNode)?;
@@ -266,21 +273,21 @@ mod tests {
     #[test]
     fn test_basics() {
         let store = Arc::new(MemoryDB::default());
-        let mut hamt = Hamt::<_, String, _>::new(store.clone());
+        let hamt = Hamt::<_, String, _>::new(store.clone());
         hamt.set(1, "world".to_string()).unwrap();
 
-        assert_eq!(hamt.get(&1).unwrap(), Some(&"world".to_string()));
+        assert_eq!(hamt.get(&1).unwrap(), Some("world".to_string()));
         hamt.set(1, "world2".to_string()).unwrap();
-        assert_eq!(hamt.get(&1).unwrap(), Some(&"world2".to_string()));
+        assert_eq!(hamt.get(&1).unwrap(), Some("world2".to_string()));
     }
 
     #[test]
     fn can_use_as_set() {
         let store = Arc::new(MemoryDB::default());
-        let mut hamt = Hamt::<_, (), _>::new(store.clone());
+        let hamt = Hamt::<_, (), _>::new(store.clone());
         hamt.set(1, ()).unwrap();
 
-        assert_eq!(hamt.get(&1).unwrap(), Some(&()));
+        assert_eq!(hamt.get(&1).unwrap(), Some(()));
     }
 
     #[test]
@@ -290,9 +297,9 @@ mod tests {
         let mut hamt: Hamt<_, _, usize> = Hamt::new(store.clone());
         hamt.set(1, "world".to_string()).unwrap();
 
-        assert_eq!(hamt.get(&1).unwrap(), Some(&"world".to_string()));
+        assert_eq!(hamt.get(&1).unwrap(), Some("world".to_string()));
         hamt.set(1, "world2".to_string()).unwrap();
-        assert_eq!(hamt.get(&1).unwrap(), Some(&"world2".to_string()));
+        assert_eq!(hamt.get(&1).unwrap(), Some("world2".to_string()));
         let c = hamt.flush().unwrap();
 
         let new_hamt = Hamt::load(&c, store.clone()).unwrap();
@@ -439,7 +446,7 @@ mod tests {
         }
         // Ensure first 200 keys still exist
         for i in 0..200 {
-            assert_eq!(hamt.get(&tstring(i)).unwrap(), Some(&tstring(i)));
+            assert_eq!(hamt.get(&tstring(i)).unwrap(), Some(tstring(i)));
         }
 
         let cid_d = hamt.flush().unwrap();

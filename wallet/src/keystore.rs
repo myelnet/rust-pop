@@ -6,32 +6,30 @@ use std::io::{BufReader, BufWriter, ErrorKind};
 use std::path::PathBuf;
 
 use super::errors::Error;
-use filecoin::crypto::SignatureType;
 
 pub const KEYSTORE_NAME: &str = "keystore.json";
-pub const ENCRYPTED_KEYSTORE_NAME: &str = "keystore";
 
-/// KeyInfo struct, this contains the type of key (stored as a string) and the private key.
-/// note how the private key is stored as a byte vector
-///
-/// TODO need to update keyinfo to not use SignatureType, use string instead to save keys like
-/// jwt secret
-#[derive(Clone, PartialEq, Debug, Eq, Serialize, Deserialize)]
-pub struct KeyInfo {
-    key_type: SignatureType,
-    // Vec<u8> is used because The private keys for BLS and SECP256K1 are not of the same type
-    private_key: Vec<u8>,
+#[derive(Clone, PartialEq, Debug, Eq, Serialize, Deserialize, Copy)]
+pub enum KeyType {
+    Secp256k1 = 1,
+    Ed25519 = 2,
 }
 
 #[derive(Clone, PartialEq, Debug, Eq, Serialize, Deserialize)]
+pub struct KeyInfo {
+    pub key_type: KeyType,
+    private_key: Vec<u8>,
+}
+/// KeyInfo struct, this contains the type of key (stored as a string) and the private key.
+#[derive(Clone, PartialEq, Debug, Eq, Serialize, Deserialize)]
 pub struct PersistentKeyInfo {
-    key_type: SignatureType,
+    pub key_type: KeyType,
     private_key: String,
 }
 
 impl KeyInfo {
     /// Return a new KeyInfo given the key_type and private_key
-    pub fn new(key_type: SignatureType, private_key: Vec<u8>) -> Self {
+    pub fn new(key_type: KeyType, private_key: Vec<u8>) -> Self {
         KeyInfo {
             key_type,
             private_key,
@@ -39,7 +37,7 @@ impl KeyInfo {
     }
 
     /// Return a reference to the key_type
-    pub fn key_type(&self) -> &SignatureType {
+    pub fn key_type(&self) -> &KeyType {
         &self.key_type
     }
 
@@ -181,6 +179,11 @@ impl KeyStore {
     /// Return all of the keys that are stored in the KeyStore
     pub fn list(&self) -> Vec<String> {
         self.key_info.iter().map(|(key, _)| key.clone()).collect()
+    }
+
+    /// Return all of the info about keys that are stored in the KeyStore
+    pub fn list_info(&self) -> Vec<KeyInfo> {
+        self.key_info.iter().map(|(_, info)| info.clone()).collect()
     }
 
     /// Return Keyinfo that corresponds to a given key

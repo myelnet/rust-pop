@@ -44,7 +44,7 @@ where
 {
     pub fn new(config: NodeConfig<B>) -> Self {
         //  unwrap because we want to panic if there was an issue
-        let local_key = Self::get_peer_key().unwrap();
+        let local_key =  Self::get_peer_key().unwrap();
 
         let local_peer_id = PeerId::from(local_key.public());
 
@@ -75,7 +75,8 @@ where
         match dirs::home_dir() {
             Some(mut pop_dir) => {
                 pop_dir.push(".pop");
-                let mut key_store = KeyStore::new(KeyStoreConfig::Persistent(pop_dir)).unwrap();
+                let mut key_store = KeyStore::new(KeyStoreConfig::Persistent(pop_dir))
+                    .map_err(|e| e.to_string())?;
                 //  check we have at least one Ed25519 keys in the store
                 let peer_infos = key_store.list_info();
                 if let Some(key) = peer_infos

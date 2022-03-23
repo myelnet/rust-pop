@@ -78,12 +78,17 @@ where
                 let mut key_store = KeyStore::new(KeyStoreConfig::Persistent(pop_dir)).unwrap();
                 //  check we have at least one Ed25519 keys in the store
                 let peer_infos = key_store.list_info();
-                let peer_infos: Vec<&KeyInfo> = peer_infos
+                if let Some(key) = peer_infos
                     .iter()
                     .filter(|info| info.key_type == KeyType::Ed25519)
-                    .collect();
+                    .next()
+                {
+                    let local_key = identity::Keypair::from_protobuf_encoding(&key.private_key())
+                        .map_err(|e| e.to_string())?;
+                    Ok(local_key)
+                }
                 // if not then generate a new one and insert it into keystore
-                if peer_infos.is_empty() {
+                else {
                     let local_key = identity::Keypair::generate_ed25519();
                     // use public peer ID as the key
                     let pub_key = local_key.public().to_peer_id().to_string();
@@ -96,12 +101,6 @@ where
                         .map_err(|e| e.to_string())?;
                     //  flush to disk
                     key_store.flush().map_err(|e| e.to_string())?;
-                    Ok(local_key)
-                } else {
-                    //  can safely unwrap cause we've checked its not empty
-                    let key = peer_infos.first().unwrap();
-                    let local_key = identity::Keypair::from_protobuf_encoding(&key.private_key())
-                        .map_err(|e| e.to_string())?;
                     Ok(local_key)
                 }
             }

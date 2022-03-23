@@ -8,6 +8,8 @@ use libipld::store::StoreParams;
 use libipld::Ipld;
 use libp2p::{self, identity, Multiaddr, PeerId};
 use std::collections::HashMap;
+use std::error::Error;
+use std::path::PathBuf;
 use std::sync::Arc;
 use wallet::{KeyInfo, KeyStore, KeyStoreConfig, KeyType};
 use warp::Filter;
@@ -20,10 +22,10 @@ where
     pub store: Arc<B>,
 }
 
-#[derive(Debug)]
 pub struct NodeConfig<B: 'static + BlockStore + Clone> {
     pub listening_multiaddr: Option<Multiaddr>,
     pub blockstore: B,
+    pub peer_key: identity::Keypair,
 }
 
 impl<B: BlockStore + Clone> Node<B>
@@ -32,12 +34,7 @@ where
 {
     pub fn new(config: NodeConfig<B>) -> Self {
         //  unwrap because we want to panic if there was an issue
-        let local_key = match Self::get_peer_key() {
-            Ok(key) => key,
-            Err(e) => {
-                panic!("failed to generate peer key {}", e)
-            }
-        };
+        let local_key = config.peer_key;
 
         let local_peer_id = PeerId::from(local_key.public());
 
@@ -53,47 +50,6 @@ where
         Node {
             dt: Dt::new(local_peer_id, store.clone(), transport, options),
             store,
-        }
-    }
-
-    pub fn get_peer_key() -> Result<identity::Keypair, String> {
-        match dirs::home_dir() {
-            Some(mut pop_dir) => {
-                pop_dir.push(".pop");
-                let mut key_store = KeyStore::new(KeyStoreConfig::Persistent(pop_dir))
-                    .map_err(|e| e.to_string())?;
-                //  check we have at least one Ed25519 keys in the store
-                let peer_infos = key_store.list_info();
-                if let Some(key) = peer_infos
-                    .iter()
-                    .filter(|info| info.key_type == KeyType::Ed25519)
-                    .next()
-                {
-                    let local_key = identity::Keypair::from_protobuf_encoding(&key.private_key())
-                        .map_err(|e| e.to_string())?;
-                    Ok(local_key)
-                }
-                // if not then generate a new one and insert it into keystore
-                else {
-                    let local_key = identity::Keypair::generate_ed25519();
-                    // use public peer ID as the key
-                    let pub_key = local_key.public().to_peer_id().to_string();
-                    // we'll use protobuf encoding for storage
-                    let priv_key = local_key
-                        .to_protobuf_encoding()
-                        .map_err(|e| e.to_string())?;
-                    key_store
-                        .put(pub_key, KeyInfo::new(KeyType::Ed25519, priv_key))
-                        .map_err(|e| e.to_string())?;
-                    //  flush to disk
-                    key_store.flush().map_err(|e| e.to_string())?;
-                    Ok(local_key)
-                }
-            }
-            None => {
-                println!("Failed to find home directory. New peer id won't be persisted",);
-                Ok(identity::Keypair::generate_ed25519())
-            }
         }
     }
 
@@ -167,5 +123,31 @@ where
             .recover(handle_rejection);
         // serve on port 27403
         warp::serve(routes).run(([127, 0, 0, 1], 27403)).await
+    }
+}
+
+pub fn get_peer_key(pop_dir: PathBuf) -> Result<identity::Keypair, Box<dyn Error>> {
+    let mut key_store = KeyStore::new(KeyStoreConfig::Persistent(pop_dir))?;
+    //  check we have at least one Ed25519 keys in the store
+    let peer_infos = key_store.list_info();
+    if let Some(key) = peer_infos
+        .iter()
+        .filter(|info| info.key_type == KeyType::Ed25519)
+        .next()
+    {
+        let local_key = identity::Keypair::from_protobuf_encoding(&key.private_key())?;
+        Ok(local_key)
+    }
+    // if not then generate a new one and insert it into keystore
+    else {
+        let local_key = identity::Keypair::generate_ed25519();
+        // use public peer ID as the key
+        let pub_key = local_key.public().to_peer_id().to_string();
+        // we'll use protobuf encoding for storage
+        let priv_key = local_key.to_protobuf_encoding()?;
+        key_store.put(pub_key, KeyInfo::new(KeyType::Ed25519, priv_key))?;
+        //  flush to disk
+        key_store.flush()?;
+        Ok(local_key)
     }
 }

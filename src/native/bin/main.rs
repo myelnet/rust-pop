@@ -3,7 +3,7 @@ use blockstore::lfu::LfuBlockstore;
 use clap::{Arg, Command};
 // use libipld::Cid;
 // // use libp2p::{Multiaddr, PeerId};
-use pop::{Node, NodeConfig};
+use pop::{get_peer_key, Node, NodeConfig};
 use std::collections::HashMap;
 use std::error::Error;
 // use std::str::FromStr;
@@ -187,10 +187,21 @@ async fn retrieve(path: String, peer: String, multiaddr: String) -> Result<(), B
 }
 
 async fn start() -> Result<(), Box<dyn Error>> {
-    let bs = LfuBlockstore::new(0, BlockstoreDB::open("blocks")?)?;
+    let repo_path = dirs::home_dir()
+        .map(|mut dir| {
+            dir.push(".pop");
+            dir
+        })
+        .or_else(|| Some(".pop".into()))
+        .unwrap();
+    let mut bs_path = repo_path.clone();
+    bs_path.push("blocks");
+    let bs = LfuBlockstore::new(0, BlockstoreDB::open(bs_path)?)?;
+    let peer_key = get_peer_key(repo_path)?;
     let config = NodeConfig {
         listening_multiaddr: Some("/ip4/0.0.0.0/tcp/21984/ws".parse()?),
         blockstore: bs,
+        peer_key,
     };
 
     Node::new(config).start_server().await;

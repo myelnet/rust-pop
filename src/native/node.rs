@@ -134,8 +134,8 @@ where
             .or(get_file)
             .recover(handle_rejection)
             .with(cors);
-        // serve on port 27403
-        warp::serve(routes).run(([127, 0, 0, 1], 27403)).await
+        // serve on port 2002
+        warp::serve(routes).run(([127, 0, 0, 1], 2002)).await
     }
 }
 

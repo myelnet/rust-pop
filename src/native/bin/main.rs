@@ -135,7 +135,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
 async fn info() -> Result<(), Box<dyn Error>> {
     let client = reqwest::Client::new();
-    let resp = client.post("http://127.0.0.1:27403/info").send().await?;
+    let resp = client.post("http://127.0.0.1:2002/info").send().await?;
     println!("{:?}: {:?}", resp.status(), resp.text().await.unwrap());
     Ok(())
 }
@@ -143,7 +143,7 @@ async fn info() -> Result<(), Box<dyn Error>> {
 async fn add(path: String) -> Result<(), Box<dyn Error>> {
     let client = reqwest::Client::new();
     let resp = client
-        .post("http://127.0.0.1:27403/add")
+        .post("http://127.0.0.1:2002/add")
         .body(path)
         .send()
         .await?;
@@ -154,7 +154,7 @@ async fn add(path: String) -> Result<(), Box<dyn Error>> {
 async fn import(path: String) -> Result<(), Box<dyn Error>> {
     let client = reqwest::Client::new();
     let resp = client
-        .post("http://127.0.0.1:27403/import")
+        .post("http://127.0.0.1:2002/import")
         .body(path)
         .send()
         .await?;
@@ -166,7 +166,7 @@ async fn export(cid: String, path: String) -> Result<(), Box<dyn Error>> {
     let client = reqwest::Client::new();
     let map = HashMap::from([("cid", cid), ("path", path)]);
     let resp = client
-        .post("http://127.0.0.1:27403/export")
+        .post("http://127.0.0.1:2002/export")
         .json(&map)
         .send()
         .await?;
@@ -178,7 +178,7 @@ async fn retrieve(path: String, peer: String, multiaddr: String) -> Result<(), B
     let client = reqwest::Client::new();
     let map = HashMap::from([("path", path), ("peer", peer), ("multiaddr", multiaddr)]);
     let resp = client
-        .post("http://127.0.0.1:27403/retrieve")
+        .post("http://127.0.0.1:2002/retrieve")
         .json(&map)
         .send()
         .await?;

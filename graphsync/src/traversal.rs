@@ -360,9 +360,20 @@ where
     fn handle_node(
         &mut self,
         mut ipld: Ipld,
-        selector: Selector,
+        mut selector: Selector,
     ) -> Option<Result<Block<S::Params>, Error>> {
         let maybe_block = self.maybe_resolve_link(&mut ipld);
+
+        if let Selector::ExploreInterpretAs { next, reifier } = selector.clone() {
+            // only handle unixfs use case until a different one is needed
+            if &reifier == "unixfs" {
+                if let Some(reified) = resolve_unixfs(&ipld) {
+                    ipld = reified;
+                    selector = *next;
+                }
+            }
+        }
+
         match ipld {
             Ipld::Map(_) | Ipld::List(_) => self.push(ipld, selector.clone()),
             _ => {}
@@ -1615,5 +1626,46 @@ mod tests {
 
         let current_idx = *index.lock().unwrap();
         assert_eq!(current_idx, 7)
+    }
+
+    #[test]
+    fn resolve_unixfs_path_iterator() {
+        use dag_service::{add_entries, Entry};
+        use rand::prelude::*;
+
+        let mut files = Vec::new();
+        let mut entries = Vec::new();
+        for i in 1..3 {
+            let mut data = vec![0u8; i * 1024];
+            rand::thread_rng().fill_bytes(&mut data);
+            files.push(data);
+        }
+        for (i, data) in files.iter().enumerate() {
+            entries.push(Entry {
+                name: format!("file-{}", i + 1),
+                reader: &data[..],
+            })
+        }
+        let store = Arc::new(MemoryBlockStore::default());
+        let (root, _size) = add_entries(store.clone(), entries).unwrap();
+
+        let (root2, selector) =
+            unixfs_path_selector(format!("{}/file-2", root.to_string())).unwrap();
+        assert_eq!(root2, root);
+
+        let it = BlockIterator::new(store.clone(), root2, selector);
+
+        let output = it
+            .filter_map(|blk| {
+                let ipld = blk.ok()?.ipld().ok()?;
+                if let Ipld::Bytes(bytes) = resolve_unixfs(&ipld).or(Some(ipld))? {
+                    return Some(bytes);
+                } else {
+                    None
+                }
+            })
+            .flatten()
+            .collect::<Vec<u8>>();
+        assert_eq!(output, files[1]);
     }
 }

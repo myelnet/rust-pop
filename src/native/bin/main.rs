@@ -135,7 +135,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
 async fn info() -> Result<(), Box<dyn Error>> {
     let client = reqwest::Client::new();
-    let resp = client.post("http:://127.0.0.1:27403/info").send().await?;
+    let resp = client.post("http://127.0.0.1:27403/info").send().await?;
     println!("{:?}: {:?}", resp.status(), resp.text().await.unwrap());
     Ok(())
 }
@@ -193,8 +193,6 @@ async fn start() -> Result<(), Box<dyn Error>> {
         blockstore: bs,
     };
 
-    let mut node = Node::new(config);
-    node.run().await;
-
+    Node::new(config).start_server().await;
     Ok(())
 }

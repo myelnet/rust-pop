@@ -1,7 +1,7 @@
 use async_std::task;
 use blockstore::types::BlockStore;
 use dag_service::{self, add_entries, car::import_car_file, Entry};
-use data_transfer::{Dt, PullParams};
+use data_transfer::{Dt, DtParams};
 use graphsync::traversal::unixfs_path_selector;
 use libipld::codec::Decode;
 use libipld::store::StoreParams;
@@ -172,21 +172,15 @@ pub async fn retrieve_file<B: 'static + BlockStore>(
 where
     Ipld: Decode<<<B as BlockStore>::Params as StoreParams>::Codecs>,
 {
-    let (cid, selector) =
-        unixfs_path_selector(key).ok_or(warp::reject::custom(Failure::InvalidCid {
-            err: "Failed to parse ipfs path".to_string(),
-        }))?;
+    let params = DtParams::new(key)
+        .map_err(|e| warp::reject::custom(Failure::InvalidCid { err: e.to_string() }))?;
     let peer = PeerId::from_str(&peer)
         .map_err(|e| warp::reject::custom(Failure::InvalidPeerId { err: e.to_string() }))?;
     let multiaddr = Multiaddr::try_from(multiaddr)
         .map_err(|e| warp::reject::custom(Failure::InvalidMultiAdd { err: e.to_string() }))?;
 
-    let params = PullParams {
-        selector: Some(selector.clone()),
-        ..Default::default()
-    };
     let stream = dt
-        .pull(peer, multiaddr, cid, selector, params)
+        .pull(peer, multiaddr, params)
         .await
         .map_err(|e| warp::reject::custom(Failure::TransferFailed { err: e.to_string() }))?;
     stream

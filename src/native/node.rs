@@ -97,11 +97,7 @@ where
         }
     }
 
-    pub async fn run(&mut self) {
-        self.start_server().await;
-    }
-
-    pub async fn start_server(&mut self) {
+    pub async fn start_server(self) {
         let dt = self.dt.clone();
         let store = self.store.clone();
         let store_filter = warp::any().map(move || store.clone());
@@ -160,9 +156,8 @@ where
 
         let get_node_info = warp::post()
             .and(warp::path("info"))
-            .and(warp::body::json())
             .and(dt_filter.clone())
-            .and_then(|_, dt| node_info(dt));
+            .and_then(|dt: Dt<B>| node_info(dt.clone()));
 
         let routes = add_file
             .or(import_car)
@@ -171,8 +166,6 @@ where
             .or(get_node_info)
             .recover(handle_rejection);
         // serve on port 27403
-        async_std::task::spawn(
-            async move { warp::serve(routes).run(([127, 0, 0, 1], 27403)).await },
-        );
+        warp::serve(routes).run(([127, 0, 0, 1], 27403)).await
     }
 }

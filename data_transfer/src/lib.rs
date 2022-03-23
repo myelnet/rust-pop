@@ -15,7 +15,9 @@ use futures::{
 };
 use graphsync::network::MessageCodec;
 use graphsync::res_mgr::ResponseBuilder;
-use graphsync::traversal::{resolve_unixfs, AsyncLoader, Progress, Selector};
+use graphsync::traversal::{
+    resolve_unixfs, unixfs_path_selector, AsyncLoader, Progress, RecursionLimit, Selector,
+};
 use graphsync::{
     GraphsyncCodec, GraphsyncMessage, GraphsyncProtocol, GraphsyncRequest, Prefix, RequestId,
     ResponseStatusCode,
@@ -70,7 +72,7 @@ impl PullStream {
     }
 }
 
-pub fn default_executor() -> Option<Box<dyn Executor + Send>> {
+pub fn default_executor() -> Option<Box<dyn Executor + Send + Sync>> {
     match ThreadPoolBuilder::new()
         .name_prefix("client-executor")
         .create()
@@ -79,6 +81,59 @@ pub fn default_executor() -> Option<Box<dyn Executor + Send>> {
         Err(err) => {
             log::warn!("Failed to create executor thread pool: {:?}", err);
             None
+        }
+    }
+}
+
+/// Optional configurations for the data transfer system.
+#[derive(Default)]
+pub struct DtOptions {
+    executor: Option<Box<dyn Executor + Send + Sync>>,
+    listen_addr: Option<Multiaddr>,
+}
+
+impl DtOptions {
+    pub fn as_listener(mut self, addr: Multiaddr) -> Self {
+        self.listen_addr = Some(addr);
+        self
+    }
+    pub fn with_executor(mut self, executor: Box<dyn Executor + Send + Sync>) -> Self {
+        self.executor = Some(executor);
+        self
+    }
+}
+
+pub struct DtParams {
+    root: Cid,
+    selector: Selector,
+}
+
+impl DtParams {
+    pub fn new(path: String) -> Result<Self, Error> {
+        let (root, selector) = unixfs_path_selector(path)
+            .ok_or(Error::new(ErrorKind::InvalidInput, "invalid IPFS path"))?;
+        Ok(Self { root, selector })
+    }
+    pub fn full_from_root(root: Cid) -> Self {
+        let selector = Selector::ExploreRecursive {
+            limit: RecursionLimit::None,
+            sequence: Box::new(Selector::ExploreAll {
+                next: Box::new(Selector::ExploreRecursiveEdge),
+            }),
+            current: None,
+        };
+        Self { root, selector }
+    }
+    pub fn root(&self) -> Cid {
+        self.root
+    }
+    pub fn selector(&self) -> Selector {
+        self.selector.clone()
+    }
+    pub fn pull(&self) -> PullParams {
+        PullParams {
+            selector: Some(self.selector()),
+            ..Default::default()
         }
     }
 }
@@ -93,24 +148,6 @@ enum ListenerCmd {
 type ListenerCmdSendr = mpsc::Sender<ListenerCmd>;
 type ListenerCmdRecvr = mpsc::Receiver<ListenerCmd>;
 
-/// Optional configurations for the data transfer system.
-#[derive(Default)]
-pub struct DtOptions {
-    executor: Option<Box<dyn Executor + Send>>,
-    listen_addr: Option<Multiaddr>,
-}
-
-impl DtOptions {
-    pub fn as_listener(mut self, addr: Multiaddr) -> Self {
-        self.listen_addr = Some(addr);
-        self
-    }
-    pub fn with_executor(mut self, executor: Box<dyn Executor + Send>) -> Self {
-        self.executor = Some(executor);
-        self
-    }
-}
-
 /// A full DataTransfer implementation. The struct can be safely shared between threads.
 #[derive(Clone)]
 pub struct Dt<S: BlockStore> {
@@ -119,7 +156,7 @@ pub struct Dt<S: BlockStore> {
     id_counter: Arc<AtomicI32>,
     outbound_events: mpsc::Sender<NetEvent>,
     listener_cmds: Option<ListenerCmdSendr>,
-    executor: Arc<Box<dyn Executor + Send>>,
+    executor: Arc<Box<dyn Executor + Send + Sync>>,
 }
 
 impl<S: 'static + BlockStore> Dt<S>
@@ -211,19 +248,18 @@ where
         &self,
         peer: PeerId,
         maddr: Multiaddr,
-        root: Cid,
-        sel: Selector,
-        params: PullParams,
+        params: DtParams,
     ) -> Result<PullStream, Error> {
         // For now we simplify and use a single id for all protocol requests
         // it will be updated in any case when switching over to UUIDs.
         let id = self.id_counter.fetch_add(1, Ordering::Relaxed);
 
+        let root = params.root();
         let cid = CidCbor::from(root);
         let voucher = DealProposal::Pull {
             id: id as u64,
             payload_cid: cid.clone(),
-            params,
+            params: params.pull(),
         };
         let message = TransferMessage {
             is_rq: true,
@@ -233,7 +269,7 @@ where
                 pause: false,
                 partial: false,
                 pull: true,
-                selector: sel.clone(),
+                selector: params.selector(),
                 voucher_type: voucher.voucher_type(),
                 voucher: Some(voucher),
                 transfer_id: id as u64,
@@ -251,18 +287,18 @@ where
             GraphsyncRequest {
                 id,
                 root,
-                selector: sel.clone(),
+                selector: params.selector(),
                 extensions,
             },
         );
         // This channel will receive inbound messages from all protocols
-        let (inbound_send, mut inbound_receive) = mpsc::channel(4);
+        let (inbound_send, mut inbound_receive) = mpsc::channel(64);
 
         // outbound events are sent to the connection loop to be streamed over the relevant
         // protocols.
         let mut outbound = self.outbound_events.clone();
         outbound
-            .start_send(NetEvent::NewRequest {
+            .try_send(NetEvent::NewRequest {
                 id,
                 peer,
                 maddr,
@@ -277,6 +313,7 @@ where
         let (os, or) = oneshot::channel();
 
         let store = self.store.clone();
+        let sel = params.selector();
         self.executor.exec(async move {
             let mut state = DtState::New;
 
@@ -327,12 +364,10 @@ where
             .fuse();
 
             loop {
-                println!("loop");
                 // select the first future to complete after each iteration. Once we've both
                 // received all the blocks and the completion message we break out of it.
                 select! {
                     (_result, total) = traverse => {
-                        log::info!("received all the blocks");
                         // for now we register a single block received event at the end. This may changed in
                         // the future to process payment operations.
                         state = state.transition(DtEvent::BlockReceived { size: total });
@@ -361,7 +396,6 @@ where
                                 for block in blocks {
                                     sender.try_send(block).unwrap();
                                 }
-                                println!("parsed block");
                             }
                             // no need to cleanup because the channel was never registered.
                             TransferEvent::DialFailed(e) => {
@@ -385,7 +419,6 @@ where
                                 break;
                             }
                             TransferEvent::CompleteFull => {
-                                log::info!("completed message");
                                     // pull request clients should not receive requests
                                     // assert!(!msg.is_rq);
                                     // if let Some(DealResponse::Pull {
@@ -410,13 +443,10 @@ where
         // Wait to receive the content type before returning the stream.
         // Race for any error that might come up before the first bytes are received.
         match or.await {
-            Ok(content_type) => {
-                println!("received content type");
-                Ok(PullStream {
-                    content_type,
-                    channel: r,
-                })
-            }
+            Ok(content_type) => Ok(PullStream {
+                content_type,
+                channel: r,
+            }),
             // channel was dropped because the transfer loop returned.
             Err(e) => {
                 // check if the channel received any error.
@@ -492,7 +522,7 @@ fn process_gs_event(
     status: ResponseStatusCode,
     blocks: Vec<(Vec<u8>, Vec<u8>)>,
 ) -> Option<TransferEvent> {
-    println!("==> status {:?}", status);
+    log::info!("==> status {:?}", status);
     match (status, blocks.is_empty()) {
         (ResponseStatusCode::PartialResponse, false) => Some(TransferEvent::Partial(blocks)),
         (ResponseStatusCode::RequestCompletedFull, false) => Some(TransferEvent::Partial(blocks)),
@@ -541,7 +571,8 @@ async fn conn_loop(
                             let res = responses.next().unwrap();
                             if let Some(ev) = process_gs_event(res.status, blocks) {
                                 if let Some(sender) = inbound.get_mut(&res.id) {
-                                    sender.send(ev).await.map_err(io_err)?;
+                                    sender.try_send(ev).map_err(io_err)?;
+                                    // sender.send(ev).await.map_err(io_err)?;
                                 }
                             }
                         } else {
@@ -629,8 +660,6 @@ async fn conn_loop(
                             });
                         }
                         Entry::Vacant(entry) => {
-                            log::info!("dialing peer");
-
                             let dial = match transport.clone().dial(maddr) {
                                 Ok(dial) => dial,
                                 Err(e) => {
@@ -647,7 +676,6 @@ async fn conn_loop(
                                 }
                             };
 
-                            log::info!("peer connected");
                             let mux = Arc::new(mux);
 
                             inbound.insert(id, chan);
@@ -1067,27 +1095,13 @@ mod tests {
         let root3 = add(store.clone(), &data3).unwrap().unwrap();
         let root4 = add(store.clone(), &data4).unwrap().unwrap();
 
-        let selector = Selector::ExploreRecursive {
-            limit: RecursionLimit::None,
-            sequence: Box::new(Selector::ExploreAll {
-                next: Box::new(Selector::ExploreRecursiveEdge),
-            }),
-            current: None,
-        };
-
         let (peer2, trans) = mk_transport();
         let store2 = Arc::new(MemoryBlockStore::default());
 
         let client = Dt::new(peer2, store2, trans, Default::default());
 
         let stream = client
-            .pull(
-                peer1,
-                maddr1.clone(),
-                root1,
-                selector.clone(),
-                Default::default(),
-            )
+            .pull(peer1, maddr1.clone(), DtParams::full_from_root(root1))
             .await
             .unwrap();
 
@@ -1097,13 +1111,7 @@ mod tests {
         assert_eq!(output, data1);
 
         let stream = client
-            .pull(
-                peer1,
-                maddr1.clone(),
-                root2,
-                selector.clone(),
-                Default::default(),
-            )
+            .pull(peer1, maddr1.clone(), DtParams::full_from_root(root2))
             .await
             .unwrap();
         let mut reader = stream.reader();
@@ -1115,13 +1123,7 @@ mod tests {
         join!(
             async {
                 let stream = client
-                    .pull(
-                        peer1,
-                        maddr1.clone(),
-                        root3,
-                        selector.clone(),
-                        Default::default(),
-                    )
+                    .pull(peer1, maddr1.clone(), DtParams::full_from_root(root3))
                     .await
                     .unwrap();
                 let mut reader = stream.reader();
@@ -1131,13 +1133,7 @@ mod tests {
             },
             async {
                 let stream = client
-                    .pull(
-                        peer1,
-                        maddr1.clone(),
-                        root4,
-                        selector.clone(),
-                        Default::default(),
-                    )
+                    .pull(peer1, maddr1.clone(), DtParams::full_from_root(root4))
                     .await
                     .unwrap();
                 let mut reader = stream.reader();
@@ -1175,14 +1171,6 @@ mod tests {
 
         let root1 = add(store.clone(), &data1).unwrap().unwrap();
 
-        let selector = Selector::ExploreRecursive {
-            limit: RecursionLimit::None,
-            sequence: Box::new(Selector::ExploreAll {
-                next: Box::new(Selector::ExploreRecursiveEdge),
-            }),
-            current: None,
-        };
-
         let (peer2, trans) = mk_transport();
         let store2 = Arc::new(MemoryBlockStore::default());
 
@@ -1191,13 +1179,7 @@ mod tests {
         join!(
             async {
                 match client
-                    .pull(
-                        peer1,
-                        maddr1.clone(),
-                        root1,
-                        selector.clone(),
-                        Default::default(),
-                    )
+                    .pull(peer1, maddr1.clone(), DtParams::full_from_root(root1))
                     .await
                 {
                     Ok(stream) => {
@@ -1242,13 +1224,6 @@ mod tests {
 
         let root1 =
             Cid::from_str("bafybeih6zpuf6ezaz4ylaeg4hpgaxrx43tprc6sxo2wcfzpsudgk5iig3u").unwrap();
-        let selector = Selector::ExploreRecursive {
-            limit: RecursionLimit::None,
-            sequence: Box::new(Selector::ExploreAll {
-                next: Box::new(Selector::ExploreRecursiveEdge),
-            }),
-            current: None,
-        };
 
         let (peer2, trans) = mk_transport();
         let store2 = Arc::new(MemoryBlockStore::default());
@@ -1256,13 +1231,7 @@ mod tests {
         let client = Dt::new(peer2, store2, trans, Default::default());
 
         match client
-            .pull(
-                peer1,
-                maddr1.clone(),
-                root1,
-                selector.clone(),
-                Default::default(),
-            )
+            .pull(peer1, maddr1.clone(), DtParams::full_from_root(root1))
             .await
         {
             Ok(_) => panic!("expected transfer to fail immediately"),
@@ -1277,13 +1246,7 @@ mod tests {
         let root1 = add(store1.clone(), &data1).unwrap().unwrap();
 
         let stream = client
-            .pull(
-                peer1,
-                maddr1.clone(),
-                root1,
-                selector.clone(),
-                Default::default(),
-            )
+            .pull(peer1, maddr1.clone(), DtParams::full_from_root(root1))
             .await
             .unwrap();
 
@@ -1315,13 +1278,6 @@ mod tests {
 
         let root1 =
             Cid::from_str("bafybeih6zpuf6ezaz4ylaeg4hpgaxrx43tprc6sxo2wcfzpsudgk5iig3u").unwrap();
-        let selector = Selector::ExploreRecursive {
-            limit: RecursionLimit::None,
-            sequence: Box::new(Selector::ExploreAll {
-                next: Box::new(Selector::ExploreRecursiveEdge),
-            }),
-            current: None,
-        };
 
         let (peer2, trans) = mk_transport();
         let store2 = Arc::new(MemoryBlockStore::default());
@@ -1329,13 +1285,7 @@ mod tests {
         let client = Dt::new(peer2, store2, trans, Default::default());
 
         match client
-            .pull(
-                peer1,
-                maddr1.clone(),
-                root1,
-                selector.clone(),
-                Default::default(),
-            )
+            .pull(peer1, maddr1.clone(), DtParams::full_from_root(root1))
             .await
         {
             Ok(_) => panic!("expected transfer to fail immediately"),
@@ -1363,13 +1313,7 @@ mod tests {
         let root1 = add(store.clone(), &data1).unwrap().unwrap();
 
         let stream = client
-            .pull(
-                peer1,
-                maddr1.clone(),
-                root1,
-                selector.clone(),
-                Default::default(),
-            )
+            .pull(peer1, maddr1.clone(), DtParams::full_from_root(root1))
             .await
             .unwrap();
 

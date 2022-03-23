@@ -9,7 +9,7 @@ pub use crate::routing::{
 use blockstore::types::BlockStore;
 pub use cbor_helpers::PeerIdCbor;
 pub use discovery::Config as DiscoveryConfig;
-pub use discovery::{DiscoveryEvent, HubDiscovery, PeerTable};
+pub use discovery::{Discovery, DiscoveryEvent, PeerTable};
 use filecoin::{cid_helpers::CidCbor, types::Cbor};
 use libipld::Cid;
 use libp2p::gossipsub::{Gossipsub, GossipsubEvent, GossipsubMessage, IdentTopic};
@@ -23,8 +23,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 pub use utils::gossip_init;
-
-pub type LocalIndex<B> = index::Hamt<B, ()>;
+pub type LocalIndex<B> = index::IndexableBlockstore<B>;
 pub type Index<B> = Arc<Mutex<index::Hamt<B, PeerTable>>>;
 
 pub const ROUTING_TOPIC: &str = "myel/content-routing";
@@ -35,7 +34,7 @@ pub fn tcid(v: Cid) -> index::BytesKey {
 }
 
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
-pub enum RoutingTableEntry {
+pub enum RoutingTableUpdate {
     Insertion {
         multiaddresses: Vec<Multiaddr>,
         cids: Vec<CidCbor>,
@@ -44,7 +43,7 @@ pub enum RoutingTableEntry {
         cids: Vec<CidCbor>,
     },
 }
-impl Cbor for RoutingTableEntry {}
+impl Cbor for RoutingTableUpdate {}
 
 #[derive(Debug, PartialEq, Clone, Serialize_tuple, Deserialize_tuple)]
 pub struct ContentRequest {
@@ -59,7 +58,7 @@ pub enum RoutingEvent {
     ContentRequestFulfilled(String),
     FoundContent(String),
     SyncRequestBroadcast,
-    HubTableUpdated(PeerId, Option<CidCbor>),
+    HubTableUpdated(PeerId, Option<CidCbor>, Option<Multiaddr>),
     HubIndexUpdated,
     RoutingTableUpdated(Cid),
 }
@@ -74,7 +73,7 @@ pub struct RoutingConfig {
 #[behaviour(out_event = "RoutingEvent", poll_method = "poll", event_process = true)]
 pub struct Routing<B: 'static + BlockStore> {
     broadcaster: Gossipsub,
-    pub discovery: HubDiscovery,
+    pub discovery: Discovery<B>,
     routing_responder: RoutingNetwork,
 
     #[behaviour(ignore)]
@@ -87,20 +86,17 @@ pub struct Routing<B: 'static + BlockStore> {
 }
 
 impl<B: 'static + BlockStore> Routing<B> {
-    pub fn new(config: RoutingConfig, index_root: Option<CidCbor>, store: Arc<B>) -> Self {
-        let discovery = HubDiscovery::new(
+    pub fn new(config: RoutingConfig, store: Arc<B>) -> Self {
+        let discovery = Discovery::new(
             DiscoveryConfig::default(),
             config.peer_id,
             config.is_hub,
-            index_root,
+            store.clone(),
         );
         //  topic with identity hash
         let broadcaster = gossip_init(
             config.peer_id,
-            Vec::from([
-                IdentTopic::new(ROUTING_TOPIC),
-                IdentTopic::new(INDEX_TOPIC),
-            ]),
+            Vec::from([IdentTopic::new(ROUTING_TOPIC), IdentTopic::new(INDEX_TOPIC)]),
         );
 
         Self {
@@ -123,7 +119,7 @@ impl<B: 'static + BlockStore> Routing<B> {
         self.discovery.addresses_of_peer(peer_id)
     }
 
-    pub fn publish_update(&mut self, msg: RoutingTableEntry) -> Result<(), String> {
+    pub fn publish_update(&mut self, msg: RoutingTableUpdate) -> Result<(), String> {
         // Because Topic is not thread safe (the hasher it uses can't be safely shared across threads)
         // we create a new instantiation of the Topic for each publication, in most examples Topic is
         // cloned anyway
@@ -140,14 +136,14 @@ impl<B: 'static + BlockStore> Routing<B> {
     }
 
     pub fn publish_insertion(&mut self, cids: Vec<CidCbor>) -> Result<(), String> {
-        let msg = RoutingTableEntry::Insertion {
+        let msg = RoutingTableUpdate::Insertion {
             multiaddresses: self.discovery.multiaddr.to_vec(),
             cids,
         };
         self.publish_update(msg)
     }
     pub fn publish_deletion(&mut self, cids: Vec<CidCbor>) -> Result<(), String> {
-        let msg = RoutingTableEntry::Deletion { cids };
+        let msg = RoutingTableUpdate::Deletion { cids };
         self.publish_update(msg)
     }
 
@@ -182,13 +178,13 @@ impl<B: 'static + BlockStore> Routing<B> {
         Ok(())
     }
 
-    pub fn insert_routing_entry(
+    pub fn insert_routing_update(
         &mut self,
         peer_id: PeerId,
-        entry: RoutingTableEntry,
+        entry: RoutingTableUpdate,
     ) -> Result<(), String> {
         match entry {
-            RoutingTableEntry::Insertion {
+            RoutingTableUpdate::Insertion {
                 multiaddresses: ma,
                 cids,
             } => {
@@ -211,7 +207,7 @@ impl<B: 'static + BlockStore> Routing<B> {
                     }
                 }
             }
-            RoutingTableEntry::Deletion { cids } => {
+            RoutingTableUpdate::Deletion { cids } => {
                 for cid in cids {
                     // check sent cids are valid
                     if let Some(c) = cid.to_cid() {
@@ -248,8 +244,8 @@ impl<B: 'static + BlockStore> Routing<B> {
         // only hubs should respond
         if self.config.is_hub {
             let entry =
-                RoutingTableEntry::unmarshal_cbor(&message.data).map_err(|e| e.to_string())?;
-            self.insert_routing_entry(peer_id, entry).map_err(|e| e)?;
+                RoutingTableUpdate::unmarshal_cbor(&message.data).map_err(|e| e.to_string())?;
+            self.insert_routing_update(peer_id, entry).map_err(|e| e)?;
             self.pending_events.push_back(RoutingEvent::HubIndexUpdated);
         }
 
@@ -312,9 +308,9 @@ impl<B: 'static + BlockStore> Routing<B> {
 impl<B: 'static + BlockStore> NetworkBehaviourEventProcess<DiscoveryEvent> for Routing<B> {
     fn inject_event(&mut self, event: DiscoveryEvent) {
         match event {
-            DiscoveryEvent::ResponseReceived(_, peer, index) => self
+            DiscoveryEvent::ResponseReceived(_, peer, index, peer_ma) => self
                 .pending_events
-                .push_back(RoutingEvent::HubTableUpdated(peer, index)),
+                .push_back(RoutingEvent::HubTableUpdated(peer, index, peer_ma)),
         }
     }
 }
@@ -401,8 +397,8 @@ mod tests {
     struct Peer {
         peer_id: PeerId,
         addr: Multiaddr,
-        swarm: Swarm<Routing<MemoryBlockStore>>,
-        bs: Arc<MemoryBlockStore>,
+        swarm: Swarm<Routing<LocalIndex<MemoryBlockStore>>>,
+        bs: Arc<LocalIndex<MemoryBlockStore>>,
     }
 
     impl Peer {
@@ -410,7 +406,8 @@ mod tests {
             let (peer_id, trans) = mk_transport();
             let config = RoutingConfig { peer_id, is_hub };
             let store = Arc::new(MemoryBlockStore::default());
-            let rt = Routing::new(config, None, store.clone());
+            let store = Arc::new(crate::index::IndexableBlockstore::new(store));
+            let rt = Routing::new(config, store.clone());
             let mut swarm = Swarm::new(trans, rt, peer_id);
             Swarm::listen_on(&mut swarm, "/ip4/127.0.0.1/tcp/0".parse().unwrap()).unwrap();
             while swarm.next().now_or_never().is_some() {}
@@ -423,7 +420,7 @@ mod tests {
             }
         }
 
-        fn get_routing_table(&self) -> Index<MemoryBlockStore> {
+        fn get_routing_table(&self) -> Index<LocalIndex<MemoryBlockStore>> {
             return self.swarm.behaviour().routing_table.clone();
         }
 
@@ -437,7 +434,7 @@ mod tests {
             self.swarm().behaviour_mut().find_content(content).unwrap();
         }
 
-        fn make_routing_table(&mut self, peer: PeerId) -> RoutingTableEntry {
+        fn make_routing_table(&mut self, peer: PeerId) -> RoutingTableUpdate {
             // generate 1 random byte
             const FILE_SIZE: usize = 1;
             let mut data = vec![0u8; FILE_SIZE];
@@ -445,14 +442,14 @@ mod tests {
 
             let root = dag_service::add(self.bs.clone(), &data).unwrap().unwrap();
 
-            let entry = RoutingTableEntry::Insertion {
+            let entry = RoutingTableUpdate::Insertion {
                 multiaddresses: Vec::from([self.addr.clone()]),
                 cids: Vec::from([CidCbor::from(root)]),
             };
 
             self.swarm()
                 .behaviour_mut()
-                .insert_routing_entry(peer, entry.clone())
+                .insert_routing_update(peer, entry.clone())
                 .unwrap();
 
             entry
@@ -477,7 +474,7 @@ mod tests {
             cids
         }
 
-        fn swarm(&mut self) -> &mut Swarm<Routing<MemoryBlockStore>> {
+        fn swarm(&mut self) -> &mut Swarm<Routing<LocalIndex<MemoryBlockStore>>> {
             &mut self.swarm
         }
 
@@ -666,7 +663,7 @@ mod tests {
         let mut hub_peer = Peer::new(true);
         let entry = hub_peer.make_routing_table(hub_peer.peer_id);
         let cid = match entry {
-            RoutingTableEntry::Insertion {
+            RoutingTableUpdate::Insertion {
                 multiaddresses: _,
                 cids,
             } => Some(cids.first().unwrap().to_cid().unwrap()),

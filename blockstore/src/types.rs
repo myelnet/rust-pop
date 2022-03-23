@@ -15,6 +15,10 @@ pub trait BlockStore: Send + Sync + Sized {
     fn evict(&self, cid: &Cid) -> Result<(), Error>;
 
     fn contains(&self, cid: &Cid) -> Result<bool, Error>;
+
+    fn index_root(&self) -> Option<Cid> {
+        None
+    }
 }
 
 pub trait DBStore: Send + Sync {

@@ -12,11 +12,11 @@ use libp2p::swarm::{
 };
 use libp2p::{Multiaddr, NetworkBehaviour, PeerId};
 use routing::{
-    tcid, Routing, RoutingConfig as PopConfig, RoutingEvent, RoutingTableEntry,
+    index::Hamt, tcid, PeerTable, Routing, RoutingConfig as PopConfig, RoutingEvent,
     EMPTY_QUEUE_SHRINK_THRESHOLD,
 };
 use serde_tuple::{Deserialize_tuple, Serialize_tuple};
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -39,6 +39,8 @@ where
 
     #[behaviour(ignore)]
     pending_events: VecDeque<RoutingEvent>,
+    #[behaviour(ignore)]
+    peer_table: PeerTable,
     // a map of who has the content we made requests for
     #[behaviour(ignore)]
     pending_cids: HashSet<Cid>,
@@ -60,7 +62,8 @@ where
         Self {
             data_transfer,
             store: store.clone(),
-            routing: Routing::new(config, None, store),
+            routing: Routing::new(config, store),
+            peer_table: HashMap::new(),
             pending_events: VecDeque::default(),
             pending_cids: HashSet::new(),
             pending_requests: BiMap::new(),
@@ -75,48 +78,16 @@ where
         self.routing.addresses_of_peer(peer_id)
     }
 
-    fn pull_all(&mut self, peer_id: PeerId, cid: Cid) -> Result<ChannelId, String> {
-        let selector = Selector::ExploreRecursive {
-            limit: RecursionLimit::None,
-            sequence: Box::new(Selector::ExploreAll {
-                next: Box::new(Selector::ExploreRecursiveEdge),
-            }),
-            current: None,
-        };
-
-        self.data_transfer
-            .pull(peer_id, cid, selector, PullParams::default())
-    }
-
     pub fn get(&mut self, root: Cid) -> Result<(), String> {
         //  mark that we are actively interested in content
         self.pending_cids.insert(root);
-        match self.get_from_routing(root) {
+        match self.get_from_routing_table(root) {
             Ok(_) => Ok(()),
             Err(_) => self.routing.find_content(root),
         }
     }
 
-    fn process_discovery_response(&mut self, peer_id: PeerId, index_root: Option<CidCbor>) {
-        //  only hubs should respond
-        if self.routing.config.is_hub {
-            if let Some(r) = index_root {
-                if let Some(cid) = r.to_cid() {
-                    if self.pending_requests.get_by_left(&cid).is_none() {
-                        match self.pull_all(peer_id, cid) {
-                            Ok(ch) => {
-                                // we make note that we've made a request for this index
-                                self.pending_requests.insert(cid, ch);
-                            }
-                            Err(e) => println!("error in fetching index {}", e),
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    fn get_from_routing(&mut self, root: Cid) -> Result<ChannelId, String> {
+    fn get_from_routing_table(&mut self, root: Cid) -> Result<ChannelId, String> {
         // check we are still interested in a CID (i.e a transfer for it has no succesfully completed yet)
         if self.pending_cids.contains(&root) {
             //  check no transfer channel has been set up yet
@@ -142,6 +113,48 @@ where
         Err("failed to fetch from routing table".to_string())
     }
 
+    fn pull_all(&mut self, peer_id: PeerId, cid: Cid) -> Result<ChannelId, String> {
+        let selector = Selector::ExploreRecursive {
+            limit: RecursionLimit::None,
+            sequence: Box::new(Selector::ExploreAll {
+                next: Box::new(Selector::ExploreRecursiveEdge),
+            }),
+            current: None,
+        };
+
+        self.data_transfer
+            .pull(peer_id, cid, selector, PullParams::default())
+    }
+
+    //  when first interacting with a peer hubs fetch their index, if they have one
+    fn process_discovery_response(
+        &mut self,
+        peer_id: PeerId,
+        index_root: Option<CidCbor>,
+        peer_ma: Option<Multiaddr>,
+    ) {
+        //  only hubs should respond
+        if self.routing.config.is_hub {
+            if let Some(ma) = peer_ma {
+                self.peer_table
+                    .insert(routing::PeerIdCbor::from(peer_id), Vec::from([ma]));
+            }
+            if let Some(r) = index_root {
+                if let Some(cid) = r.to_cid() {
+                    if self.pending_requests.get_by_left(&cid).is_none() {
+                        match self.pull_all(peer_id, cid) {
+                            Ok(ch) => {
+                                // we make note that we've made a request for this index
+                                self.pending_requests.insert(cid, ch);
+                            }
+                            Err(e) => println!("error in fetching index {}", e),
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     fn process_transfer_completion(
         &mut self,
         ch: ChannelId,
@@ -159,15 +172,27 @@ where
                             self.pending_events
                                 .push_back(RoutingEvent::ContentRequestFulfilled(cid.to_string()));
                         } else {
-                            //  do something when a request for an index CID succeeded
-                            let raw_bytes =
-                                dag_service::cat(self.store.clone(), *cid).map_err(|e| e)?;
-                            let entry = RoutingTableEntry::unmarshal_cbor(&raw_bytes)
-                                .map_err(|e| e.to_string())?;
-                            //  override just in case
                             if let Ok(p) = PeerId::from_str(&ch.responder) {
-                                self.routing.insert_routing_entry(p, entry).map_err(|e| e)?;
-                                self.pending_events.push_back(RoutingEvent::HubIndexUpdated);
+                                if let Some(ma) = self.peer_table.get(&routing::PeerIdCbor::from(p))
+                                {
+                                    let mut peer_index =
+                                        Hamt::<S, ()>::load(cid, self.store.clone())
+                                            .map_err(|e| e.to_string())?;
+                                    //  do something when a request for an index CID succeeded
+                                    let f =
+                                |k: &routing::index::BytesKey, v: &()| -> Result<(), routing::index::Error> {
+                                    let peer_cbor = routing::PeerIdCbor::from(p);
+                                    //  this function should only be called when we have a peer table entry so we should unwrap
+                                    let peer_ma_table = PeerTable::from([(peer_cbor, ma.to_vec())]);
+                                    self.routing.routing_table.lock().unwrap().extend(k.clone(), peer_ma_table).map_err(|e| e)?;
+                                    Ok(())
+                                };
+
+                                    peer_index.for_each(f).map_err(|e| e.to_string())?;
+                                    //  override just in case
+
+                                    self.pending_events.push_back(RoutingEvent::HubIndexUpdated);
+                                }
                             }
                         }
                     }
@@ -223,12 +248,12 @@ where
 {
     fn inject_event(&mut self, event: RoutingEvent) {
         match event {
-            RoutingEvent::HubTableUpdated(peer, root) => {
-                self.process_discovery_response(peer, root.clone());
+            RoutingEvent::HubTableUpdated(peer, root, peer_ma) => {
+                self.process_discovery_response(peer, root.clone(), peer_ma);
                 self.pending_events
-                    .push_back(RoutingEvent::HubTableUpdated(peer, root));
+                    .push_back(RoutingEvent::HubTableUpdated(peer, root, None));
             }
-            RoutingEvent::RoutingTableUpdated(root) => match self.get_from_routing(root) {
+            RoutingEvent::RoutingTableUpdated(root) => match self.get_from_routing_table(root) {
                 Ok(_) => {}
                 Err(e) => println!(
                     "failed to fetch {:?} after updating routing table: {}",
@@ -255,6 +280,7 @@ mod tests {
     use libp2p::yamux::YamuxConfig;
     use libp2p::{PeerId, Swarm, Transport};
     use rand::prelude::*;
+    use routing::index::IndexableBlockstore;
     use routing::{Index, PeerIdCbor};
     use std::time::Duration;
 
@@ -279,13 +305,15 @@ mod tests {
     struct Peer {
         peer_id: PeerId,
         addr: Multiaddr,
-        swarm: Swarm<Pop<MemoryBlockStore>>,
+        swarm: Swarm<Pop<IndexableBlockstore<MemoryBlockStore>>>,
     }
 
     impl Peer {
         fn new(is_hub: bool) -> Self {
             let (peer_id, trans) = mk_transport();
-            let bs = Arc::new(MemoryBlockStore::default());
+            let bs = Arc::new(IndexableBlockstore::new(Arc::new(
+                MemoryBlockStore::default(),
+            )));
             let config = PopConfig { peer_id, is_hub };
             let rt = Pop::new(config, bs);
             let mut swarm = Swarm::new(trans, rt, peer_id);
@@ -299,7 +327,7 @@ mod tests {
             }
         }
 
-        fn get_routing_table(&mut self) -> Index<MemoryBlockStore> {
+        fn get_routing_table(&mut self) -> Index<IndexableBlockstore<MemoryBlockStore>> {
             return self.swarm.behaviour_mut().routing.routing_table.clone();
         }
 
@@ -313,7 +341,7 @@ mod tests {
             self.swarm().behaviour_mut().get(content).unwrap();
         }
 
-        fn make_index(&mut self) -> RoutingTableEntry {
+        fn add_data(&mut self) -> Cid {
             // generate 1 random byte
             const FILE_SIZE: usize = 1;
             let mut data = vec![0u8; FILE_SIZE];
@@ -323,27 +351,21 @@ mod tests {
                 .unwrap()
                 .unwrap();
 
-            let entry = RoutingTableEntry::Insertion {
-                multiaddresses: Vec::from([self.addr.clone()]),
-                cids: Vec::from([CidCbor::from(root)]),
-            };
-
-            let data = entry.marshal_cbor().unwrap();
-
-            if let Some(cid) =
-                dag_service::add(self.swarm().behaviour_mut().store.clone(), &data).unwrap()
-            {
-                self.swarm()
-                    .behaviour_mut()
-                    .routing
-                    .discovery
-                    .update_index_root(CidCbor::from(cid));
-            }
-
-            entry
+            root
         }
 
-        fn swarm(&mut self) -> &mut Swarm<Pop<MemoryBlockStore>> {
+        fn ma(&self) -> Multiaddr {
+            self.swarm
+                .behaviour()
+                .routing
+                .discovery
+                .multiaddr
+                .first()
+                .unwrap()
+                .clone()
+        }
+
+        fn swarm(&mut self) -> &mut Swarm<Pop<IndexableBlockstore<MemoryBlockStore>>> {
             &mut self.swarm
         }
 
@@ -402,7 +424,8 @@ mod tests {
 
         // will have themselves in hub table
         let mut peer2 = Peer::new(false);
-        let entry = peer2.make_index();
+        let cid = peer2.add_data();
+        let ma = peer2.ma();
 
         peer1.add_address(&peer2);
 
@@ -417,15 +440,6 @@ mod tests {
         assert!(dial.is_ok());
 
         peer1.next_indexing().await;
-
-        let res = match entry {
-            RoutingTableEntry::Insertion {
-                multiaddresses: ma,
-                cids,
-            } => Some((cids.first().unwrap().to_cid().unwrap(), ma)),
-            _ => None,
-        };
-        let (cid, ma) = res.unwrap();
 
         assert!(hub_routing_table
             .lock()
@@ -451,7 +465,7 @@ mod tests {
                 .get(&PeerIdCbor::from(peer2id))
                 .unwrap()
                 .clone(),
-            ma
+            Vec::from([ma.clone()])
         );
     }
 
@@ -460,15 +474,7 @@ mod tests {
         let mut hub_peer = Peer::new(true);
         // Peer 1 has a content table that its going to push to hub peer
         let mut peer1 = Peer::new(false);
-        let entry = peer1.make_index();
-        let cid = match entry {
-            RoutingTableEntry::Insertion {
-                multiaddresses: _,
-                cids,
-            } => Some(cids.first().unwrap().to_cid().unwrap()),
-            _ => None,
-        }
-        .unwrap();
+        let cid = peer1.add_data();
 
         hub_peer.add_address(&peer1);
         //  print logs for hub peer
@@ -491,15 +497,15 @@ mod tests {
         let mut hub_peer = Peer::new(true);
         // Peer 1 has a content table that its going to push to hub peer
         let mut peer1 = Peer::new(false);
-        let entry = peer1.make_index();
-        let cid = match entry {
-            RoutingTableEntry::Insertion {
-                multiaddresses: _,
-                cids,
-            } => Some(cids.first().unwrap().to_cid().unwrap()),
-            _ => None,
-        }
-        .unwrap();
+        let cid = peer1.add_data();
+        // let cid = match entry {
+        //     RoutingTableEntry::Insertion {
+        //         multiaddresses: _,
+        //         cids,
+        //     } => Some(cids.first().unwrap().to_cid().unwrap()),
+        //     _ => None,
+        // }
+        // .unwrap();
 
         let mut peer2 = Peer::new(false);
 

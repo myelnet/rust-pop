@@ -113,6 +113,7 @@ pub async fn add_from_stream<S: BlockStore>(
     }
 }
 
+
 pub fn cat<S: BlockStore>(store: Arc<S>, root: Cid) -> Result<Vec<u8>, String> {
     let mut buf = Vec::new();
 

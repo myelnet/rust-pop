@@ -2,6 +2,7 @@ use crate::cbor_helpers::PeerIdCbor;
 use crate::index::ShrinkableMap;
 use async_std::io;
 use async_trait::async_trait;
+use blockstore::types::BlockStore;
 use filecoin::cid_helpers::CidCbor;
 use futures::io::{AsyncRead, AsyncWrite};
 use futures::prelude::*;
@@ -43,9 +44,9 @@ impl ShrinkableMap<PeerIdCbor, Vec<Multiaddr>> for PeerTable {
 }
 
 #[derive(Debug, Clone)]
-pub struct HubDiscoveryProtocol;
+pub struct DiscoveryProtocol;
 
-impl ProtocolName for HubDiscoveryProtocol {
+impl ProtocolName for DiscoveryProtocol {
     fn protocol_name(&self) -> &[u8] {
         b"/myel/hub-discovery/0.1"
     }
@@ -66,7 +67,7 @@ impl Default for DiscoveryCodec {
 
 #[async_trait]
 impl RequestResponseCodec for DiscoveryCodec {
-    type Protocol = HubDiscoveryProtocol;
+    type Protocol = DiscoveryProtocol;
     type Response = DiscoveryResponse;
     type Request = DiscoveryRequest;
 
@@ -138,7 +139,7 @@ impl RequestResponseCodec for DiscoveryCodec {
 #[derive(Debug)]
 pub enum DiscoveryEvent {
     // peer and index root
-    ResponseReceived(RequestId, PeerId, Option<CidCbor>),
+    ResponseReceived(RequestId, PeerId, Option<CidCbor>, Option<Multiaddr>),
 }
 
 #[derive(Clone)]
@@ -167,31 +168,32 @@ impl Default for Config {
 #[derive(Debug, PartialEq, Clone, Serialize_tuple, Deserialize_tuple)]
 pub struct DiscoveryRequest {
     pub id: RequestId,
-    pub hub: bool,
+    pub is_hub: bool,
 }
 
 #[derive(Debug, PartialEq, Clone, Serialize_tuple, Deserialize_tuple)]
 pub struct DiscoveryResponse {
     // pub source: Vec<u8>,
     pub id: RequestId,
-    pub addresses: PeerTable,
+    pub hub_table: Option<PeerTable>,
     pub index_root: Option<CidCbor>,
+    pub peer_ma: Option<Multiaddr>,
 }
 
-pub struct HubDiscovery {
+pub struct Discovery<B: BlockStore> {
     //  we implement our own id_counter (instead of libp2p's) to ensure the request / response messages are CBOR encodable
     id_counter: Arc<AtomicI32>,
     inner: RequestResponse<DiscoveryCodec>,
     pub hub_table: PeerTable,
     peer_id: PeerIdCbor,
     pub multiaddr: SmallVec<[Multiaddr; 4]>,
-    hub: bool,
-    index_root: Option<CidCbor>,
+    is_hub: bool,
+    store: Arc<B>,
 }
 
-impl HubDiscovery {
-    pub fn new(config: Config, peer_id: PeerId, hub: bool, index_root: Option<CidCbor>) -> Self {
-        let protocols = std::iter::once((HubDiscoveryProtocol, ProtocolSupport::Full));
+impl<B: BlockStore> Discovery<B> {
+    pub fn new(config: Config, peer_id: PeerId, is_hub: bool, store: Arc<B>) -> Self {
+        let protocols = std::iter::once((DiscoveryProtocol, ProtocolSupport::Full));
         let mut rr_config = RequestResponseConfig::default();
         rr_config.set_connection_keep_alive(config.connection_keep_alive);
         rr_config.set_request_timeout(config.request_timeout);
@@ -203,8 +205,8 @@ impl HubDiscovery {
             inner,
             hub_table: HashMap::new(),
             peer_id: PeerIdCbor::from(peer_id),
-            hub,
-            index_root,
+            is_hub,
+            store,
         }
     }
     // only hubs should track leaf nodes, they do so using the inner behaviour's table
@@ -215,13 +217,9 @@ impl HubDiscovery {
     /// Removes an address of a peer previously added via `add_address`.
     // only hubs should track leaf nodes, they do so using the inner behaviour's table
     pub fn remove_address(&mut self, peer: &PeerId, address: &Multiaddr) {
-        if self.hub {
+        if self.is_hub {
             self.inner.remove_address(peer, address);
         }
-    }
-
-    pub fn update_index_root(&mut self, root: CidCbor) {
-        self.index_root = Some(root);
     }
 
     // want this to be private as we want connections to trigger table swaps. There could be
@@ -229,13 +227,18 @@ impl HubDiscovery {
     // and then we have duplicate requests being made
     fn request(&mut self, peer_id: &PeerId) -> RequestId {
         let id = self.id_counter.fetch_add(1, Ordering::Relaxed);
-        self.inner
-            .send_request(peer_id, DiscoveryRequest { id, hub: self.hub });
+        self.inner.send_request(
+            peer_id,
+            DiscoveryRequest {
+                id,
+                is_hub: self.is_hub,
+            },
+        );
         id
     }
 }
 
-impl NetworkBehaviour for HubDiscovery {
+impl<B: 'static + BlockStore> NetworkBehaviour for Discovery<B> {
     type ProtocolsHandler = <RequestResponse<DiscoveryCodec> as NetworkBehaviour>::ProtocolsHandler;
     type OutEvent = DiscoveryEvent;
 
@@ -300,7 +303,7 @@ impl NetworkBehaviour for HubDiscovery {
         // include self in peer table for syncing
         let ma = addr.clone();
         self.multiaddr.push(ma.clone());
-        if self.hub {
+        if self.is_hub {
             self.hub_table
                 .entry(self.peer_id.clone())
                 .or_default()
@@ -312,7 +315,7 @@ impl NetworkBehaviour for HubDiscovery {
         // include self in peer table for syncing
         let ma = addr.clone();
         self.multiaddr.retain(|x| x.clone() != ma);
-        if self.hub {
+        if self.is_hub {
             self.hub_table
                 .entry(self.peer_id.clone())
                 .or_default()
@@ -373,10 +376,29 @@ impl NetworkBehaviour for HubDiscovery {
                         request,
                         channel,
                     } => {
+                        // let index_root =
+                        let hub_table = match self.is_hub {
+                            true => Some(self.hub_table.clone()),
+                            false => None,
+                        };
+                        let index_root = match request.is_hub {
+                            true => match &self.store.index_root() {
+                                Some(index) => Some(CidCbor::from(*index)),
+                                _ => None,
+                            },
+                            false => None,
+                        };
+
+                        let peer_ma = match request.is_hub {
+                            true => self.multiaddr.first().cloned(),
+                            false => None,
+                        };
+
                         let msg = DiscoveryResponse {
                             id: request.id,
-                            addresses: self.hub_table.clone(),
-                            index_root: self.index_root.clone(),
+                            hub_table,
+                            index_root,
+                            peer_ma,
                         };
                         self.inner.send_response(channel, msg).unwrap();
                     }
@@ -387,13 +409,23 @@ impl NetworkBehaviour for HubDiscovery {
                         //  addresses only get returned on a successful response
                         //  update our local peer table
                         //  extend overwrites colliding keys (we assume inbound information is most up to date)
-                        self.hub_table.extend(response.addresses);
+                        if let Some(table) = response.hub_table {
+                            for peer_bytes in table.keys().next() {
+                                let pid = peer_bytes.to_pid().unwrap();
+                                //  we can safely unwrap as only valid Pids are inserted
+                                for addr in table.get(peer_bytes).unwrap() {
+                                    self.add_address(&pid, addr.clone());
+                                }
+                            }
+                            self.hub_table.extend(table);
+                        }
 
                         return Poll::Ready(NetworkBehaviourAction::GenerateEvent(
                             DiscoveryEvent::ResponseReceived(
                                 response.id,
                                 peer,
                                 response.index_root,
+                                response.peer_ma,
                             ),
                         ));
                     }
@@ -433,6 +465,7 @@ impl NetworkBehaviour for HubDiscovery {
 mod tests {
     use super::*;
     use async_std::task;
+    use blockstore::memory::MemoryDB;
     use libp2p::core::muxing::StreamMuxerBox;
     use libp2p::core::transport::Boxed;
     use libp2p::identity;
@@ -446,7 +479,10 @@ mod tests {
 
     #[test]
     fn request_serialization() {
-        let req = DiscoveryRequest { id: 1, hub: true };
+        let req = DiscoveryRequest {
+            id: 1,
+            is_hub: true,
+        };
 
         let msgc = req.clone();
         let msg_encoded = to_vec(&req).unwrap();
@@ -465,13 +501,14 @@ mod tests {
                 .as_bytes()
                 .to_vec(),
         };
-        let mut addresses = HashMap::new();
-        addresses.insert(peer.clone(), multiaddr);
+        let mut hub_table = HashMap::new();
+        hub_table.insert(peer.clone(), multiaddr);
         let resp = DiscoveryResponse {
             // source: peer,
             id: 1,
-            addresses,
+            hub_table: Some(hub_table),
             index_root: None,
+            peer_ma: Some(Multiaddr::from(localhost)),
         };
 
         let msgc = resp.clone();
@@ -503,7 +540,7 @@ mod tests {
     struct Peer {
         peer_id: PeerId,
         addr: Vec<Multiaddr>,
-        swarm: Swarm<HubDiscovery>,
+        swarm: Swarm<Discovery<MemoryDB>>,
     }
 
     impl Peer {
@@ -511,7 +548,12 @@ mod tests {
             let (peer_id, trans) = mk_transport();
             let mut swarm = Swarm::new(
                 trans,
-                HubDiscovery::new(Config::default(), peer_id, is_hub, None),
+                Discovery::new(
+                    Config::default(),
+                    peer_id,
+                    is_hub,
+                    Arc::new(MemoryDB::default()),
+                ),
                 peer_id,
             );
             for _i in 0..num_addreses {
@@ -537,7 +579,7 @@ mod tests {
             }
         }
 
-        fn swarm(&mut self) -> &mut Swarm<HubDiscovery> {
+        fn swarm(&mut self) -> &mut Swarm<Discovery<MemoryDB>> {
             &mut self.swarm
         }
 
@@ -563,7 +605,7 @@ mod tests {
     }
 
     fn assert_response_ok(event: Option<DiscoveryEvent>, id: RequestId) {
-        if let Some(DiscoveryEvent::ResponseReceived(resp_id, _, _)) = event {
+        if let Some(DiscoveryEvent::ResponseReceived(resp_id, _, _, _)) = event {
             assert_eq!(resp_id, id);
         } else {
             panic!("{:?} is not a response event", event);

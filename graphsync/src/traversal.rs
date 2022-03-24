@@ -140,7 +140,7 @@ pub enum Selector {
         limit: RecursionLimit,
         #[serde(rename = ":>")]
         sequence: Box<Selector>,
-        #[serde(skip_deserializing)]
+        #[serde(skip)]
         /// Used to index current
         current: Option<Box<Selector>>,
     },
@@ -1098,6 +1098,10 @@ mod tests {
 
         let sel_data = hex::decode("a16152a2616ca1646e6f6e65a0623a3ea16161a1613ea16140a0").unwrap();
         let selector = Selector::unmarshal_cbor(&sel_data).unwrap();
+
+        // verify that we encode it to the same output.
+        let out = selector.marshal_cbor().unwrap();
+        assert_eq!(out, sel_data);
 
         let mut progress = Progress::new(loader);
 

@@ -2060,7 +2060,7 @@ dependencies = [
  "async-trait",
  "blockstore",
  "criterion",
- "crossbeam-channel",
+ "cs_serde_bytes",
  "cs_serde_cbor",
  "dag_service",
  "filecoin",
@@ -2076,13 +2076,15 @@ dependencies = [
  "log",
  "pprof",
  "protobuf",
- "protoc-rust",
  "rand 0.7.3",
  "serde",
  "serde_json",
+ "serde_repr",
+ "serde_tuple",
  "smallvec",
  "thiserror",
  "unixfs-v1 0.2.1 (git+https://github.com/ipfs-rust/unixfsv1)",
+ "uuid",
 ]
 
 [[package]]
@@ -6103,6 +6105,10 @@ name = "uuid"
 version = "0.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bc5cf98d8186244414c848017f0e2676b3fcb46807f6668a97dfe67359a3c4b7"
+dependencies = [
+ "getrandom 0.2.4",
+ "serde",
+]
 
 [[package]]
 name = "value-bag"

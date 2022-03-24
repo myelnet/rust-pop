@@ -1,14 +1,13 @@
-use super::traversal::{BlockIterator, Error};
+use super::traversal::{BlockIterator, Error, Selector};
 use super::{
-    Extensions, GraphsyncMessage, GraphsyncRequest, GraphsyncResponse, MetadataItem, Prefix,
-    RequestId, ResponseStatusCode, METADATA_EXTENSION,
+    Extensions, GraphSyncBlock, GraphSyncLinkData, GraphSyncMessage, GraphSyncResponse, LinkAction,
+    Prefix, RequestId, ResponseStatusCode,
 };
 use blockstore::types::BlockStore;
 use filecoin::cid_helpers::CidCbor;
 use libipld::codec::Decode;
-use libipld::ipld::Ipld;
 use libipld::store::StoreParams;
-use serde_cbor::to_vec;
+use libipld::{ipld::Ipld, Cid};
 use std::mem;
 use std::sync::Arc;
 
@@ -16,10 +15,10 @@ pub struct ResponseBuilder<S> {
     pub paused: bool,
     pub cancelled: bool,
     pub rejected: bool,
+    pub status: ResponseStatusCode,
     req_id: RequestId,
     it: BlockIterator<S>,
     max_size: usize,
-    status: ResponseStatusCode,
     partial: bool,
     error: Option<Error>,
     extensions: Extensions,
@@ -30,7 +29,7 @@ where
     S: BlockStore,
     Ipld: Decode<<S::Params as StoreParams>::Codecs>,
 {
-    type Item = GraphsyncMessage;
+    type Item = GraphSyncMessage;
 
     fn next(&mut self) -> Option<Self::Item> {
         // if the status was set to final this iterator is done and will only return None.
@@ -45,8 +44,6 @@ where
             _ => {}
         };
 
-        let mut msg = GraphsyncMessage::default();
-
         if self.paused {
             self.status = ResponseStatusCode::RequestPaused;
         }
@@ -57,39 +54,43 @@ where
             self.status = ResponseStatusCode::RequestRejected;
         }
         if self.paused | self.cancelled | self.rejected {
-            msg.responses.insert(
-                self.req_id,
-                GraphsyncResponse {
+            return Some(
+                GraphSyncResponse {
                     id: self.req_id,
                     status: self.status,
-                    extensions: Default::default(),
-                },
+                    metadata: None,
+                    extensions: None,
+                }
+                .into(),
             );
-            return Some(msg);
         }
 
         let mut size = 0;
         let mut metadata = Vec::new();
+        let mut blocks = Vec::new();
         // iterate until we've filled the message to capacity
         while size < self.max_size {
             match self.it.next() {
                 Some(Ok(block)) => {
                     size += block.data().len();
                     let (cid, data) = block.into_inner();
-                    msg.blocks.push((Prefix::from(cid).to_bytes(), data));
+                    blocks.push(GraphSyncBlock {
+                        prefix: Prefix::from(cid).to_bytes(),
+                        data,
+                    });
                     // at least one block was yielded so the response can be partial
                     self.status = ResponseStatusCode::PartialResponse;
-                    metadata.push(MetadataItem {
+                    metadata.push(GraphSyncLinkData {
                         link: CidCbor::from(cid),
-                        block_present: true,
+                        action: LinkAction::Present,
                     });
                 }
                 // we found a missing block but more might still be coming
                 Some(Err(Error::BlockNotFound(cid))) => {
                     self.partial = true;
-                    metadata.push(MetadataItem {
+                    metadata.push(GraphSyncLinkData {
                         link: CidCbor::from(cid),
-                        block_present: false,
+                        action: LinkAction::Missing,
                     });
                 }
                 Some(Err(e)) => {
@@ -124,21 +125,20 @@ where
             }
         }
 
-        let mut extensions = mem::take(&mut self.extensions);
+        let extensions = mem::take(&mut self.extensions);
+        let mut response = GraphSyncResponse {
+            id: self.req_id,
+            status: self.status,
+            metadata: None,
+            extensions: None,
+        };
         if !metadata.is_empty() {
-            let metabytes = to_vec(&metadata).expect("Expected metadata to encode");
-            extensions.insert(METADATA_EXTENSION.to_string(), metabytes);
+            response.metadata = Some(metadata);
         }
-
-        msg.responses.insert(
-            self.req_id,
-            GraphsyncResponse {
-                id: self.req_id,
-                status: self.status,
-                extensions,
-            },
-        );
-        Some(msg)
+        if !extensions.is_empty() {
+            response.extensions = Some(extensions);
+        }
+        Some(GraphSyncMessage::from_blocks(response, blocks))
     }
 }
 
@@ -147,9 +147,9 @@ where
     S: BlockStore,
     Ipld: Decode<<S::Params as StoreParams>::Codecs>,
 {
-    pub fn new(request: &GraphsyncRequest, store: Arc<S>) -> Self {
+    pub fn new(id: RequestId, root: Cid, selector: Selector, store: Arc<S>) -> Self {
         Self {
-            req_id: request.id,
+            req_id: id,
             partial: false,
             max_size: 500 * 1024,
             extensions: Default::default(),
@@ -160,8 +160,7 @@ where
             // no response messages have been created yet
             status: ResponseStatusCode::RequestAcknowledged,
             // we tell the block iterator not to follow the same link twice as it was already sent.
-            it: BlockIterator::new(store, request.root, request.selector.clone())
-                .ignore_duplicate_links(),
+            it: BlockIterator::new(store, root, selector).ignore_duplicate_links(),
         }
     }
     /// set custom extensions to be sent with the first message of the iterator.
@@ -184,6 +183,13 @@ where
         self.rejected = true;
         self
     }
+    pub fn is_completed(&self) -> bool {
+        match self.status {
+            ResponseStatusCode::RequestCompletedFull
+            | ResponseStatusCode::RequestCompletedPartial => true,
+            _ => false,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -195,6 +201,7 @@ mod tests {
     use libipld::multihash::Code;
     use libipld::store::DefaultParams;
     use libipld::{ipld, Block, Cid};
+    use uuid::Uuid;
 
     struct TestData {
         root: Cid,
@@ -238,24 +245,17 @@ mod tests {
             current: None,
         };
 
-        let mut builder = ResponseBuilder::new(
-            &GraphsyncRequest {
-                root,
-                selector,
-                id: 1,
-                extensions: Default::default(),
-            },
-            store.clone(),
-        );
+        let mut builder = ResponseBuilder::new(Uuid::new_v4(), root, selector, store.clone());
 
-        let msg = builder.next().unwrap();
-        assert_eq!(msg.responses.len(), 1);
-        assert_eq!(msg.blocks.len(), 3);
+        let GraphSyncMessage::V2 {
+            responses, blocks, ..
+        } = builder.next().unwrap();
+        assert_eq!(responses.as_ref().unwrap().len(), 1);
+        assert_eq!(blocks.as_ref().unwrap().len(), 3);
         assert_eq!(
-            msg.responses.get(&1).unwrap().status,
+            responses.as_ref().unwrap()[0].status,
             ResponseStatusCode::RequestCompletedFull
         );
-
         let end = builder.next();
         assert_eq!(end, None);
     }
@@ -292,30 +292,27 @@ mod tests {
         };
 
         let mut builder = ResponseBuilder::new(
-            &GraphsyncRequest {
-                root: parent_block.cid().clone(),
-                selector,
-                id: 1,
-                extensions: Default::default(),
-            },
+            Uuid::new_v4(),
+            parent_block.cid().clone(),
+            selector,
             store.clone(),
         );
-        let msg = builder.next().unwrap();
-        assert_eq!(msg.responses.len(), 1);
-        assert_eq!(msg.blocks.len(), 2);
+        let GraphSyncMessage::V2 {
+            responses, blocks, ..
+        } = builder.next().unwrap();
+        assert_eq!(responses.as_ref().unwrap().len(), 1);
+        assert_eq!(blocks.as_ref().unwrap().len(), 2);
         assert_eq!(
-            msg.responses.get(&1).unwrap().status,
+            responses.as_ref().unwrap()[0].status,
             ResponseStatusCode::RequestCompletedPartial
         );
 
-        let metabytes = msg.responses[&1]
-            .extensions
-            .get(METADATA_EXTENSION)
-            .unwrap();
-        let metadata: Vec<MetadataItem> = from_slice(metabytes).unwrap();
-        metadata
+        responses.as_ref().unwrap()[0]
+            .metadata
+            .as_ref()
+            .unwrap()
             .iter()
-            .find(|item| item.block_present == false)
+            .find(|item| item.action == LinkAction::Missing)
             .unwrap();
         let end = builder.next();
         assert_eq!(end, None);

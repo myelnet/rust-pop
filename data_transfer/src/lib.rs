@@ -13,14 +13,12 @@ use futures::{
     select,
     stream::{IntoAsyncRead, TryStreamExt},
 };
-use graphsync::network::MessageCodec;
 use graphsync::res_mgr::ResponseBuilder;
 use graphsync::traversal::{
     resolve_unixfs, unixfs_path_selector, AsyncLoader, Progress, RecursionLimit, Selector,
 };
 use graphsync::{
-    GraphsyncCodec, GraphsyncMessage, GraphsyncProtocol, GraphsyncRequest, Prefix, RequestId,
-    ResponseStatusCode,
+    GraphSyncBlock, GraphSyncMessage, GraphSyncRequest, Prefix, RequestId, ResponseStatusCode,
 };
 use libipld::codec::Decode;
 use libipld::store::{DefaultParams, StoreParams};
@@ -40,9 +38,10 @@ pub use network::{
 use num_bigint::ToBigInt;
 use smallvec::SmallVec;
 use std::collections::hash_map::{Entry, HashMap};
+use std::collections::BTreeMap;
 use std::io::{Error, ErrorKind};
 use std::sync::{
-    atomic::{AtomicI32, Ordering},
+    atomic::{AtomicU64, Ordering},
     Arc,
 };
 
@@ -153,7 +152,7 @@ type ListenerCmdRecvr = mpsc::Receiver<ListenerCmd>;
 pub struct Dt<S: BlockStore> {
     pub store: Arc<S>,
     pub peer_id: PeerId,
-    id_counter: Arc<AtomicI32>,
+    id_counter: Arc<AtomicU64>,
     outbound_events: mpsc::Sender<NetEvent>,
     listener_cmds: Option<ListenerCmdSendr>,
     executor: Arc<Box<dyn Executor + Send + Sync>>,
@@ -209,7 +208,7 @@ where
         Self {
             store,
             peer_id,
-            id_counter: Arc::new(AtomicI32::new(1)),
+            id_counter: Arc::new(AtomicU64::new(1)),
             outbound_events: s,
             listener_cmds,
             executor,
@@ -251,20 +250,20 @@ where
         params: DtParams,
     ) -> Result<PullStream, Error> {
         // For now we simplify and use a single id for all protocol requests
-        // it will be updated in any case when switching over to UUIDs.
-        let id = self.id_counter.fetch_add(1, Ordering::Relaxed);
+        let tid = self.id_counter.fetch_add(1, Ordering::Relaxed);
 
         let root = params.root();
-        let cid = CidCbor::from(root);
+        let mut req = GraphSyncRequest::new(root, params.selector(), None);
+        let id = req.id;
         let voucher = DealProposal::Pull {
-            id: id as u64,
-            payload_cid: cid.clone(),
+            id: tid,
+            payload_cid: req.root.clone(),
             params: params.pull(),
         };
         let message = TransferMessage {
             is_rq: true,
             request: Some(TransferRequest {
-                root: cid,
+                root: req.root.clone(),
                 mtype: MessageType::New,
                 pause: false,
                 partial: false,
@@ -272,25 +271,14 @@ where
                 selector: params.selector(),
                 voucher_type: voucher.voucher_type(),
                 voucher: Some(voucher),
-                transfer_id: id as u64,
+                transfer_id: tid,
                 restart_channel: Default::default(),
             }),
             response: None,
         };
         let buf = message.marshal_cbor().map_err(io_err)?;
-        let mut extensions = HashMap::new();
-        extensions.insert(EXTENSION_KEY.to_string(), buf);
+        req.insert_extension(EXTENSION_KEY, buf);
 
-        let mut msg = GraphsyncMessage::default();
-        msg.requests.insert(
-            id,
-            GraphsyncRequest {
-                id,
-                root,
-                selector: params.selector(),
-                extensions,
-            },
-        );
         // This channel will receive inbound messages from all protocols
         let (inbound_send, mut inbound_receive) = mpsc::channel(4);
 
@@ -300,9 +288,10 @@ where
         outbound
             .try_send(NetEvent::NewRequest {
                 id,
+                tid,
                 peer,
                 maddr,
-                msg: NetMsg::Graphsync(msg),
+                msg: NetMsg::Graphsync(req.into()),
                 chan: inbound_send,
             })
             .map_err(io_err)?;
@@ -374,7 +363,7 @@ where
                         state = state.transition(DtEvent::AllBlocksReceived);
                          if let DtState::Completed { .. } = state {
                              s.close_channel();
-                             outbound.start_send(NetEvent::Cleanup { id, peer }).unwrap();
+                             outbound.start_send(NetEvent::Cleanup { id, tid, peer }).unwrap();
                              break;
                          }
                     },
@@ -386,10 +375,10 @@ where
                             TransferEvent::Partial(blocks) => {
                                 let blocks: Vec<Block<S::Params>> = blocks
                                     .iter()
-                                    .map_while(|(prefix, data)| {
-                                        let prefix = Prefix::new_from_bytes(prefix).ok()?;
-                                        let cid = prefix.to_cid(data).ok()?;
-                                        Some(Block::new_unchecked(cid, data.to_vec()))
+                                    .map_while(|block| {
+                                        let prefix = Prefix::new_from_bytes(&block.prefix).ok()?;
+                                        let cid = prefix.to_cid(&block.data).ok()?;
+                                        Some(Block::new_unchecked(cid, block.data.to_vec()))
                                     })
                                     .collect();
 
@@ -406,12 +395,12 @@ where
                             // it will fail the initial future instead of returning a stream.
                             TransferEvent::Rejected => {
                                 s.try_send(Err(Error::from(ErrorKind::InvalidInput))).unwrap();
-                                outbound.try_send(NetEvent::Cleanup { id, peer }).unwrap();
+                                outbound.try_send(NetEvent::Cleanup { id, tid, peer }).unwrap();
                                 break;
                             }
                             TransferEvent::ContentNotFound => {
                                 s.try_send(Err(Error::from(ErrorKind::NotFound))).unwrap();
-                                outbound.try_send(NetEvent::Cleanup { id, peer }).unwrap();
+                                outbound.try_send(NetEvent::Cleanup { id, tid, peer }).unwrap();
                                 break;
                             }
                             TransferEvent::Disconected(err) => {
@@ -423,7 +412,7 @@ where
                                 state = state.transition(DtEvent::Completed);
                                 if let DtState::Completed { .. } = state {
                                     s.close_channel();
-                                    outbound.start_send(NetEvent::Cleanup { id, peer }).unwrap();
+                                    outbound.start_send(NetEvent::Cleanup { id, tid, peer }).unwrap();
                                     break;
                                 }
                             }
@@ -456,7 +445,7 @@ fn io_err<E: Into<Box<dyn std::error::Error + Send + Sync>>>(e: E) -> Error {
 }
 
 enum NetMsg {
-    Graphsync(GraphsyncMessage),
+    Graphsync(GraphSyncMessage),
     Transfer(TransferMessage),
 }
 
@@ -472,6 +461,7 @@ impl ProtocolName for NetMsg {
 enum NetEvent {
     NewRequest {
         id: RequestId,
+        tid: u64,
         peer: PeerId,
         maddr: Multiaddr,
         msg: NetMsg,
@@ -479,6 +469,7 @@ enum NetEvent {
     },
     Cleanup {
         id: RequestId,
+        tid: u64,
         peer: PeerId,
     },
 }
@@ -502,7 +493,7 @@ impl Connection {
 
 enum TransferEvent {
     DialFailed(Error),
-    Partial(Vec<(Vec<u8>, Vec<u8>)>),
+    Partial(Vec<GraphSyncBlock>),
     ContentNotFound,
     Rejected,
     CompleteFull,
@@ -512,21 +503,25 @@ enum TransferEvent {
 // map a graphsync status code to a transfer event
 fn process_gs_event(
     status: ResponseStatusCode,
-    blocks: Vec<(Vec<u8>, Vec<u8>)>,
+    blocks: Option<Vec<GraphSyncBlock>>,
 ) -> Option<TransferEvent> {
     log::info!("==> status {:?}", status);
-    match (status, blocks.is_empty()) {
-        (ResponseStatusCode::PartialResponse, false) => Some(TransferEvent::Partial(blocks)),
-        (ResponseStatusCode::RequestCompletedFull, false) => Some(TransferEvent::Partial(blocks)),
-        (ResponseStatusCode::RequestCompletedPartial, false) => {
-            Some(TransferEvent::Partial(blocks))
+    match (status, blocks.is_none()) {
+        (ResponseStatusCode::PartialResponse, false) => {
+            Some(TransferEvent::Partial(blocks.unwrap()))
         }
-        (ResponseStatusCode::RequestPaused, false) => Some(TransferEvent::Partial(blocks)),
+        (ResponseStatusCode::RequestCompletedFull, false) => {
+            Some(TransferEvent::Partial(blocks.unwrap()))
+        }
+        (ResponseStatusCode::RequestCompletedPartial, false) => {
+            Some(TransferEvent::Partial(blocks.unwrap()))
+        }
+        (ResponseStatusCode::RequestPaused, false) => Some(TransferEvent::Partial(blocks.unwrap())),
         (ResponseStatusCode::RequestRejected, _) => Some(TransferEvent::Rejected),
         (ResponseStatusCode::RequestFailedContentNotFound, _) => {
             Some(TransferEvent::ContentNotFound)
         }
-        (_, false) => Some(TransferEvent::Partial(blocks)),
+        (_, false) => Some(TransferEvent::Partial(blocks.unwrap())),
         _ => None,
     }
 }
@@ -543,6 +538,8 @@ async fn conn_loop(
 
     // channels for each request are maintained here
     let mut inbound: HashMap<RequestId, mpsc::Sender<TransferEvent>> = HashMap::new();
+    // keep track of graphsync request ids for data transfer id
+    let mut req_ids: HashMap<u64, RequestId> = HashMap::new();
 
     // global inbound channel, all inbound messages are sent through
     let (in_sender, mut in_receiver) = mpsc::channel(64);
@@ -555,9 +552,10 @@ async fn conn_loop(
                 match result {
                     Ok(msg) => match msg {
                     NetMsg::Graphsync(msg) => {
-                        let blocks = msg.blocks;
-                        let single = msg.responses.len() == 1;
-                        let mut responses = msg.responses.values();
+                        let (_, responses, blocks) = msg.into_inner();
+                        if let Some(responses) = responses {
+                        let single = responses.len() == 1;
+                        let mut responses = responses.iter();
                         // handle single response differently so we don't clone the blocks.
                         if single {
                             let res = responses.next().unwrap();
@@ -576,6 +574,7 @@ async fn conn_loop(
                                 }
                             }
                         }
+                        }
                     }
                     NetMsg::Transfer(msg) => {
                         // make sure the message isn't empty
@@ -587,7 +586,8 @@ async fn conn_loop(
                             unimplemented!("TODO");
                         } else {
                             let id = msg.response.as_ref().expect("to be a response").transfer_id;
-                            if let Some(sender) = inbound.get_mut(&(id as i32)) {
+                            let gs_id = req_ids.get(&id).expect("untracked data transfer");
+                            if let Some(sender) = inbound.get_mut(&gs_id) {
                                 sender
                                     .try_send(TransferEvent::CompleteFull)
                                     .map_err(io_err)?;
@@ -630,6 +630,7 @@ async fn conn_loop(
             match ev {
                 NetEvent::NewRequest {
                     id,
+                    tid,
                     peer,
                     maddr,
                     msg,
@@ -639,6 +640,7 @@ async fn conn_loop(
                         Entry::Occupied(mut entry) => {
                             // We already have an open connection from a previous transfer
                             inbound.insert(id, chan);
+                            req_ids.insert(tid, id);
 
                             // keep track of ongoing requests with the connection
                             let conn = entry.get_mut();
@@ -671,6 +673,7 @@ async fn conn_loop(
                             let mux = Arc::new(mux);
 
                             inbound.insert(id, chan);
+                            req_ids.insert(tid, id);
 
                             let inmux = mux.clone();
                             let mut inbound_send = in_sender.clone();
@@ -697,7 +700,7 @@ async fn conn_loop(
                     };
                 }
                 // Close any existing channel for a given request
-                NetEvent::Cleanup { id, peer } => {
+                NetEvent::Cleanup { id, tid, peer } => {
                     if let Some(conn) = conns.get_mut(&peer) {
                         conn.requests.sort_unstable();
                         if let Ok(idx) = conn.requests.binary_search(&id) {
@@ -705,6 +708,7 @@ async fn conn_loop(
                         }
                     }
                     inbound.remove(&id);
+                    req_ids.remove(&tid);
                 }
             }
         },
@@ -780,9 +784,8 @@ where
     match proto {
         // handle graphsync protocol messages
         gs_proto if gs_proto == Protocols::Graphsync.protocol_name() => {
-            let mut codec = GraphsyncCodec::<DefaultParams>::default();
             // the response stream usually contains multiple messages
-            while let Ok(msg) = codec.read_message(&GraphsyncProtocol, io).await {
+            while let Ok(msg) = GraphSyncMessage::from_net(io).await {
                 // there might be a way to avoid cloning by sending
                 // blocks separately.
                 sender
@@ -816,10 +819,7 @@ async fn outbound_write(msg: NetMsg, mux: Arc<StreamMuxerBox>) -> Result<(), Err
 
     match msg {
         NetMsg::Graphsync(msg) => {
-            let mut codec = GraphsyncCodec::<DefaultParams>::default();
-            codec
-                .write_message(&GraphsyncProtocol, &mut io, msg)
-                .await?;
+            msg.to_net(&mut io).await?;
             io.close().await?;
         }
         NetMsg::Transfer(msg) => {
@@ -927,8 +927,8 @@ where
     while let Some(Ok(msg)) = in_receiver.next().await {
         match msg {
             NetMsg::Graphsync(msg) => {
-                if !msg.requests.is_empty() {
-                    for req in msg.requests.values() {
+                if msg.requests().is_some() {
+                    for req in msg.requests().unwrap() {
                         let outmux = mux.clone();
                         let request = req.clone();
                         let store = store.clone();
@@ -950,7 +950,7 @@ where
 
 async fn graphsync_provider<S>(
     store: Arc<S>,
-    request: GraphsyncRequest,
+    request: GraphSyncRequest,
     mux: Arc<StreamMuxerBox>,
 ) -> Result<(), Error>
 where
@@ -966,16 +966,35 @@ where
     )
     .await?;
 
-    let mut codec = GraphsyncCodec::<DefaultParams>::default();
-    let mut builder = ResponseBuilder::new(&request, store);
+    let mut builder = ResponseBuilder::new(
+        request.id,
+        request
+            .root
+            .to_cid()
+            .ok_or_else(|| Error::from(ErrorKind::InvalidInput))?,
+        request.selector,
+        store,
+    );
     for msg in builder.by_ref() {
-        codec
-            .write_message(&GraphsyncProtocol, &mut io, msg)
-            .await?;
+        msg.to_net(&mut io).await?;
     }
     io.close().await?;
 
-    let id = request.id as u64;
+    if !builder.is_completed() {
+        return Ok(());
+    }
+
+    let extensions = request
+        .extensions
+        .ok_or_else(|| Error::from(ErrorKind::InvalidInput))?;
+    let dt_ext = extensions
+        .get(EXTENSION_KEY)
+        .ok_or_else(|| Error::from(ErrorKind::InvalidInput))?;
+    let dt_req = TransferMessage::unmarshal_cbor(&dt_ext).map_err(io_err)?;
+    let id = dt_req
+        .request
+        .ok_or_else(|| Error::from(ErrorKind::InvalidInput))?
+        .transfer_id;
     let voucher = DealResponse::Pull {
         id,
         status: DealStatus::Completed,
